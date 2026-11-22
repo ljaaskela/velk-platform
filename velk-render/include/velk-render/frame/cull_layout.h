@@ -201,8 +201,9 @@ namespace velk {
     X(cp, gp, All, ALL, 1)                      /* 1 when everything counts as changed */      \
     X(cp, gp, Changes, CHANGES, 4)
 
-/// A change (kChange, VELK_CHANGE): a box in the world, and the light that changed, or
-/// kLightNone for something in the box that moved, came or went.
+/// A change (kChange, VELK_CHANGE): a box in the world, and the light that changed, with
+/// kLightChangeSmall when it only moved and by less than its size, or kLightNone for something in
+/// the box that moved, came or went.
 #define VELK_CHANGE(X, cp, gp)                                                                     \
     X(cp, gp, Min, MIN, 0)                      /* three floats */                             \
     X(cp, gp, Light, LIGHT, 3)                                                                 \

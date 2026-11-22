@@ -2441,6 +2441,9 @@ inline constexpr uint32_t kLightChangeHeaderWords = kChangeListChanges;
 inline constexpr uint32_t kLightChangeWords = kChangeWords;
 /// The most changes a frame lists; more count as everything changed.
 inline constexpr uint32_t kLightChanges = 128;
+/// On a change's light (kChangeLight): it only moved, by less than its size, so that what its
+/// points have of it is a good start (VELK_LIGHT_BLOCKER_STALE) rather than none.
+inline constexpr uint32_t kLightChangeSmall = 0x40000000u;
 
 /**
  * Makes the light of each kept cut record that a change this frame could alter due again, a
@@ -2455,6 +2458,8 @@ inline constexpr string_view light_changes_main_src = R"(
 #define VELK_LIGHT_WORDS velk_light_cell_words
 )" VELK_LIGHT_POOL_GLSL VELK_LIGHT_SLOTS_GLSL R"(
 #define VELK_CHANGES_MAX 128u
+// kLightChangeSmall.
+#define VELK_CHANGE_SMALL 0x40000000u
 
 vec3 velk_change_vec3(uint at)
 {
@@ -2489,10 +2494,17 @@ bool velk_change_in_way(vec3 center, float radius, Light light, vec3 lo, vec3 hi
     return leave >= max(enter, 0.0) && enter <= t_max;
 }
 
+// A change's light (VELK_CHANGE_LIGHT) without its VELK_CHANGE_SMALL, VELK_LIGHT_NONE for a box.
+uint velk_change_light(uint word)
+{
+    return word == VELK_LIGHT_NONE ? word : word & ~VELK_CHANGE_SMALL;
+}
+
 // The slots of `slots` whose light a change this frame could alter at a sphere at `center`
 // (relative to the camera) of `radius`, a bit each: a change of that light, or a box in the way
-// to it.
-uint velk_change_slots(uint changes, vec3 center, float radius, uint slots[VELK_LIGHT_SLOTS])
+// to it. `hard` those of them a change other than a small move of their light alters
+// (VELK_CHANGE_SMALL): what the points have of those is no start for their next rays.
+uint velk_change_slots(uint changes, vec3 center, float radius, uint slots[VELK_LIGHT_SLOTS], out uint hard)
 {
     vec3 cam = VELK_GLOBALS.cam_pos.xyz;
     uint lit = 0u;
@@ -2500,19 +2512,23 @@ uint velk_change_slots(uint changes, vec3 center, float radius, uint slots[VELK_
         if (slots[s] != VELK_LIGHT_NONE) lit |= 1u << s;
     }
     uint altered = 0u;
+    hard = 0u;
     uint count = min(VELK_LIGHT_WORDS.data[changes + VELK_CHANGE_LIST_COUNT], VELK_CHANGES_MAX);
-    for (uint k = 0u; k < count && altered != lit; ++k) {
+    for (uint k = 0u; k < count && hard != lit; ++k) {
         uint w = changes + VELK_CHANGE_LIST_CHANGES + k * VELK_CHANGE_WORDS;
-        uint light = VELK_LIGHT_WORDS.data[w + VELK_CHANGE_LIGHT];
+        uint word = VELK_LIGHT_WORDS.data[w + VELK_CHANGE_LIGHT];
+        uint light = velk_change_light(word);
+        bool small = light != VELK_LIGHT_NONE && (word & VELK_CHANGE_SMALL) != 0u;
         vec3 lo = velk_change_vec3(w + VELK_CHANGE_MIN) - cam;
         vec3 hi = velk_change_vec3(w + VELK_CHANGE_MAX) - cam;
         for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) {
-            if (slots[s] == VELK_LIGHT_NONE || (altered & (1u << s)) != 0u) continue;
-            if (light != VELK_LIGHT_NONE) {
-                if (slots[s] == light) altered |= 1u << s;
-                continue;
-            }
-            if (velk_change_in_way(center, radius, velk_light_at(pc.lights_base + slots[s]), lo, hi)) altered |= 1u << s;
+            if (slots[s] == VELK_LIGHT_NONE || (hard & (1u << s)) != 0u) continue;
+            bool hit = light != VELK_LIGHT_NONE
+                         ? slots[s] == light
+                         : velk_change_in_way(center, radius, velk_light_at(pc.lights_base + slots[s]), lo, hi);
+            if (!hit) continue;
+            altered |= 1u << s;
+            if (!small) hard |= 1u << s;
         }
     }
     return altered;
@@ -2522,7 +2538,8 @@ uint velk_change_slots(uint changes, vec3 center, float radius, uint slots[VELK_
 // camera) of `radius`, which uses the lights `slots`.
 bool velk_change_alters(uint changes, vec3 center, float radius, uint slots[VELK_LIGHT_SLOTS])
 {
-    return velk_change_slots(changes, center, radius, slots) != 0u;
+    uint hard;
+    return velk_change_slots(changes, center, radius, slots, hard) != 0u;
 }
 
 // The slots of `slots` with a light, a bit each.
@@ -2535,13 +2552,15 @@ uint velk_change_lit(uint slots[VELK_LIGHT_SLOTS])
     return lit;
 }
 
-// Blocker codes `codes` with the slots of `bits` made stale (VELK_LIGHT_BLOCKER_STALE), those not
-// traced yet left so: their first ray still replaces what they have.
-uint velk_change_stale(uint codes, uint bits)
+// Blocker codes `codes` with the slots of `bits` made due: those of `hard` untraced
+// (VELK_LIGHT_BLOCKER_UNTRACED), their next ray replacing what they have; the rest stale
+// (VELK_LIGHT_BLOCKER_STALE), those not traced yet left so.
+uint velk_change_stale(uint codes, uint bits, uint hard)
 {
     for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) {
         if ((bits & (1u << s)) == 0u || ((codes >> (4u * s)) & 15u) == VELK_LIGHT_BLOCKER_UNTRACED) continue;
-        codes = (codes & ~(15u << (4u * s))) | (VELK_LIGHT_BLOCKER_STALE << (4u * s));
+        uint code = (hard & (1u << s)) != 0u ? VELK_LIGHT_BLOCKER_UNTRACED : VELK_LIGHT_BLOCKER_STALE;
+        codes = (codes & ~(15u << (4u * s))) | (code << (4u * s));
     }
     return codes;
 }
@@ -2574,7 +2593,7 @@ bool velk_change_enters(uint changes, vec3 center, float radius, inout uint slot
     bool entered = false;
     uint count = min(VELK_LIGHT_WORDS.data[changes + VELK_CHANGE_LIST_COUNT], VELK_CHANGES_MAX);
     for (uint k = 0u; k < count; ++k) {
-        uint light = VELK_LIGHT_WORDS.data[changes + VELK_CHANGE_LIST_CHANGES + k * VELK_CHANGE_WORDS + VELK_CHANGE_LIGHT];
+        uint light = velk_change_light(VELK_LIGHT_WORDS.data[changes + VELK_CHANGE_LIST_CHANGES + k * VELK_CHANGE_WORDS + VELK_CHANGE_LIGHT]);
         if (light == VELK_LIGHT_NONE) continue;
         float strength = velk_change_strength(velk_light_at(pc.lights_base + light), center, radius);
         bool kept = false;
@@ -2660,18 +2679,18 @@ void velk_change_pieces(uint pool, uint changes, uint page)
     float radius = max(max(length(p0 - center), length(p1 - center)), length(p2 - center)) * (1.0 + 0.5 / float(n));
     uint slots[VELK_LIGHT_SLOTS];
     for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) slots[s] = VELK_LIGHT_WORDS.data[first + VELK_PAGE_SLOTS + s];
-    uint altered = velk_change_slots(changes, center, radius, slots);
+    uint hard;
+    uint altered = velk_change_slots(changes, center, radius, slots, hard);
     if (altered == 0u) return;
-    // All its lights, or all its record's: its points stale, traced from none again. Some: those
-    // lights stale at its points (velk_change_stale), which keep the rest, and what they had of
-    // those for warm-up rays to move from.
-    if (altered == velk_change_lit(slots) || VELK_LIGHT_WORDS.data[first + VELK_PAGE_CHANGED] == now) {
+    // All its lights, not all by small moves, or all its record's: its points stale, traced from
+    // none again. Else those lights due at its points (velk_change_stale), which keep the rest.
+    if ((altered == velk_change_lit(slots) && hard != 0u) || VELK_LIGHT_WORDS.data[first + VELK_PAGE_CHANGED] == now) {
         VELK_LIGHT_WORDS.data[velk_piece_changed_word(pool, page)] = now;
         return;
     }
     for (uint q = 0u; q < VELK_PIECE_POINTS; ++q) {
         uint bw = velk_light_page_blocker(pool, page, 2u * q);
-        VELK_LIGHT_WORDS.data[bw] = velk_change_stale(VELK_LIGHT_WORDS.data[bw], altered);
+        VELK_LIGHT_WORDS.data[bw] = velk_change_stale(VELK_LIGHT_WORDS.data[bw], altered, hard);
     }
 }
 
@@ -2773,13 +2792,15 @@ void main()
             atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_LEFT_OUT_QUARTER], 1u);
         }
     }
-    uint altered = all || entered ? velk_change_lit(slots) : velk_change_slots(changes, center, radius, slots);
+    uint hard = 0u;
+    uint altered = all || entered ? velk_change_lit(slots) : velk_change_slots(changes, center, radius, slots, hard);
     if (!all && !entered && altered == 0u) return;
     atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_CHANGED], 1u);
     uint lit = velk_change_lit(slots);
-    if (own_points && !all && !entered && altered != lit) {
-        // Some of its lights: those stale at its vertices' points (velk_change_stale), which keep
-        // the rest, and what they had of those for warm-up rays to move from; its
+    if (own_points && !all && !entered && (altered != lit || hard == 0u)) {
+        // Some of its lights, or all only by small moves: those due at its vertices' points
+        // (velk_change_stale), which keep the rest, and what they had of the small ones for
+        // warm-up rays to move from; its
         // pieces likewise as far as the change is in their way (the pieces pass, pc.mode 1). Its
         // coarse light stays: its points are trusted, and a coarse light's rays (eight a light)
         // every frame a light moves would take the budget from them.
@@ -2789,7 +2810,7 @@ void main()
         uint points = velk_light_own_points(first);
         for (uint p = 0u; p < points; ++p) {
             uint bw = velk_light_blocker_word(pool, first, p);
-            VELK_LIGHT_WORDS.data[bw] = velk_change_stale(VELK_LIGHT_WORDS.data[bw], altered);
+            VELK_LIGHT_WORDS.data[bw] = velk_change_stale(VELK_LIGHT_WORDS.data[bw], altered, hard);
         }
         return;
     }

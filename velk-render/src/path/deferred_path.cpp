@@ -1231,7 +1231,11 @@ void DeferredPath::emit_light_changes_pass(ViewState& vs, const RenderView& rend
             all_lights = true;
             break;
         }
-        changed_lights.push_back(static_cast<uint32_t>(i));
+        // Only moved, by less than its size: what points have of it is a good start for their
+        // next rays (kLightChangeSmall).
+        const bool small = same_kind && b.params[3] > 0.f && moved < b.params[3] * b.params[3]
+                        && std::abs(now - was) <= std::max(was, now) / 16.f;
+        changed_lights.push_back(static_cast<uint32_t>(i) | (small ? kLightChangeSmall : 0u));
         listed[i] = b;
     }
     vs.lights_moved = all_lights || !changed_lights.empty();
@@ -1242,7 +1246,10 @@ void DeferredPath::emit_light_changes_pass(ViewState& vs, const RenderView& rend
         all = true;
     }
     if (!all) {
-        for (uint32_t i : changed_lights) add(lights[i].position, lights[i].position, i);
+        for (uint32_t i : changed_lights) {
+            const GpuLight& light = lights[i & ~kLightChangeSmall];
+            add(light.position, light.position, i);
+        }
         const uint32_t room = kLightChanges - count;
         for (size_t b = 0; b < boxes.size(); ++b) {
             if (b < room) {
