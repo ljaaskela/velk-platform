@@ -5,7 +5,7 @@
 #include <velk/interface/resource/intf_resource.h>
 
 #include <filesystem>
-#include <json_parser.h>
+#include <velk/json.h>
 #include <system_error>
 
 namespace velk::impl {

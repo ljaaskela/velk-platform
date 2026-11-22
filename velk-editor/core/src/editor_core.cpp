@@ -6,9 +6,13 @@
 #include <velk/plugins/importer/plugin.h>
 #include <velk/api/state.h>
 #include <velk/api/velk.h>
+#include <velk/json.h>
 
 #include <cstdio>
+#include <chrono>
 #include <cstring>
+#include <memory>
+#include <thread>
 
 namespace velk::editor {
 
@@ -229,6 +233,20 @@ string EditorCore::description_json(const RemoteDescription& d) const
         out += ",\"hierarchy_root\":";
         append_number(out, d.hierarchy_root.handle);
     }
+    if (editing_) {
+        // Where the object comes from, and the values its file sets.
+        if (const Source* src = source_of(d.handle)) {
+            out += ",\"source\":";
+            append_quoted(out, src->source);
+            out += ",\"entry\":";
+            append_quoted(out, src->entry);
+            const JsonValue* authored = document_.properties(src->source, src->entry);
+            out += ",\"authored\":";
+            out += authored ? json_write_inline(*authored) : string("{}");
+        } else {
+            out += ",\"runtime\":true";
+        }
+    }
     out += "}";
     return out;
 }
@@ -251,32 +269,321 @@ IFuture::Ptr EditorCore::fn_describe(uint64_t object)
     return future;
 }
 
-IFuture::Ptr EditorCore::fn_set(uint64_t object, string name, string json)
+namespace {
+
+/// A command of apply(), resolved.
+struct Command
+{
+    RemoteHandle object = 0;
+    string name;
+    bool reset = false;
+    JsonValue value;
+    RemoteValue live; ///< The value to write.
+    RemoteValue live_before;
+};
+
+/// An apply() in progress.
+struct Applying
+{
+    explicit Applying(const IFuture::Ptr& future) : promise(future) {}
+    vector<Command> commands;
+    Promise promise;
+};
+
+string error_json(string_view message)
+{
+    string out = "{\"error\":";
+    json_quote(out, message);
+    out += "}";
+    return out;
+}
+
+string handle_text(RemoteHandle h)
+{
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "#%llu", static_cast<unsigned long long>(h));
+    return string(string_view(buf, std::strlen(buf)));
+}
+
+/// True for a store-file value that is not a plain value: a binding or a reference.
+bool is_link(const JsonValue& v)
+{
+    return v.find("bind") || v.find("ref");
+}
+
+} // namespace
+
+const EditorCore::Source* EditorCore::source_of(RemoteHandle object) const
+{
+    auto it = sources_.find(object);
+    return it != sources_.end() ? &it->second : nullptr;
+}
+
+IFuture::Ptr EditorCore::fn_apply(string commands)
 {
     IFuture::Ptr future = instance().create_future();
-    Promise promise(future);
+    auto state = std::make_shared<Applying>(future);
+    auto fail = [&](string_view message) {
+        state->promise.set_value(error_json(message));
+        return future;
+    };
     if (!client_ || !client_.is_connected()) {
-        promise.set_value(ReturnValue::Fail);
+        return fail("not attached");
+    }
+    JsonValue list;
+    string parse_error;
+    if (!json_parse(commands, list, parse_error) || !list.is_array()) {
+        return fail(parse_error.empty() ? string_view("commands: expected a JSON array") : string_view(parse_error));
+    }
+    for (auto& c : list.as_array()) {
+        Command cmd;
+        const string_view op = c["op"].type() == JsonType::String ? string_view(c["op"].as_string()) : string_view();
+        cmd.object = static_cast<RemoteHandle>(c["object"].as_number());
+        cmd.name = c["name"].as_string();
+        if ((op != "set" && op != "reset") || !cmd.object || cmd.name.empty()) {
+            return fail("each command needs op (set or reset), object and name");
+        }
+        cmd.reset = op == "reset";
+        if (!cmd.reset) {
+            if (!c.find("value")) {
+                return fail("set needs a value");
+            }
+            cmd.value = c["value"];
+        }
+        if (editing_) {
+            const Source* src = source_of(cmd.object);
+            if (!src) {
+                return fail(handle_text(cmd.object) + " was created at runtime; its changes are not kept");
+            }
+            const JsonValue* current = document_.get(src->source, src->entry, cmd.name);
+            if (current && is_link(*current)) {
+                return fail(cmd.name + " of " + handle_text(cmd.object) + " is bound or a reference in "
+                            + src->entry);
+            }
+        } else if (cmd.reset) {
+            return fail("reset needs a launched application");
+        }
+        state->commands.push_back(std::move(cmd));
+    }
+    if (state->commands.empty()) {
+        state->promise.set_value(string("{\"ok\":true}"));
         return future;
     }
-    // The property's type comes from its current value.
+
+    // Read the current values: their types, and what undo writes back.
+    vector<RemotePropertyName> names;
+    for (auto& c : state->commands) {
+        names.push_back({c.object, c.name});
+    }
     IEditorCore::WeakPtr weak = get_self<IEditorCore>();
-    const RemotePropertyName names[] = {{object, name}};
-    client_.get(names).then([weak, promise, object, name, json](const RemotePropertyValues& got) mutable {
+    client_.get(names).then([weak, state](const RemotePropertyValues& got) {
         auto self = weak.lock();
         auto* core = static_cast<EditorCore*>(self.get());
-        RemoteValue value;
-        if (!core || got.items.empty() || failed(got.items[0].status)
-            || !core->json_value(json, got.items[0].value.type, value)) {
-            promise.set_value(ReturnValue::Fail);
+        if (!core) {
+            state->promise.set_value(error_json("the core is gone"));
             return;
         }
-        const RemotePropertyValue values[] = {{object, name, {}, value}};
-        core->client_.set(values).then([promise](const RemoteResults& results) mutable {
-            promise.set_value(results.items.empty() ? ReturnValue::Fail : results.items[0]);
+        if (got.items.size() != state->commands.size()) {
+            state->promise.set_value(error_json("cannot read the properties"));
+            return;
+        }
+        vector<Uid> reset_classes;
+        for (size_t i = 0; i < state->commands.size(); ++i) {
+            auto& c = state->commands[i];
+            if (failed(got.items[i].status)) {
+                state->promise.set_value(error_json(handle_text(c.object) + " has no property " + c.name));
+                return;
+            }
+            c.live_before = got.items[i].value;
+            if (c.reset) {
+                auto cls = core->classes_.find(c.object);
+                if (cls == core->classes_.end()) {
+                    state->promise.set_value(error_json(handle_text(c.object) + ": class unknown"));
+                    return;
+                }
+                reset_classes.push_back(cls->second);
+            } else if (!core->json_value(json_write_inline(c.value), c.live_before.type, c.live)) {
+                state->promise.set_value(error_json(json_write_inline(c.value) + " is not a value of " + c.name));
+                return;
+            }
+        }
+        auto commit = [weak, state]() {
+            auto self = weak.lock();
+            auto* core = static_cast<EditorCore*>(self.get());
+            if (!core) {
+                state->promise.set_value(error_json("the core is gone"));
+                return;
+            }
+            Step step;
+            for (auto& c : state->commands) {
+                Change ch;
+                ch.object = c.object;
+                ch.name = c.name;
+                ch.live_before = c.live_before;
+                ch.live_after = c.live;
+                if (const Source* src = core->source_of(c.object)) {
+                    ch.source = src->source;
+                    ch.entry = src->entry;
+                    if (const JsonValue* before = core->document_.get(ch.source, ch.entry, ch.name)) {
+                        ch.had_before = true;
+                        ch.before = *before;
+                    }
+                }
+                ch.has_after = !c.reset;
+                ch.after = c.value;
+                step.push_back(std::move(ch));
+            }
+            if (core->editing_) {
+                core->put_document(step, true);
+            }
+            vector<RemotePropertyValue> values;
+            for (auto& c : state->commands) {
+                values.push_back({c.object, c.name, {}, c.live});
+            }
+            core->client_.set(values).then([weak, state, step](const RemoteResults& results) mutable {
+                auto self = weak.lock();
+                auto* core = static_cast<EditorCore*>(self.get());
+                if (!core) {
+                    state->promise.set_value(error_json("the core is gone"));
+                    return;
+                }
+                for (size_t i = 0; i < step.size(); ++i) {
+                    if (i >= results.items.size() || failed(results.items[i])) {
+                        // Take back the document side and the live writes that went through.
+                        if (core->editing_) {
+                            core->put_document(step, false);
+                        }
+                        vector<RemotePropertyValue> back;
+                        for (size_t j = 0; j < step.size() && j < results.items.size(); ++j) {
+                            if (succeeded(results.items[j])) {
+                                back.push_back({step[j].object, step[j].name, {}, step[j].live_before});
+                            }
+                        }
+                        if (!back.empty()) {
+                            core->client_.set(back);
+                        }
+                        state->promise.set_value(
+                            error_json("cannot set " + step[i].name + " of " + handle_text(step[i].object)));
+                        return;
+                    }
+                }
+                if (core->editing_) {
+                    core->undo_.push_back(std::move(step));
+                    core->redo_.clear();
+                    core->history_changed();
+                }
+                state->promise.set_value(string("{\"ok\":true}"));
+            });
+        };
+        if (reset_classes.empty()) {
+            commit();
+            return;
+        }
+        // Reset writes the class default: read it from a new object of the class.
+        core->client_.create(reset_classes).then([weak, state, commit](const RemoteObjects& created) {
+            auto self = weak.lock();
+            auto* core = static_cast<EditorCore*>(self.get());
+            if (!core) {
+                state->promise.set_value(error_json("the core is gone"));
+                return;
+            }
+            vector<RemotePropertyName> defaults;
+            vector<RemoteHandle> temps;
+            size_t k = 0;
+            for (auto& c : state->commands) {
+                if (c.reset) {
+                    const RemoteHandle temp = k < created.items.size() ? created.items[k].handle : 0;
+                    ++k;
+                    defaults.push_back({temp, c.name});
+                    if (temp) {
+                        temps.push_back(temp);
+                    }
+                }
+            }
+            core->client_.get(defaults).then([weak, state, commit, temps](const RemotePropertyValues& got) {
+                auto self = weak.lock();
+                auto* core = static_cast<EditorCore*>(self.get());
+                if (core) {
+                    core->client_.release(temps);
+                }
+                size_t k = 0;
+                for (auto& c : state->commands) {
+                    if (c.reset) {
+                        if (k >= got.items.size() || failed(got.items[k].status)) {
+                            state->promise.set_value(error_json("cannot read the default of " + c.name));
+                            return;
+                        }
+                        c.live = got.items[k].value;
+                        ++k;
+                    }
+                }
+                commit();
+            });
         });
     });
     return future;
+}
+
+void EditorCore::put_document(const Step& step, bool after)
+{
+    // Changes are written in order and taken back in reverse.
+    const size_t n = step.size();
+    for (size_t i = 0; i < n; ++i) {
+        const Change& c = after ? step[i] : step[n - 1 - i];
+        if (c.entry.empty()) {
+            continue;
+        }
+        const bool present = after ? c.has_after : c.had_before;
+        document_.put(c.source, c.entry, c.name, present ? (after ? &c.after : &c.before) : nullptr);
+    }
+}
+
+IFuture::Ptr EditorCore::replay(vector<Step>& from, vector<Step>& to, bool after)
+{
+    IFuture::Ptr future = instance().create_future();
+    Promise promise(future);
+    if (from.empty() || !client_ || !client_.is_connected()) {
+        promise.set_value(ReturnValue::Fail);
+        return future;
+    }
+    Step step = std::move(from.back());
+    from.pop_back();
+    put_document(step, after);
+    vector<RemotePropertyValue> values;
+    for (size_t i = 0; i < step.size(); ++i) {
+        const Change& c = after ? step[i] : step[step.size() - 1 - i];
+        values.push_back({c.object, c.name, {}, after ? c.live_after : c.live_before});
+    }
+    to.push_back(std::move(step));
+    history_changed();
+    client_.set(values).then([promise](const RemoteResults& results) mutable {
+        ReturnValue rv = ReturnValue::Success;
+        for (auto r : results.items) {
+            if (failed(r)) {
+                rv = ReturnValue::Fail;
+            }
+        }
+        promise.set_value(rv);
+    });
+    return future;
+}
+
+IFuture::Ptr EditorCore::fn_undo()
+{
+    return replay(undo_, redo_, false);
+}
+
+IFuture::Ptr EditorCore::fn_redo()
+{
+    return replay(redo_, undo_, true);
+}
+
+void EditorCore::history_changed()
+{
+    write_state<IEditorCore>(this, [&](IEditorCore::State& s) {
+        s.can_undo = !undo_.empty();
+        s.can_redo = !redo_.empty();
+    });
 }
 
 IFuture::Ptr EditorCore::fn_capture(uint32_t window)
@@ -323,8 +630,8 @@ EditorCore::EditorCore()
     write_state<IEditorCore>(this, [&](IEditorCore::State& s) { set_object_ref(s.tree, tree_); });
 }
 
-template <class T, class Step>
-void EditorCore::then(Future<T> future, Step step)
+template <class T, class Next>
+void EditorCore::then(Future<T> future, Next step)
 {
     IEditorCore::WeakPtr weak = get_self<IEditorCore>();
     const uint32_t generation = generation_;
@@ -340,6 +647,48 @@ void EditorCore::then(Future<T> future, Step step)
 ReturnValue EditorCore::fn_attach(string host, uint32_t port)
 {
     fn_detach();
+    return connect(host, port);
+}
+
+ReturnValue EditorCore::fn_launch(string folder)
+{
+    fn_detach();
+    const uint16_t port = free_port();
+#ifdef _WIN32
+    const string exe = executable_folder() + "velk_run.exe";
+#else
+    const string exe = executable_folder() + "velk_run";
+#endif
+    char port_text[8];
+    std::snprintf(port_text, sizeof(port_text), "%u", static_cast<unsigned>(port));
+    const vector<string> args{folder};
+    const vector<std::pair<string, string>> env{
+        {string("VELK_EDITOR_PORT"), string(string_view(port_text, std::strlen(port_text)))},
+        {string("VELK_TRACK_SOURCES"), string("1")}};
+    if (!port || !child_.start(exe, args, env)) {
+        VELK_LOG(E, "launch: cannot start %s", exe.c_str());
+        return ReturnValue::Fail;
+    }
+    // Wait for the endpoint to listen.
+    editing_ = true;
+    for (int i = 0; i < 100; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (!child_.running()) {
+            VELK_LOG(E, "launch: velk_run %s exited", folder.c_str());
+            break;
+        }
+        if (succeeded(connect("127.0.0.1", port))) {
+            write_state<IEditorCore>(this, [](IEditorCore::State& s) { s.editing = true; });
+            return ReturnValue::Success;
+        }
+    }
+    editing_ = false;
+    child_.kill();
+    return ReturnValue::Fail;
+}
+
+ReturnValue EditorCore::connect(string_view host, uint32_t port)
+{
     load_remote_plugin();
     client_ = create_remote_client();
     if (!client_ || failed(client_.connect(host, static_cast<uint16_t>(port)))) {
@@ -373,6 +722,7 @@ void EditorCore::fn_detach()
     }
     disconnected_ = {};
     client_ = {};
+    child_.kill();
     detached();
 }
 
@@ -384,9 +734,19 @@ void EditorCore::detached()
         tree_->clear();
         tree_->set_root(top_);
     }
+    app_ = 0;
+    editing_ = false;
+    sources_.clear();
+    classes_.clear();
+    document_.clear();
+    undo_.clear();
+    redo_.clear();
     write_state<IEditorCore>(this, [&](IEditorCore::State& s) {
         s.attached = false;
         s.target = {};
+        s.editing = false;
+        s.can_undo = false;
+        s.can_redo = false;
         ++s.revision;
     });
 }
@@ -407,6 +767,9 @@ void EditorCore::roots_read(const RemoteRoots& roots)
     vector<RemoteHandle> handles;
     for (auto& r : roots.items) {
         handles.push_back(r.object.handle);
+        if (r.name == "app") {
+            app_ = r.object.handle;
+        }
     }
     then(client_.describe(handles), &EditorCore::roots_described);
 }
@@ -486,7 +849,16 @@ void EditorCore::add_subtree(const IObject::Ptr& parent, RemoteHandle object)
 
 void EditorCore::objects_described(const RemoteDescriptions& described)
 {
+    classes_.clear();
     for (auto& d : described.items) {
+        if (d.alive) {
+            classes_[d.handle] = d.class_uid;
+            walk_->sourced.push_back(d.handle);
+        }
+        for (auto& a : d.attachments) {
+            classes_[a.handle] = a.class_uid;
+            walk_->sourced.push_back(a.handle);
+        }
         string label = d.alive ? d.class_name : string("(gone)");
         if (!d.attachments.empty()) {
             label += " [";
@@ -518,6 +890,46 @@ void EditorCore::objects_described(const RemoteDescriptions& described)
     }
     nodes_ = std::move(next_nodes_);
     next_nodes_.clear();
+    if (!editing_ || !app_ || walk_->sourced.empty()) {
+        walk_done();
+        return;
+    }
+    // Ask where each object and attachment comes from, in one round trip.
+    vector<RemoteCall> calls;
+    for (auto h : walk_->sourced) {
+        calls.push_back({app_, string("source"), {make_remote_reference(h)}});
+    }
+    then(client_.call(calls), &EditorCore::sources_read);
+}
+
+void EditorCore::sources_read(const RemoteCallResults& results)
+{
+    sources_.clear();
+    for (size_t i = 0; i < results.items.size() && i < walk_->sourced.size(); ++i) {
+        auto& v = results.items[i].value;
+        if (failed(results.items[i].status) || v.form != RemoteValue::Form::Array || v.elements.size() != 2) {
+            continue;
+        }
+        Source src;
+        if (!read_remote_value(v.elements[0], src.source) || !read_remote_value(v.elements[1], src.entry)) {
+            continue;
+        }
+        if (!document_.has(src.source)) {
+            string error;
+            if (!document_.load(src.source, error)) {
+                VELK_LOG(E, "editor core: %s", error.c_str());
+                continue;
+            }
+        }
+        if (document_.has_entry(src.source, src.entry)) {
+            sources_[walk_->sourced[i]] = std::move(src);
+        }
+    }
+    walk_done();
+}
+
+void EditorCore::walk_done()
+{
     walk_.reset();
     write_state<IEditorCore>(this, [](IEditorCore::State& s) { ++s.revision; });
 }

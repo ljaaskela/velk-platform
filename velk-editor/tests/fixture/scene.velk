@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "objects": [
+    { "id": "scene_root", "class": "velk-scene.Element" },
+    { "id": "camera", "class": "velk-scene.Element" },
+    { "id": "panel", "class": "velk-scene.Element" }
+  ],
+  "hierarchies": {
+    "scene": { "scene_root": ["camera", "panel"] }
+  },
+  "attachments": [
+    { "targets": ["camera"], "class": "velk-scene.Camera" },
+    { "id": "panel_size", "targets": ["panel"], "class": "velk-ui.FixedSize", "properties": { "width": "200px" } },
+    { "id": "panel_color", "targets": ["panel"], "class": "velk-ui.RectVisual", "properties": { "color": { "r": 0.2, "g": 0.4, "b": 0.8, "a": 1.0 } } }
+  ]
+}

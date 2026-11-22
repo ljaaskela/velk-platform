@@ -3,12 +3,19 @@ add_library(velk_editor_core SHARED
     src/core_plugin.cpp
     src/editor_core.h
     src/editor_core.cpp
+    src/document.h
+    src/document.cpp
+    src/process.h
+    src/process.cpp
     include/velk-editor/core/plugin.h
     include/velk-editor/core/intf_editor_core.h
 )
 
 # No velk-ui dependency: the core also runs headless.
 target_link_libraries(velk_editor_core PRIVATE velk)
+if(WIN32)
+    target_link_libraries(velk_editor_core PRIVATE ws2_32)
+endif()
 
 target_include_directories(velk_editor_core
     PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

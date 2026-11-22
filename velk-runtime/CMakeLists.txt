@@ -3,8 +3,6 @@ add_library(velk_runtime SHARED
     src/runtime_plugin.cpp
     src/application.h
     src/application.cpp
-    # The importer's JSON parser, for app.velk.
-    ${VELK_SOURCE_DIR}/velk/plugins/importer/src/json_parser.cpp
     include/velk-runtime/plugin.h
     include/velk-runtime/interface/intf_application.h
     include/velk-runtime/interface/intf_window.h
@@ -21,7 +19,6 @@ target_include_directories(velk_runtime
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
             ${CMAKE_SOURCE_DIR}/plugins/image/include
             ${CMAKE_SOURCE_DIR}/velk-editor/endpoint/include
-            ${VELK_SOURCE_DIR}/velk/plugins/importer/src
             $<TARGET_PROPERTY:velk_importer,INTERFACE_INCLUDE_DIRECTORIES>
 )
 

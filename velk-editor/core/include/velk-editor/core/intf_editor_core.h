@@ -39,13 +39,22 @@ public:
         (RPROP, string, target, {}),           ///< "host:port" of the attached application.
         (RPROP, ObjectRef, tree, {}),          ///< IHierarchy of IEditorNode: a top node, the published roots under it, their trees under them.
         (RPROP, uint32_t, revision, 0),        ///< Increases each time the tree is read again.
-        (FN, ReturnValue, attach, (string, host), (uint32_t, port)), ///< Attaches to an application's editor endpoint.
-        (FN, void, detach),                    ///< Closes the connection.
+        (RPROP, bool, editing, false),         ///< True when the application was launched for editing.
+        (RPROP, bool, can_undo, false),
+        (RPROP, bool, can_redo, false),
+        /// Attaches to an application's editor endpoint, for inspecting: changes are not kept.
+        (FN, ReturnValue, attach, (string, host), (uint32_t, port)),
+        /// Starts velk_run on the app.velk in @p folder with source tracking and attaches to it, for editing.
+        (FN, ReturnValue, launch, (string, folder)),
+        (FN, void, detach),                    ///< Closes the connection and ends a launched application.
         (FN, void, refresh),                   ///< Reads the tree again; ignored while a read runs.
         /// Resolves to a string: the object's class, properties with store-file JSON values, and attachments, as JSON.
         (FN, IFuture::Ptr, describe, (uint64_t, object)),
-        /// Sets a property from a store-file JSON value. Resolves to a ReturnValue.
-        (FN, IFuture::Ptr, set, (uint64_t, object), (string, name), (string, json)),
+        /// Applies a JSON list of commands as one undo step: {"op":"set","object":h,"name":n,"value":v}
+        /// and {"op":"reset","object":h,"name":n}. Resolves to a string: {"ok":true} or {"error":"..."}.
+        (FN, IFuture::Ptr, apply, (string, commands)),
+        (FN, IFuture::Ptr, undo),              ///< Resolves to a ReturnValue.
+        (FN, IFuture::Ptr, redo),              ///< Resolves to a ReturnValue.
         /// Resolves to vector<uint8_t>: the application window's last frame as PNG, empty on failure.
         (FN, IFuture::Ptr, capture, (uint32_t, window))
     )

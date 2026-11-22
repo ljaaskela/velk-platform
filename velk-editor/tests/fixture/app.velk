@@ -1,0 +1,6 @@
+{
+  "app": {
+    "store": "scene.velk",
+    "window": { "width": 320, "height": 240, "title": "editor core test" }
+  }
+}

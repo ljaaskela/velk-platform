@@ -1,10 +1,11 @@
 // velk_editor_mcp [service=PORT]
 //
 // MCP server (stdio) for AI agents. Talks to the core of a running editor on PORT (47900 by
-// default), or, with no editor running, to a core of its own. Tools: attach, tree, describe,
-// set, screenshot. Values are store-file JSON. Logs go to stderr; stdout carries only protocol.
+// default), or, with no editor running, to a core of its own. Tools: launch, attach, tree,
+// describe, apply, undo, redo, screenshot. Values are store-file JSON. Logs go to stderr; stdout
+// carries only protocol.
 
-#include "json_parser.h"
+#include <velk/json.h>
 
 #include <velk/api/future.h>
 #include <velk/api/velk.h>
@@ -33,73 +34,6 @@ using namespace velk;
 namespace {
 
 constexpr uint16_t kDefaultServicePort = 47900;
-
-// ---- JSON text helpers ----------------------------------------------------------------------
-
-void quote(string& out, string_view s)
-{
-    out += "\"";
-    for (char c : s) {
-        switch (c) {
-        case '"': out += "\\\""; break;
-        case '\\': out += "\\\\"; break;
-        case '\n': out += "\\n"; break;
-        case '\r': out += "\\r"; break;
-        case '\t': out += "\\t"; break;
-        default:
-            if (static_cast<unsigned char>(c) < 0x20) {
-                char buf[8];
-                std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned>(c));
-                out += string_view(buf, std::strlen(buf));
-            } else {
-                out += string_view(&c, 1);
-            }
-        }
-    }
-    out += "\"";
-}
-
-void number(string& out, double n)
-{
-    char buf[40];
-    std::snprintf(buf, sizeof(buf), "%.17g", n);
-    out += string_view(buf, std::strlen(buf));
-}
-
-/// @p v written back as JSON text, for values passed through to the core.
-void write_json(string& out, const JsonValue& v)
-{
-    switch (v.type()) {
-    case JsonType::Null: out += "null"; break;
-    case JsonType::Bool: out += v.as_bool() ? string_view("true") : string_view("false"); break;
-    case JsonType::Number: number(out, v.as_number()); break;
-    case JsonType::String: quote(out, v.as_string()); break;
-    case JsonType::Array: {
-        out += "[";
-        bool first = true;
-        for (auto& e : v.as_array()) {
-            if (!first) out += ",";
-            first = false;
-            write_json(out, e);
-        }
-        out += "]";
-        break;
-    }
-    case JsonType::Object: {
-        out += "{";
-        bool first = true;
-        for (auto& [k, e] : v.as_object()) {
-            if (!first) out += ",";
-            first = false;
-            quote(out, k);
-            out += ":";
-            write_json(out, e);
-        }
-        out += "}";
-        break;
-    }
-    }
-}
 
 string base64(const vector<uint8_t>& data)
 {
@@ -286,17 +220,20 @@ private:
 // ---- MCP ------------------------------------------------------------------------------------
 
 const char* kTools = R"([
-{"name":"attach","description":"Attach the editor core to an application started with its editor endpoint (VELK_EDITOR_PORT=port).","inputSchema":{"type":"object","properties":{"port":{"type":"integer"},"host":{"type":"string","description":"127.0.0.1 by default"}},"required":["port"]}},
+{"name":"launch","description":"Starts the application in a folder with an app.velk, for editing, and returns its object tree. describe then shows each object's source file, entry and authored values.","inputSchema":{"type":"object","properties":{"folder":{"type":"string"}},"required":["folder"]}},
+{"name":"attach","description":"Attach the editor core to an application started with its editor endpoint (VELK_EDITOR_PORT=port), for inspecting: changes are not kept.","inputSchema":{"type":"object","properties":{"port":{"type":"integer"},"host":{"type":"string","description":"127.0.0.1 by default"}},"required":["port"]}},
 {"name":"tree","description":"The attached application's object tree, one object per line, indented, with its handle after #.","inputSchema":{"type":"object","properties":{}}},
 {"name":"describe","description":"An object's class, its properties as store-file JSON values, which are read-only, and its attachments.","inputSchema":{"type":"object","properties":{"object":{"type":"integer","description":"Handle from tree or describe"}},"required":["object"]}},
-{"name":"set","description":"Sets a property to a store-file JSON value, for example \"240px\", \"center\", 1.5 or {\"r\":1,\"g\":0,\"b\":0,\"a\":1}.","inputSchema":{"type":"object","properties":{"object":{"type":"integer"},"name":{"type":"string"},"value":{}},"required":["object","name","value"]}},
+{"name":"apply","description":"Applies commands as one undo step. Each is {\"op\":\"set\",\"object\":handle,\"name\":property,\"value\":store-file JSON value, for example \"240px\", \"center\", 1.5 or {\"r\":1,\"g\":0,\"b\":0,\"a\":1}} or {\"op\":\"reset\",\"object\":handle,\"name\":property}, which removes the value from the file. After launch, changes go to the document and the application; after attach, to the application only.","inputSchema":{"type":"object","properties":{"commands":{"type":"array","items":{"type":"object"}}},"required":["commands"]}},
+{"name":"undo","description":"Takes back the last apply.","inputSchema":{"type":"object","properties":{}}},
+{"name":"redo","description":"Applies the last undone step again.","inputSchema":{"type":"object","properties":{}}},
 {"name":"screenshot","description":"The attached application's window as a PNG image.","inputSchema":{"type":"object","properties":{"window":{"type":"integer","description":"0 by default"}}}}
 ])";
 
 string text_result(string_view text, bool error = false)
 {
     string out = "{\"content\":[{\"type\":\"text\",\"text\":";
-    quote(out, text);
+    json_quote(out, text);
     out += "}]";
     if (error) {
         out += ",\"isError\":true";
@@ -319,6 +256,15 @@ string call_tool(Session& session, const string& name, const JsonValue& args)
         read_remote_value(r.value, rv);
         return succeeded(rv) ? text_result("attached") : text_result("cannot attach", true);
     }
+    if (name == "launch") {
+        auto r = session.call("launch", {make_remote_value(string_view(args["folder"].as_string()))}, 60);
+        ReturnValue rv = ReturnValue::Fail;
+        read_remote_value(r.value, rv);
+        if (failed(rv)) {
+            return text_result("cannot launch; see the server's log", true);
+        }
+        return text_result(session.tree_text());
+    }
     if (name == "tree") {
         return text_result(session.tree_text());
     }
@@ -329,15 +275,21 @@ string call_tool(Session& session, const string& name, const JsonValue& args)
         read_remote_value(r.value, text);
         return text_result(text.empty() ? string_view("null") : string_view(text));
     }
-    if (name == "set") {
-        const auto object = static_cast<uint64_t>(args["object"].as_number());
-        string json;
-        write_json(json, args["value"]);
-        auto r = session.call("set", {make_remote_value(object), make_remote_value(string_view(args["name"].as_string())),
-                                      make_remote_value(string_view(json))});
+    if (name == "apply") {
+        auto r = session.call("apply", {make_remote_value(string_view(json_write_inline(args["commands"])))});
+        string text;
+        read_remote_value(r.value, text);
+        if (text.empty()) {
+            return text_result("no reply from the core", true);
+        }
+        return text_result(text, text.find("\"error\"") != string::npos);
+    }
+    if (name == "undo" || name == "redo") {
+        auto r = session.call(name, {});
         ReturnValue rv = ReturnValue::Fail;
         read_remote_value(r.value, rv);
-        return succeeded(rv) ? text_result("set") : text_result("cannot set", true);
+        return succeeded(rv) ? text_result(name == "undo" ? string_view("undone") : string_view("redone"))
+                             : text_result(name == "undo" ? string_view("nothing to undo") : string_view("nothing to redo"), true);
     }
     if (name == "screenshot") {
         const auto window = static_cast<uint32_t>(args["window"].as_number());
@@ -356,7 +308,7 @@ string call_tool(Session& session, const string& name, const JsonValue& args)
 void respond(const JsonValue& id, string_view result_json, bool error = false)
 {
     string out = "{\"jsonrpc\":\"2.0\",\"id\":";
-    write_json(out, id);
+    out += json_write_inline(id);
     out += error ? string_view(",\"error\":") : string_view(",\"result\":");
     out += result_json;
     out += "}\n";
@@ -380,7 +332,7 @@ void handle(Session& session, const string& line)
         string result = "{\"protocolVersion\":";
         const auto& requested = message["params"]["protocolVersion"];
         if (requested.type() == JsonType::String) {
-            quote(result, requested.as_string());
+            json_quote(result, requested.as_string());
         } else {
             result += "\"2024-11-05\"";
         }
