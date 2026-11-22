@@ -5430,7 +5430,7 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
 
     // The light pool, with a segment to start, and more when records asked for pages that were
     // not there. Its pages are swept every frame, so a new segment's are free on the next.
-    if (!state.cuts.empty() && ensure_light_pool(state.light_pool, *arena, ctx.backend->device_memory_bytes())) {
+    if (!state.cuts.empty() && ensure_light_pool(state.light_pool, *arena, ctx.backend->device_memory_bytes(), ctx.backend->compute_fill_threads())) {
         LightPool& pool = state.light_pool;
         // Its budget in rays, by what the view's trace took: its passes' GPU time, the one values'
         // and the points'.
@@ -5445,6 +5445,7 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
         adjust_light_rays(pool, *arena, trace_ms, state.light_trace_ms);
         if (pool.segments.empty()) {
             grow_light_pool(pool, *arena, 1u);
+            VELK_LOG(I, "light pool: the trace fills the device at %u threads", pool.fill);
         } else if (ctx.present_counter >= pool.check_frame + 16u) {
             pool.check_frame = ctx.present_counter;
             // The most any frame since the last look asked for and did not get.

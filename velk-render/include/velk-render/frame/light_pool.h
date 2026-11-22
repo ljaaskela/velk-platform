@@ -294,7 +294,9 @@ inline constexpr uint32_t kLightMaxSegments = 64;
     X(SumMeshTris, SUM_MESH_TRIS, 174)           /* summed: and by triangles, four words */                          \
     X(MostPagesWanted, MOST_PAGES_WANTED, 178)   /* the most pages any frame asked for that were not there, since \
                                                     the pool was last grown or looked at */                          \
-    X(HeaderEnd, HEADER_END, 179)
+    X(FillThreads, FILL_THREADS, 179)            /* threads that fill the device (compute_fill_threads) */           \
+    X(SpreadLanes, SPREAD_LANES, 180)            /* the lanes this frame's points traced from none spread over */    \
+    X(HeaderEnd, HEADER_END, 181)
 
 #define VELK_LIGHT_POOL_CPP_WORD(cpp, glsl, word) inline constexpr uint32_t kLightPool##cpp = word;
 VELK_LIGHT_POOL_HEADER(VELK_LIGHT_POOL_CPP_WORD)
@@ -1555,8 +1557,8 @@ bool velk_light_direct(uint pool, uvec2 ids, vec3 b, vec3 at, float tri_size, fl
  * The light trace, three dispatches by VELK_LIGHT_TRACE_MODE: 1, a group that sizes the other two
  * from what the claims listed (their indirect args in the pool's header); 0, the one values on
  * the trace list (light_claim_src lists them), a group of threads each, eight rays a light from
- * its centre; 2, the points of light on the point lists: traced from none over pc.spare1 lanes
- * each, warm-ups a thread each (velk_points_trace_point). Built on the light grid's code
+ * its centre; 2, the points of light on the point lists: traced from none over the lanes pc.spare1
+ * gives each, warm-ups a thread each (velk_points_trace_point). Built on the light grid's code
  * (light_grid_src), whose velk_light_cell_words is the culling arena; pc.spare3 is the pool.
  */
 #define VELK_LIGHT_TRACE_MAIN_GLSL R"(
@@ -1780,8 +1782,8 @@ void velk_points_takes(uint pool, out uint counts[4], out uint takes[4])
 // The threads of a work group of the trace.
 #define VELK_LIGHT_TRACE_THREADS 64u
 
-// The lanes a point traced from none spreads its rays over, when it does: one a ray, four a light
-// slot (VELK_LIGHT_SLOTS of them), so that a light's rays are on lanes side by side.
+// The most lanes a point traced from none spreads its rays over: one a ray, four a light slot
+// (VELK_LIGHT_SLOTS of them), so that a light's rays are on lanes side by side.
 #define VELK_LIGHT_RAY_LANES 32u
 
 // What a point traced from none with its rays spread over its lanes leaves for the first of them
@@ -1809,12 +1811,13 @@ void velk_points_store(uint pw, uint bw, uint value, uint blockers, uint traces,
 }
 
 // Traces the point of light at place `i` of the frame's points to trace (velk_points_takes'
-// `counts` and `takes`), on lane `lane` of `lanes` the point has, 1 or VELK_LIGHT_RAY_LANES:
-// alone, a lane does all of it and stores it; spread, a point traced from none casts one ray a
-// lane, its slot's lane / 4 and its ray's lane % 4, and leaves it in the s_ray arrays at
-// `group_lane`, which velk_points_store_spread puts together.
+// `counts` and `takes`), on lane `lane` of `lanes` the point has, `per_slot` of them a slot: alone,
+// a lane does all of it and stores it; spread, a point traced from none casts one ray a lane, its
+// slot's lane / per_slot and its ray's lane % per_slot, and leaves it in the s_ray arrays at
+// `group_lane`, which velk_points_store_spread puts together. A slot past lanes / per_slot is
+// not traced spread; slots are kept in front, so only a light the last changes missed is there.
 void velk_points_trace_point(uint pool, uint i, uint frame, uint counts[4], uint takes[4], uint lane, uint lanes,
-                             uint group_lane)
+                             uint per_slot, uint group_lane)
 {
     GlobalData g = VELK_GLOBALS;
     uint from_none = max(pc.spare6, 1u);
@@ -1950,11 +1953,11 @@ void velk_points_trace_point(uint pool, uint i, uint frame, uint counts[4], uint
             Light l = velk_light_at(pc.lights_base + slots[s]);
             uint rays = l.params.w > 0.0 || l.flags.x == 3u ? 4u : 1u;
             four = four || rays == 4u;
-            if (spread && s != lane / 4u) continue;
+            if (spread && s != lane / per_slot) continue;
             float sum = 0.0;
             float nearest = 1e30;
             for (uint j = 0u; j < rays; ++j) {
-                if (spread && j != lane % 4u) continue;
+                if (spread && j != lane % per_slot) continue;
                 if (!restart) ++g_first_rays;
                 vec3 pj = p;
                 vec3 nj = n;
@@ -1967,7 +1970,7 @@ void velk_points_trace_point(uint pool, uint i, uint frame, uint counts[4], uint
             if (spread) {
                 s_ray_blocked[group_lane] = sum;
                 s_ray_nearest[group_lane] = nearest;
-                if (lane % 4u == 0u) s_ray_count[group_lane] = rays;
+                if (lane % per_slot == 0u) s_ray_count[group_lane] = rays;
             } else {
                 value |= uint(sum / float(rays) * 15.0 + 0.5) << (4u * s);
                 if (nearest < 1e29) blockers |= velk_light_blocker_code(nearest) << (4u * s);
@@ -2014,23 +2017,23 @@ void velk_points_trace_point(uint pool, uint i, uint frame, uint counts[4], uint
     velk_points_store(pw, bw, value, blockers, traces + 1u, state, frame);
 }
 
-// Puts together and stores the point whose VELK_LIGHT_RAY_LANES lanes start at `group_lane` of the
-// work group, after a barrier: each light's share blocked, the mean of its rays, and its nearest
-// blocker, from the lanes of its rays; the rest as its first lane left it. Nothing when it had no
-// point.
-void velk_points_store_spread(uint group_lane)
+// Puts together and stores the point whose `lanes` lanes, `per_slot` a slot, start at `group_lane`
+// of the work group, after a barrier: each light's share blocked, the mean of its rays, and its
+// nearest blocker, from the lanes of its rays; the rest as its first lane left it. Nothing when it
+// had no point.
+void velk_points_store_spread(uint group_lane, uint lanes, uint per_slot)
 {
     uint pw = s_point_word[group_lane];
     if (pw == VELK_LIGHT_NONE) return;
     uint value = 0u;
     uint blockers = 0u;
-    for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) {
-        uint first = group_lane + 4u * s;
+    for (uint s = 0u; s < lanes / per_slot; ++s) {
+        uint first = group_lane + per_slot * s;
         uint rays = s_ray_count[first];
         if (rays == 0u) continue;
         float sum = 0.0;
         float nearest = 1e30;
-        for (uint j = 0u; j < 4u; ++j) {
+        for (uint j = 0u; j < per_slot; ++j) {
             sum += s_ray_blocked[first + j];
             nearest = min(nearest, s_ray_nearest[first + j]);
         }
@@ -2053,10 +2056,11 @@ void main()
     uint pool = pc.spare3;
     uint index = gl_WorkGroupID.x;
     uint lane = gl_LocalInvocationIndex;
-    // The lanes a point traced from none spreads its rays over: VELK_LIGHT_RAY_LANES when pc.spare1
-    // says so, else one.
-    uint lanes = pc.spare1 >= VELK_LIGHT_RAY_LANES ? VELK_LIGHT_RAY_LANES : 1u;
-    uint per_group = VELK_LIGHT_TRACE_THREADS / lanes;
+    // The lanes a point traced from none spreads its rays over at most, a ray each: a power of
+    // two up to VELK_LIGHT_RAY_LANES (pc.spare1's low byte), and those of a light slot (its next
+    // byte).
+    uint most_lanes = clamp(pc.spare1 & 0xFFu, 1u, VELK_LIGHT_RAY_LANES);
+    uint per_slot = clamp((pc.spare1 >> 8u) & 0xFFu, 1u, 4u);
 #if VELK_LIGHT_TRACE_MODE == 1
     // The dispatches' sizes (a group): the trace list's, a group a one value, and the point
     // lists' from the points each traces this frame (velk_points_takes), kept for them.
@@ -2065,6 +2069,12 @@ void main()
         uint counts[4];
         uint takes[4];
         velk_points_takes(pool, counts, takes);
+        // Points traced from none spread their rays over their lanes while that many lanes still
+        // fit in the threads that fill the device, which would otherwise wait on the longest of
+        // them walking all its rays; more, a lane each, which spares repeating a point's setup.
+        uint lanes = (takes[0] + takes[1] + takes[2]) * most_lanes <= VELK_LIGHT_WORDS.data[pool + VELK_POOL_FILL_THREADS] ? most_lanes : 1u;
+        uint per_group = VELK_LIGHT_TRACE_THREADS / lanes;
+        VELK_LIGHT_WORDS.data[pool + VELK_POOL_SPREAD_LANES] = lanes;
         // No more points traced from none than a dispatch's groups hold, next to the warm-ups'
         // (at most VELK_LIGHT_POINT_CAPACITY / 64 groups): those past it wait, the latest lists'.
         uint room = (65535u - VELK_LIGHT_POINT_CAPACITY / VELK_LIGHT_TRACE_THREADS) * per_group;
@@ -2099,6 +2109,9 @@ void main()
         }
         uint spread = takes[0] + takes[1] + takes[2];
         uint spread_groups = VELK_LIGHT_WORDS.data[pool + VELK_POOL_SPREAD_GROUPS];
+        // As the sizing chose: 1 or most_lanes, so that a point's lanes cover all its slots.
+        uint lanes = VELK_LIGHT_WORDS.data[pool + VELK_POOL_SPREAD_LANES] == 1u ? 1u : most_lanes;
+        uint per_group = VELK_LIGHT_TRACE_THREADS / lanes;
         uint group = index;
         uint frame = VELK_GLOBALS.present_counter;
         if (group < spread_groups) {
@@ -2109,13 +2122,13 @@ void main()
             memoryBarrierShared();
             barrier();
             uint point = group * per_group + lane / lanes;
-            if (point < spread) velk_points_trace_point(pool, point, frame, counts, takes, lane % lanes, lanes, lane);
+            if (point < spread) velk_points_trace_point(pool, point, frame, counts, takes, lane % lanes, lanes, per_slot, lane);
             memoryBarrierShared();
             barrier();
-            if (lanes > 1u && lane % lanes == 0u) velk_points_store_spread(lane);
+            if (lanes > 1u && lane % lanes == 0u) velk_points_store_spread(lane, lanes, per_slot);
         } else {
             uint point = spread + (group - spread_groups) * VELK_LIGHT_TRACE_THREADS + lane;
-            velk_points_trace_point(pool, point, frame, counts, takes, 0u, 1u, lane);
+            velk_points_trace_point(pool, point, frame, counts, takes, 0u, 1u, per_slot, lane);
         }
         velk_points_count(pool);
     }
@@ -4910,6 +4923,9 @@ struct LightPool
     uint64_t log_frame = 0;        ///< When its counts were last logged.
     uint32_t recorded_pages = 0;   ///< What the culling recording sweeps.
     float rays = kLightTraceRays;  ///< The trace's budget in rays a frame (adjust_light_rays).
+    /// Threads that fill the device (IRenderBackend::compute_fill_threads): a budget of fewer
+    /// rays leaves it idle and takes about as long, so it is the least the budget goes to.
+    uint32_t fill = 4096;
     float trace_ms = 0.f;          ///< The GPU time of its trace's last measured frame.
     float most_trace_ms = 0.f;     ///< And the most of it since its counts were last logged.
     uint32_t written_rays = kLightTraceRays; ///< What the header holds of it.
@@ -4923,12 +4939,13 @@ struct LightPool
 
 /// Makes @p pool's header on its first use, with a segment, and as many segments as
 /// @p device_bytes of device memory has room for at most: a thirty-second of it, up to
-/// kLightMaxSegments.
-inline bool ensure_light_pool(LightPool& pool, IGpuArena& arena, uint64_t device_bytes)
+/// kLightMaxSegments. @p fill_threads is IRenderBackend::compute_fill_threads.
+inline bool ensure_light_pool(LightPool& pool, IGpuArena& arena, uint64_t device_bytes, uint32_t fill_threads)
 {
     if (pool.header.valid()) {
         return true;
     }
+    pool.fill = fill_threads;
     constexpr uint64_t segment_bytes = uint64_t(kLightSegmentPages) * kLightSegmentWordsPerPage * sizeof(uint32_t);
     const uint64_t room = device_bytes != 0 ? device_bytes / 32u / segment_bytes : 1u;
     pool.max_segments = static_cast<uint32_t>(room < 1u ? 1u : room > kLightMaxSegments ? kLightMaxSegments : room);
@@ -4961,6 +4978,7 @@ inline bool ensure_light_pool(LightPool& pool, IGpuArena& arena, uint64_t device
     initial[kLightPoolSplitWord] = base + static_cast<uint32_t>(split_word);
     initial[kLightPoolTraceWord] = base + static_cast<uint32_t>(trace_word);
     initial[kLightPoolRayBudget] = kLightTraceRays;
+    initial[kLightPoolFillThreads] = fill_threads;
     initial[kLightPoolUntracedPointsWord] = base + static_cast<uint32_t>(points_word);
     initial[kLightPoolWarmupPointsWord] = base + static_cast<uint32_t>(points_word + point_list_words);
     initial[kLightPoolCoarsePointsWord] = base + static_cast<uint32_t>(points_word + 2u * point_list_words);
@@ -5000,8 +5018,9 @@ inline uint32_t grow_light_pool(LightPool& pool, IGpuArena& arena, uint32_t coun
 /// by @p trace_ms, what its trace took the last frame measured (0 when not known); no limit when
 /// @p target_ms is 0 or less. A quarter of the way up a frame, half of it down, at most twice or a
 /// quarter as much, as the time comes a frame or two late. It grows only while the frame's work
-/// used the budget, so
-/// that frames needing little do not leave a budget that heavier work would spend all at once.
+/// used the budget, so that frames needing little do not leave a budget that heavier work would
+/// spend all at once. Never under the threads that fill the device (LightPool::fill): fewer rays
+/// take about the time of the longest walk among them, so cutting them saves nothing.
 inline void adjust_light_rays(LightPool& pool, IGpuArena& arena, float trace_ms, float target_ms)
 {
     if (!pool.header.valid()) {
@@ -5024,7 +5043,8 @@ inline void adjust_light_rays(LightPool& pool, IGpuArena& arena, float trace_ms,
             }
             // Half the way down, a quarter up: a frame far over its time is cut back in a few.
             pool.rays *= 1.f + (scale < 1.f ? 0.5f : 0.25f) * (scale - 1.f);
-            pool.rays = pool.rays < 1024.f ? 1024.f : pool.rays > float(kLightTraceRaysUnlimited) ? float(kLightTraceRaysUnlimited) : pool.rays;
+            const float least = float(pool.fill);
+            pool.rays = pool.rays < least ? least : pool.rays > float(kLightTraceRaysUnlimited) ? float(kLightTraceRaysUnlimited) : pool.rays;
         }
         budget = static_cast<uint32_t>(pool.rays);
     }

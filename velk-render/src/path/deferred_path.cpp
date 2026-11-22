@@ -1408,11 +1408,14 @@ void DeferredPath::emit_light_claim_pass(ViewState& vs, const RenderView& render
     // The rays a first trace or restart is charged (velk_points_trace_point): one a lit light,
     // four with a size.
     trace_pc.spare6 = std::max(lights, 1u) * (sized ? 4u : 1u);
-    // Whether a point traced from none spreads its rays over lanes, a ray each (32,
-    // VELK_LIGHT_RAY_LANES), or casts them all on one (1): spread when it has some sixteen rays or
-    // more, so that no lane walks them all in a row, and fewer are not worth the point's setup
-    // each lane repeats.
-    trace_pc.spare1 = trace_pc.spare6 >= 16u ? 32u : 1u;
+    // The lanes a point traced from none spreads its rays over when the trace spreads them (while
+    // they would not fill the device), a ray each: as many as a slot has rays (four with a size,
+    // else one) for each lit light, rounded up to a power of two. Low byte the lanes, the next a
+    // slot's lanes.
+    const uint32_t per_slot = sized ? 4u : 1u;
+    uint32_t ray_lanes = 1u;
+    while (ray_lanes < std::max(lights, 1u) * per_slot) ray_lanes *= 2u;
+    trace_pc.spare1 = ray_lanes | (per_slot << 8u);
     // Recorded every frame: the trace follows the view's globals and lights.
     std::memcpy(vs.light_claim_recorded, &pc, sizeof(pc));
     const bool other = vs.instance_cull.chosen_by_other;

@@ -330,6 +330,11 @@ public:
     /// need. 0 when it cannot say.
     virtual uint64_t device_memory_bytes() const = 0;
 
+    /// How many compute threads in flight keep the device's compute units busy: fewer leave it
+    /// idle, so that work taking that many or fewer costs about the time of its longest thread.
+    /// A middling count when the device cannot say.
+    virtual uint32_t compute_fill_threads() const = 0;
+
     /// How much GPU memory this process holds now, in bytes, over all of the device's heaps:
     /// every buffer and image the backend allocated. 0 when it cannot say.
     virtual uint64_t memory_in_use() const = 0;

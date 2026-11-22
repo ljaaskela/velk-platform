@@ -1517,6 +1517,38 @@ uint64_t VkBackend::device_memory_bytes() const
     return bytes;
 }
 
+uint32_t VkBackend::compute_fill_threads() const
+{
+    // Four work groups of 64 a compute unit (AMD) or multiprocessor (NVIDIA), from the vendor's
+    // count where the device has one.
+    constexpr uint32_t kPerUnit = 256u;
+    constexpr uint32_t kUnknown = 16384u;
+    if (physical_device_ == VK_NULL_HANDLE) {
+        return kUnknown;
+    }
+    uint32_t units = 0;
+    VkPhysicalDeviceShaderCorePropertiesAMD amd{};
+    amd.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_CORE_PROPERTIES_AMD;
+    VkPhysicalDeviceShaderSMBuiltinsPropertiesNV nv{};
+    nv.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SM_BUILTINS_PROPERTIES_NV;
+    VkPhysicalDeviceProperties2 props{};
+    props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    if (has_device_extension(VK_AMD_SHADER_CORE_PROPERTIES_EXTENSION_NAME)) {
+        props.pNext = &amd;
+        vkGetPhysicalDeviceProperties2(physical_device_, &props);
+        units = amd.shaderEngineCount * amd.shaderArraysPerEngineCount * amd.computeUnitsPerShaderArray;
+    } else if (has_device_extension(VK_NV_SHADER_SM_BUILTINS_EXTENSION_NAME)) {
+        props.pNext = &nv;
+        vkGetPhysicalDeviceProperties2(physical_device_, &props);
+        units = nv.shaderSMCount;
+    }
+    if (units == 0) {
+        return kUnknown;
+    }
+    const uint32_t threads = units * kPerUnit;
+    return threads < 4096u ? 4096u : threads > 32768u ? 32768u : threads;
+}
+
 uint64_t VkBackend::memory_in_use() const
 {
     if (allocator_ == VK_NULL_HANDLE) {
