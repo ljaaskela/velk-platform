@@ -146,9 +146,12 @@ public:
         /// each was when last listed as changed. See light_changes_main_src.
         ArenaRegion light_changes;
         vector<GpuLight> light_changes_lights;
-        /// Whether a light was listed as changed this frame, and the frame one last was, from
-        /// which the probes' cells take new rays again (kProbeCellWoken).
+        /// Whether a light was listed as changed this frame; whether everything changed this
+        /// frame, or the change list names what did; and the frame everything last changed, from
+        /// which all the probes' cells take new rays again (kProbeCellWoken).
         bool lights_moved = false;
+        bool light_changes_all = false;
+        bool light_changes_listed = false;
         uint32_t probe_cells_woken = 0;
         /// The probes' cells (kProbeCellSlots of kProbeCellWords), kept in world space.
         ArenaRegion probe_cells;

@@ -2927,8 +2927,8 @@ inline constexpr uint32_t kReflectGroupThreads = 32;
 /// surface there faces, as wide as a probe's square is at its distance from the camera, found by
 /// a hash. A probe whose cell has kProbeCellSettled samples and nothing changed since casts no
 /// rays and takes its light; else one probe a frame adds its rays to it. Cells unread for
-/// kProbeCellKeepFrames are let go of. Light changing anywhere starts every cell's light moving
-/// again, from kProbeCellWoken samples.
+/// kProbeCellKeepFrames are let go of. A light or a box that changed near a cell, or everything
+/// changing, starts its light moving again, from kProbeCellWoken samples.
 inline constexpr uint32_t kProbeCellSlots = 1u << 17;
 inline constexpr uint32_t kProbeCellWords = 12;
 inline constexpr uint32_t kProbeCellSettled = 64;
@@ -3247,6 +3247,34 @@ shared uint s_had[4];
 #define VELK_CELL_READ_ONLY 1u
 #define VELK_CELL_ADD 2u
 
+// Whether a change in the change list at word `changes` (light_changes_main_src's, VELK_CHANGE_LIST)
+// could alter the light bouncing to a place at `pos` (relative to the camera): a light that
+// changed and reaches half again as far as its range (its light reaches what bounces it here), or
+// any light without a range; a box within its own size (what moved shadows and lights its
+// surroundings by about as much).
+bool velk_cell_changed(uint changes, vec3 pos)
+{
+    if (changes == 0xFFFFFFFFu) return false;
+    vec3 cam = VELK_GLOBALS.cam_pos.xyz;
+    uint count = min(probe_words.data[changes + VELK_CHANGE_LIST_COUNT], 128u);
+    for (uint k = 0u; k < count; ++k) {
+        uint w = changes + VELK_CHANGE_LIST_CHANGES + k * VELK_CHANGE_WORDS;
+        vec3 lo = vec3(uintBitsToFloat(probe_words.data[w + VELK_CHANGE_MIN]), uintBitsToFloat(probe_words.data[w + VELK_CHANGE_MIN + 1u]),
+                       uintBitsToFloat(probe_words.data[w + VELK_CHANGE_MIN + 2u])) - cam;
+        vec3 hi = vec3(uintBitsToFloat(probe_words.data[w + VELK_CHANGE_MAX]), uintBitsToFloat(probe_words.data[w + VELK_CHANGE_MAX + 1u]),
+                       uintBitsToFloat(probe_words.data[w + VELK_CHANGE_MAX + 2u])) - cam;
+        uint word = probe_words.data[w + VELK_CHANGE_LIGHT];
+        if (word != 0xFFFFFFFFu) {
+            // Its light, without the small move's mark (kLightChangeSmall).
+            float range = velk_light_at(pc.lights_base + (word & ~0x40000000u)).params.x;
+            if (range <= 0.0 || distance(pos, lo) <= 1.5 * range) return true;
+            continue;
+        }
+        if (distance(pos, clamp(pos, lo, hi)) <= max(length(hi - lo), 1.0)) return true;
+    }
+    return false;
+}
+
 // What light `index` brings a surface at `at` facing `n`, unshadowed.
 vec3 velk_probe_light(uint index, vec3 at, vec3 n)
 {
@@ -3455,10 +3483,12 @@ void velk_probes_gather(uint lane)
     vec3 n = surface ? normalize(n4) : vec3(0.0, 1.0, 0.0);
 
     if (lane == 0u) s_deepest = 0u;
-    // Its cell (pc.more.x the table, pc.more.y the frame light last changed), as its first thread
-    // finds it: settled and nothing changed since, read without rays; else this probe adds its
-    // rays to it unless another does this frame, which leaves it to be read, or its rays alone
-    // while it has none yet. Light changing starts a settled cell moving again from fewer samples.
+    // Its cell (pc.more.x the table, pc.more.y the frame everything last changed, pc.more.z this
+    // frame's change list), as its first thread finds it: settled and nothing changed since, read
+    // without rays; else this probe adds its rays to it unless another does this frame, which
+    // leaves it to be read, or its rays alone while it has none yet. A change near it
+    // (velk_cell_changed), or everything changing, starts a settled cell moving again from fewer
+    // samples.
     if (ray == 0u) {
         uint mode = VELK_CELL_OWN;
         uint cell = 0xFFFFFFFFu;
@@ -3474,7 +3504,7 @@ void velk_probes_gather(uint lane)
                 probe_words.data[cell + VELK_CELL_READ] = now;
                 uint samples = claimed ? 0u : probe_words.data[cell + VELK_CELL_SAMPLES];
                 uint updated = probe_words.data[cell + VELK_CELL_UPDATED];
-                bool woken = updated < pc.more.y;
+                bool woken = updated < pc.more.y || velk_cell_changed(pc.more.z, pos);
                 had = woken ? min(samples, VELK_CELL_WOKEN) : samples;
                 if (samples >= VELK_CELL_SETTLED && !woken) {
                     mode = VELK_CELL_READ_ONLY;

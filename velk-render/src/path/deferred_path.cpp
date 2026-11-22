@@ -1173,6 +1173,8 @@ void DeferredPath::emit_light_changes_pass(ViewState& vs, const RenderView& rend
     const LightPool& pool = vs.instance_cull.light_pool;
     const vector<uint32_t>& cuts = vs.instance_cull.ray_top_cuts;
     vs.lights_moved = false;
+    vs.light_changes_all = false;
+    vs.light_changes_listed = false;
     if (pool.segments.empty() || !vs.light_changes.valid() || !vs.light_header.valid() || cuts.empty()
         || !vs.instance_cull.ray_top.valid()) {
         return;
@@ -1304,6 +1306,10 @@ void DeferredPath::emit_light_changes_pass(ViewState& vs, const RenderView& rend
         vs.light_change_log_frame = ctx.present_counter;
         vs.light_change_frames = vs.light_change_count = vs.light_change_all = 0;
     }
+    // For the probes' cells: everything changed wakes them all, else the list names what wakes
+    // those near it.
+    vs.light_changes_all = all;
+    vs.light_changes_listed = !all && count != 0;
     // Nothing changed: no light is traced again.
     if (!all && count == 0) return;
     words[kChangeListCount] = all ? 0u : count;
@@ -1637,13 +1643,14 @@ void DeferredPath::emit_light_probes_pass(ViewState& vs, const RenderView& rende
     pc.env[1] = render_view.env.texture_id;
     pc.env[2] = vs.light_header.valid() ? static_cast<uint32_t>(vs.light_header.offset() / sizeof(uint32_t)) : 0u;
     pc.env[3] = store_word(vs.light_probe_parity ^ 1u);
-    // The cells (more.x), and the frame light last changed (more.y), from which a cell takes new
-    // rays again. vs.lights_moved is this frame's: emit_light_changes_pass runs first and sets it
-    // on every path.
+    // The cells (more.x); the frame everything last changed (more.y), from which every cell takes
+    // new rays again; and this frame's change list (more.z), whose lights and boxes wake the cells
+    // near them. emit_light_changes_pass runs first and sets these on every path.
     const uint32_t cells_word = vs.probe_cells.valid() ? static_cast<uint32_t>(vs.probe_cells.offset() / sizeof(uint32_t)) : kLightNone;
-    if (vs.lights_moved) vs.probe_cells_woken = static_cast<uint32_t>(ctx.present_counter);
+    if (vs.light_changes_all) vs.probe_cells_woken = static_cast<uint32_t>(ctx.present_counter);
     pc.more[0] = cells_word;
     pc.more[1] = vs.probe_cells_woken;
+    pc.more[2] = vs.light_changes_listed ? static_cast<uint32_t>(vs.light_changes.offset() / sizeof(uint32_t)) : kLightNone;
     // The filter: the ray store into this frame's store; then the cells no probe reads any more.
     RtPushC filter_pc = pc;
     filter_pc.extras[2] = store_word(vs.light_probe_parity);
