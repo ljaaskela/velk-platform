@@ -178,7 +178,9 @@ inline constexpr uint32_t kLightCoarsePieces = 2;
 /// The most levels of pieces made at once under a piece, for the coarse levels.
 inline constexpr uint32_t kLightPieceLevelsAtOnce = 4;
 /// Frames a piece's four children are kept when no pixel reads any of them, nor anything under
-/// them; a root likewise.
+/// them, while the pool is short of pages; a root likewise. With room they are kept longer
+/// (velk_pieces_keep_frames): 8 times as long past an eighth of its pages free, 32 times past a
+/// quarter.
 inline constexpr uint32_t kLightPieceKeepFrames = 32;
 /// A piece's four children without children of their own are dropped when all their points and
 /// the piece's carry the same light, each light fully through or fully blocked, for this many
@@ -4992,12 +4994,24 @@ bool velk_pieces_marked(uint pool, uint page)
     return (light_words.data[light_words.data[pool + VELK_POOL_MARKS_WORD] + (page >> 5u)] & (1u << (page & 31u))) != 0u;
 }
 
-// Whether the piece starting at word `at`, which has no children, has not been read for
-// VELK_PIECE_KEEP_FRAMES, the pool's frame being `now`.
-bool velk_pieces_unread(uint at, uint now)
+// Frames an unread piece is kept: VELK_PIECE_KEEP_FRAMES when the pool is short of pages, longer
+// while it has room, so that turning back to what went out of view finds its pieces and their
+// light. Never makes the pool grow: past a quarter free they stay, under an eighth they go.
+uint velk_pieces_keep_frames(uint pool)
+{
+    uint free_pages = light_words.data[pool + VELK_POOL_FREE_PAGES];
+    uint pages = light_words.data[pool + VELK_POOL_PAGES];
+    if (free_pages * 4u > pages) return 32u * VELK_PIECE_KEEP_FRAMES;
+    if (free_pages * 8u > pages) return 8u * VELK_PIECE_KEEP_FRAMES;
+    return VELK_PIECE_KEEP_FRAMES;
+}
+
+// Whether the piece starting at word `at`, which has no children, has not been read for `keep`
+// frames, the pool's frame being `now`.
+bool velk_pieces_unread(uint at, uint now, uint keep)
 {
     uint read = light_words.data[at + VELK_PIECE_READ] & VELK_PIECE_FRAME_BITS;
-    return ((now - read) & VELK_PIECE_FRAME_BITS) > VELK_PIECE_KEEP_FRAMES;
+    return ((now - read) & VELK_PIECE_FRAME_BITS) > keep;
 }
 
 // Whether the piece starting at word `at` and its four children all carry the same light at
@@ -5041,6 +5055,7 @@ void main()
 
     if (pc.phase == 0u) {
         if (!live) return;
+        uint keep = velk_pieces_keep_frames(pool);
         uint child0 = light_words.data[at + VELK_PIECE_CHILDREN];
         if (child0 < pages) {
             // Its four children, when none has children and none was read, or when none has
@@ -5058,7 +5073,7 @@ void main()
                 if (light_words.data[child_at + VELK_PIECE_CHILDREN] < pages) {
                     unread = false;
                     leaves = false;
-                } else if (!velk_pieces_unread(child_at, now)) {
+                } else if (!velk_pieces_unread(child_at, now, keep)) {
                     unread = false;
                 }
             }
@@ -5078,7 +5093,7 @@ void main()
             if (unread || merge) {
                 for (uint k = 0u; k < 4u; ++k) light_words.data[at + VELK_PIECE_CHILDREN + k] = VELK_LIGHT_NONE;
             }
-        } else if (parent == VELK_LIGHT_NONE && velk_pieces_unread(at, now)) {
+        } else if (parent == VELK_LIGHT_NONE && velk_pieces_unread(at, now, keep)) {
             atomicCompSwap(light_words.data[velk_light_root_word(pool, first, triangle)], page, VELK_LIGHT_NONE);
         }
         return;

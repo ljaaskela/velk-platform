@@ -5460,7 +5460,10 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
                 uint32_t free_pages = 0;
                 arena->read_at(pool.header.offset() + uint64_t(kLightPoolFreePages) * sizeof(uint32_t), &free_pages,
                                sizeof(free_pages));
-                const uint32_t added = grow_light_pool(pool, *arena, (wanted + kLightSegmentPages - 1u) / kLightSegmentPages);
+                // What was asked for, and a quarter of the pool more: room for pieces out of view to
+                // stay while it lasts (velk_pieces_keep_frames), so that turning back finds them.
+                const uint32_t asked = wanted + pool.pages() / 4u;
+                const uint32_t added = grow_light_pool(pool, *arena, (asked + kLightSegmentPages - 1u) / kLightSegmentPages);
                 VELK_LOG(I, "light pool +%u to %u pg: %u pages asked for were not there, %u free at the last sweep", added,
                          pool.pages(), wanted, free_pages);
             }
