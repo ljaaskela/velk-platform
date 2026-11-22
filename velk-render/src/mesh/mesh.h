@@ -335,6 +335,7 @@ private:
     IGpuPipeline::Ptr gpu_refit_pipeline_;
     ::velk::vector<MeshRefitInfo> gpu_refits_;
     bool gpu_commands_dirty_ = true;
+    uint64_t gpu_commands_named_ = 0;  ///< A hash of the words the recorded commands carry.
     uint32_t gpu_runs_ = 0;
     bool gpu_overrun_logged_ = false;
 };

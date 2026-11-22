@@ -1267,6 +1267,30 @@ bool DeformingMesh::prepare_gpu_commands(FrameContext& ctx)
         }
         gpu_refits_.push_back(info);
     }
+    // The recorded commands carry these words: where any of them moved (a tree made again, a
+    // stream given another place), they are recorded again.
+    uint64_t named = 0xcbf29ce484222325ULL;
+    const auto name = [&named](uint64_t value) { named = (named ^ value) * 0x100000001b3ULL; };
+    name(gpu_table_.offset());
+    for (const auto& stream : streams_) {
+        name(stream.gpu_rest.offset());
+        name(stream.vertex_count);
+        name(get_gpu_ref(stream.buffer).get_base());
+    }
+    for (const auto& info : gpu_refits_) {
+        name(info.node_base);
+        name(info.word_base);
+        name(info.vertex_base);
+        name(info.leaf_word);
+        name(info.leaf_count);
+        name(info.parent_word);
+        name(info.counter_word);
+        name(info.node_count);
+    }
+    if (named != gpu_commands_named_) {
+        gpu_commands_named_ = named;
+        gpu_commands_dirty_ = true;
+    }
 
     constexpr uint32_t kCheckInterval = 120;
     if (!gpu_overrun_logged_ && ++gpu_runs_ % kCheckInterval == 0) {

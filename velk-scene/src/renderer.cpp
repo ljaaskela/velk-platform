@@ -817,14 +817,17 @@ void Renderer::emit_gpu_deforms(FrameContext& ctx, IRenderGraph& graph)
     dirty = dirty || !same;
 
     // Asked for only now, since preparing the meshes can grow the arena, which replaces
-    // its buffer. The commands name it, so a new one means recording them again.
+    // its buffer. The commands name it, so a new one means recording them again; a grown buffer
+    // can have the old one's address, so its size counts too.
     auto culling_arena = resources_->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
     IGpuBuffer* culling_buffer = culling_arena ? culling_arena->buffer() : nullptr;
     if (!culling_buffer) {
         return;
     }
-    dirty = dirty || culling_buffer != gpu_deform_culling_buffer_;
+    const size_t culling_size = culling_buffer->size_bytes();
+    dirty = dirty || culling_buffer != gpu_deform_culling_buffer_ || culling_size != gpu_deform_culling_size_;
     gpu_deform_culling_buffer_ = culling_buffer;
+    gpu_deform_culling_size_ = culling_size;
 
     emit_cached_view_pass(gpu_deform_pass_, dirty, "mesh.deform", graph, [&](CachedPassRecording& rec) {
         auto cmd = ctx.backend->create_command_buffer();

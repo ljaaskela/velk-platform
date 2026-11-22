@@ -148,6 +148,7 @@ private:
     IRenderPass::Ptr gpu_deform_pass_;
     vector<IDeformingMesh::Ptr> gpu_deform_pass_meshes_;
     IGpuBuffer* gpu_deform_culling_buffer_ = nullptr;  ///< Compared, never used: may be gone.
+    size_t gpu_deform_culling_size_ = 0;               ///< Its size then, with it.
     void emit_gpu_deforms(FrameContext& ctx, IRenderGraph& graph);
 
     /// Shared material arena (set = 1 slot 4): each material suballocates a
