@@ -133,13 +133,19 @@ protected:
 
     std::string scene_text() { return read_file(folder_ / "scene.velk"); }
 
-    /// Sets the width of @p object.
-    string set_width(uint64_t object, const char* width)
+    /// Sets property @p name (default "width") of @p object.
+    string set_width(uint64_t object, const char* width, const char* merge = "", const char* name = "width")
     {
-        char commands[160];
-        std::snprintf(commands, sizeof(commands), R"([{"op":"set","object":%llu,"name":"width","value":"%s"}])",
-                      static_cast<unsigned long long>(object), width);
-        return apply(commands);
+        char commands[192];
+        std::snprintf(commands, sizeof(commands), R"([{"op":"set","object":%llu,"name":"%s","value":"%s"}])",
+                      static_cast<unsigned long long>(object), name, width);
+        return apply(commands, merge);
+    }
+
+    std::string width_of(uint64_t object, const char* what)
+    {
+        auto d = describe(object);
+        return std::string(d[string_view(what, std::strlen(what))]["width"].as_string().c_str());
     }
 
     fs::path folder_;
@@ -148,10 +154,33 @@ protected:
 
     JsonValue describe(uint64_t object) { return parse(resolve<string>(core_->fn_describe(object))); }
 
-    string apply(const char* commands)
+    string apply(const char* commands, const char* merge = "")
     {
-        return resolve<string>(core_->fn_apply(string(string_view(commands, std::strlen(commands)))));
+        return resolve<string>(core_->fn_apply(string(string_view(commands, std::strlen(commands))),
+                                               string(string_view(merge, std::strlen(merge)))));
     }
+
+    /// The core's tree as "label #handle" lines.
+    std::string tree_lines()
+    {
+        std::string out;
+        auto tree = state()->tree.get<IHierarchy>();
+        vector<std::pair<IObject::Ptr, int>> pending{{tree->root(), 0}};
+        while (!pending.empty()) {
+            auto [node, depth] = pending.back();
+            pending.pop_back();
+            auto s = read_state<IEditorNode>(node);
+            out += std::string(static_cast<size_t>(depth) * 2, ' ') + s->label.c_str() + " #"
+                   + std::to_string(s->object) + "\n";
+            for (auto& child : tree->children_of(node)) {
+                pending.push_back({child, depth + 1});
+            }
+        }
+        return out;
+    }
+
+    bool undo() { return succeeded(resolve<ReturnValue>(core_->fn_undo(), ReturnValue::Fail)); }
+    bool redo() { return succeeded(resolve<ReturnValue>(core_->fn_redo(), ReturnValue::Fail)); }
 
     /// The attachment with @p entry, found through the tree's objects.
     uint64_t attachment(string_view entry)
@@ -329,4 +358,88 @@ TEST_F(CoreTest, SaveNeedsALaunchedApplication)
 {
     core_->fn_detach();
     EXPECT_NE(core_->fn_save().find("\"error\""), string::npos);
+}
+
+TEST_F(CoreTest, ApplyLeavesTheTree)
+{
+    // set and reset change property values only; the tree shows objects and attachment classes, so
+    // it needs no refresh after apply, undo or redo.
+    const uint64_t size = attachment("attachments/panel_size");
+    ASSERT_NE(size, 0u);
+    const std::string before = tree_lines();
+    const uint32_t revision = state()->revision;
+    EXPECT_EQ(set_width(size, "120px"), string("{\"ok\":true}"));
+    EXPECT_TRUE(undo());
+    EXPECT_TRUE(redo());
+    core_->fn_refresh();
+    ASSERT_TRUE(pump_until([&] { return state()->revision != revision; }));
+    EXPECT_EQ(tree_lines(), before);
+}
+
+TEST_F(CoreTest, MergedAppliesAreOneStep)
+{
+    const uint64_t size = attachment("attachments/panel_size");
+    ASSERT_NE(size, 0u);
+    EXPECT_EQ(set_width(size, "100px", "drag"), string("{\"ok\":true}"));
+    EXPECT_EQ(set_width(size, "110px", "drag"), string("{\"ok\":true}"));
+    EXPECT_EQ(set_width(size, "120px", "drag"), string("{\"ok\":true}"));
+    EXPECT_EQ(width_of(size, "authored"), "120px");
+    EXPECT_TRUE(undo());
+    EXPECT_FALSE(state()->can_undo);
+    EXPECT_EQ(width_of(size, "authored"), "200px");
+    EXPECT_EQ(width_of(size, "properties"), "200px");
+    EXPECT_TRUE(redo());
+    EXPECT_EQ(width_of(size, "authored"), "120px");
+    EXPECT_EQ(width_of(size, "properties"), "120px");
+}
+
+TEST_F(CoreTest, MergeNeedsSameKeyAndTargets)
+{
+    const uint64_t size = attachment("attachments/panel_size");
+    ASSERT_NE(size, 0u);
+    EXPECT_EQ(set_width(size, "100px", "drag"), string("{\"ok\":true}"));
+    EXPECT_EQ(set_width(size, "30px", "drag", "height"), string("{\"ok\":true}")); // other target
+    EXPECT_EQ(set_width(size, "40px", "other", "height"), string("{\"ok\":true}")); // other key
+    EXPECT_EQ(set_width(size, "50px", "", "height"), string("{\"ok\":true}"));      // no key
+    EXPECT_EQ(set_width(size, "60px", "", "height"), string("{\"ok\":true}"));
+    int steps = 0;
+    while (state()->can_undo && steps < 10) {
+        EXPECT_TRUE(undo());
+        ++steps;
+    }
+    EXPECT_EQ(steps, 5);
+    EXPECT_EQ(width_of(size, "authored"), "200px");
+}
+
+TEST_F(CoreTest, ModifiedFollowsTheSavedState)
+{
+    const uint64_t size = attachment("attachments/panel_size");
+    ASSERT_NE(size, 0u);
+    EXPECT_EQ(set_width(size, "120px"), string("{\"ok\":true}"));
+    EXPECT_TRUE(state()->modified);
+    EXPECT_TRUE(undo());
+    EXPECT_FALSE(state()->modified); // back at the file as loaded
+    EXPECT_TRUE(redo());
+    EXPECT_TRUE(state()->modified);
+    core_->fn_save();
+    EXPECT_FALSE(state()->modified);
+    EXPECT_TRUE(undo());
+    EXPECT_TRUE(state()->modified);
+    EXPECT_TRUE(redo());
+    EXPECT_FALSE(state()->modified);
+
+    // A merge key does not fold an edit into a saved step.
+    EXPECT_EQ(set_width(size, "100px", "drag"), string("{\"ok\":true}"));
+    core_->fn_save();
+    EXPECT_EQ(set_width(size, "90px", "drag"), string("{\"ok\":true}"));
+    EXPECT_TRUE(state()->modified);
+    EXPECT_TRUE(undo());
+    EXPECT_FALSE(state()->modified);
+    EXPECT_EQ(width_of(size, "authored"), "100px");
+
+    // Undoing past the saved state and editing loses it until the next save.
+    EXPECT_TRUE(undo());
+    EXPECT_EQ(set_width(size, "80px"), string("{\"ok\":true}"));
+    EXPECT_TRUE(undo());
+    EXPECT_TRUE(state()->modified);
 }

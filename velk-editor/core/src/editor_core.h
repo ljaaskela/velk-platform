@@ -37,7 +37,7 @@ public:
     void fn_detach() override;
     void fn_refresh() override;
     IFuture::Ptr fn_describe(uint64_t object) override;
-    IFuture::Ptr fn_apply(string commands) override;
+    IFuture::Ptr fn_apply(string commands, string merge) override;
     IFuture::Ptr fn_undo() override;
     IFuture::Ptr fn_redo() override;
     string fn_save() override;
@@ -78,7 +78,13 @@ private:
         RemoteValue live_before; ///< The live value before, written back on undo.
         RemoteValue live_after;
     };
-    using Step = vector<Change>;
+    /** @brief One undo step. */
+    struct Step
+    {
+        vector<Change> changes;
+        uint64_t id = 0; ///< Unique per core; tells the saved state apart.
+        string merge;    ///< apply()'s merge key, or empty.
+    };
 
     /** @brief Runs @p step on this core when @p future resolves, unless the core or the walk is gone. */
     template <class T, class Next>
@@ -100,6 +106,8 @@ private:
     /** @brief Undo or redo: moves the last step of @p from to @p to and writes its values. */
     IFuture::Ptr replay(vector<Step>& from, vector<Step>& to, bool after);
     void history_changed();
+    /** @brief Folds @p step into the last undo step when apply() asked to and the targets match. */
+    bool merge_into_last(Step& step);
 
     /** @brief The node of @p object, reused from the last read when it was there. */
     IObject::Ptr node_for(RemoteHandle object, string_view label);
@@ -133,6 +141,8 @@ private:
     std::unordered_map<RemoteHandle, Uid> classes_;
     vector<Step> undo_;
     vector<Step> redo_;
+    uint64_t next_step_ = 0;
+    uint64_t saved_step_ = 0; ///< Id of the last undo step when saved; 0 for none.
 };
 
 } // namespace velk::editor

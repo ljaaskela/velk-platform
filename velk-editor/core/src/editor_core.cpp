@@ -287,6 +287,7 @@ struct Applying
 {
     explicit Applying(const IFuture::Ptr& future) : promise(future) {}
     vector<Command> commands;
+    string merge;
     Promise promise;
 };
 
@@ -319,10 +320,11 @@ const EditorCore::Source* EditorCore::source_of(RemoteHandle object) const
     return it != sources_.end() ? &it->second : nullptr;
 }
 
-IFuture::Ptr EditorCore::fn_apply(string commands)
+IFuture::Ptr EditorCore::fn_apply(string commands, string merge)
 {
     IFuture::Ptr future = instance().create_future();
     auto state = std::make_shared<Applying>(future);
+    state->merge = merge;
     auto fail = [&](string_view message) {
         state->promise.set_value(error_json(message));
         return future;
@@ -415,6 +417,7 @@ IFuture::Ptr EditorCore::fn_apply(string commands)
                 return;
             }
             Step step;
+            step.merge = state->merge;
             for (auto& c : state->commands) {
                 Change ch;
                 ch.object = c.object;
@@ -431,7 +434,7 @@ IFuture::Ptr EditorCore::fn_apply(string commands)
                 }
                 ch.has_after = !c.reset;
                 ch.after = c.value;
-                step.push_back(std::move(ch));
+                step.changes.push_back(std::move(ch));
             }
             if (core->editing_) {
                 core->put_document(step, true);
@@ -447,28 +450,32 @@ IFuture::Ptr EditorCore::fn_apply(string commands)
                     state->promise.set_value(error_json("the core is gone"));
                     return;
                 }
-                for (size_t i = 0; i < step.size(); ++i) {
+                auto& changes = step.changes;
+                for (size_t i = 0; i < changes.size(); ++i) {
                     if (i >= results.items.size() || failed(results.items[i])) {
                         // Take back the document side and the live writes that went through.
                         if (core->editing_) {
                             core->put_document(step, false);
                         }
                         vector<RemotePropertyValue> back;
-                        for (size_t j = 0; j < step.size() && j < results.items.size(); ++j) {
+                        for (size_t j = 0; j < changes.size() && j < results.items.size(); ++j) {
                             if (succeeded(results.items[j])) {
-                                back.push_back({step[j].object, step[j].name, {}, step[j].live_before});
+                                back.push_back({changes[j].object, changes[j].name, {}, changes[j].live_before});
                             }
                         }
                         if (!back.empty()) {
                             core->client_.set(back);
                         }
                         state->promise.set_value(
-                            error_json("cannot set " + step[i].name + " of " + handle_text(step[i].object)));
+                            error_json("cannot set " + changes[i].name + " of " + handle_text(changes[i].object)));
                         return;
                     }
                 }
                 if (core->editing_) {
-                    core->undo_.push_back(std::move(step));
+                    if (!core->merge_into_last(step)) {
+                        step.id = ++core->next_step_;
+                        core->undo_.push_back(std::move(step));
+                    }
                     core->redo_.clear();
                     core->history_changed();
                 }
@@ -527,9 +534,9 @@ IFuture::Ptr EditorCore::fn_apply(string commands)
 void EditorCore::put_document(const Step& step, bool after)
 {
     // Changes are written in order and taken back in reverse.
-    const size_t n = step.size();
+    const size_t n = step.changes.size();
     for (size_t i = 0; i < n; ++i) {
-        const Change& c = after ? step[i] : step[n - 1 - i];
+        const Change& c = after ? step.changes[i] : step.changes[n - 1 - i];
         if (c.entry.empty()) {
             continue;
         }
@@ -550,8 +557,9 @@ IFuture::Ptr EditorCore::replay(vector<Step>& from, vector<Step>& to, bool after
     from.pop_back();
     put_document(step, after);
     vector<RemotePropertyValue> values;
-    for (size_t i = 0; i < step.size(); ++i) {
-        const Change& c = after ? step[i] : step[step.size() - 1 - i];
+    const size_t n = step.changes.size();
+    for (size_t i = 0; i < n; ++i) {
+        const Change& c = after ? step.changes[i] : step.changes[n - 1 - i];
         values.push_back({c.object, c.name, {}, after ? c.live_after : c.live_before});
     }
     to.push_back(std::move(step));
@@ -583,8 +591,32 @@ void EditorCore::history_changed()
     write_state<IEditorCore>(this, [&](IEditorCore::State& s) {
         s.can_undo = !undo_.empty();
         s.can_redo = !redo_.empty();
-        s.modified = document_.any_modified();
+        s.modified = (undo_.empty() ? 0 : undo_.back().id) != saved_step_;
     });
+}
+
+bool EditorCore::merge_into_last(Step& step)
+{
+    if (step.merge.empty() || undo_.empty() || !redo_.empty()) {
+        return false;
+    }
+    Step& last = undo_.back();
+    if (last.merge != step.merge || last.id == saved_step_ || last.changes.size() != step.changes.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < step.changes.size(); ++i) {
+        if (last.changes[i].object != step.changes[i].object || last.changes[i].name != step.changes[i].name) {
+            return false;
+        }
+    }
+    // The last step keeps its before values and takes the new after values.
+    for (size_t i = 0; i < step.changes.size(); ++i) {
+        Change& c = last.changes[i];
+        c.has_after = step.changes[i].has_after;
+        c.after = std::move(step.changes[i].after);
+        c.live_after = std::move(step.changes[i].live_after);
+    }
+    return true;
 }
 
 string EditorCore::fn_save()
@@ -607,6 +639,7 @@ string EditorCore::fn_save()
         json_quote(out, source);
     }
     out += "]}";
+    saved_step_ = undo_.empty() ? 0 : undo_.back().id;
     history_changed();
     return out;
 }
@@ -766,6 +799,8 @@ void EditorCore::detached()
     document_.clear();
     undo_.clear();
     redo_.clear();
+    next_step_ = 0;
+    saved_step_ = 0;
     write_state<IEditorCore>(this, [&](IEditorCore::State& s) {
         s.attached = false;
         s.target = {};

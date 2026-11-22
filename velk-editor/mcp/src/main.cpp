@@ -224,7 +224,7 @@ const char* kTools = R"([
 {"name":"attach","description":"Attach the editor core to an application started with its editor endpoint (VELK_EDITOR_PORT=port), for inspecting: changes are not kept.","inputSchema":{"type":"object","properties":{"port":{"type":"integer"},"host":{"type":"string","description":"127.0.0.1 by default"}},"required":["port"]}},
 {"name":"tree","description":"The attached application's object tree, one object per line, indented, with its handle after #.","inputSchema":{"type":"object","properties":{}}},
 {"name":"describe","description":"An object's class, its properties as store-file JSON values, which are read-only, and its attachments.","inputSchema":{"type":"object","properties":{"object":{"type":"integer","description":"Handle from tree or describe"}},"required":["object"]}},
-{"name":"apply","description":"Applies commands as one undo step. Each is {\"op\":\"set\",\"object\":handle,\"name\":property,\"value\":store-file JSON value, for example \"240px\", \"center\", 1.5 or {\"r\":1,\"g\":0,\"b\":0,\"a\":1}} or {\"op\":\"reset\",\"object\":handle,\"name\":property}, which removes the value from the file. After launch, changes go to the document and the application; after attach, to the application only.","inputSchema":{"type":"object","properties":{"commands":{"type":"array","items":{"type":"object"}}},"required":["commands"]}},
+{"name":"apply","description":"Applies commands as one undo step. Each is {\"op\":\"set\",\"object\":handle,\"name\":property,\"value\":store-file JSON value, for example \"240px\", \"center\", 1.5 or {\"r\":1,\"g\":0,\"b\":0,\"a\":1}} or {\"op\":\"reset\",\"object\":handle,\"name\":property}, which removes the value from the file. After launch, changes go to the document and the application; after attach, to the application only. Successive applies with the same merge key that set the same properties fold into one undo step, for drags.","inputSchema":{"type":"object","properties":{"commands":{"type":"array","items":{"type":"object"}},"merge":{"type":"string"}},"required":["commands"]}},
 {"name":"undo","description":"Takes back the last apply.","inputSchema":{"type":"object","properties":{}}},
 {"name":"redo","description":"Applies the last undone step again.","inputSchema":{"type":"object","properties":{}}},
 {"name":"save","description":"Writes the files with unsaved changes. Needs a launched application.","inputSchema":{"type":"object","properties":{}}},
@@ -277,7 +277,9 @@ string call_tool(Session& session, const string& name, const JsonValue& args)
         return text_result(text.empty() ? string_view("null") : string_view(text));
     }
     if (name == "apply") {
-        auto r = session.call("apply", {make_remote_value(string_view(json_write_inline(args["commands"])))});
+        const string merge = args["merge"].type() == JsonType::String ? args["merge"].as_string() : string();
+        auto r = session.call("apply", {make_remote_value(string_view(json_write_inline(args["commands"]))),
+                                        make_remote_value(string_view(merge))});
         string text;
         read_remote_value(r.value, text);
         if (text.empty()) {
