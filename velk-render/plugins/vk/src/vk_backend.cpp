@@ -513,6 +513,7 @@ bool VkBackend::check_required_features(
 #define VELK_REQUIRE_12(field) require(wanted12.field, have12.field, #field)
     require(VK_TRUE, have.features.multiDrawIndirect, "multiDrawIndirect");
     require(VK_TRUE, have.features.drawIndirectFirstInstance, "drawIndirectFirstInstance");
+    require(VK_TRUE, have.features.shaderClipDistance, "shaderClipDistance");
     VELK_REQUIRE_12(descriptorIndexing);
     VELK_REQUIRE_12(scalarBlockLayout);
     VELK_REQUIRE_12(descriptorBindingPartiallyBound);
@@ -629,6 +630,8 @@ bool VkBackend::create_device()
     features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     features2.features.multiDrawIndirect = VK_TRUE;
     features2.features.drawIndirectFirstInstance = VK_TRUE;
+    // Clip traits clip by gl_ClipDistance in the element vertex shader.
+    features2.features.shaderClipDistance = VK_TRUE;
     // Lets fragment shaders read gl_PrimitiveID, for the visibility buffer.
     VkPhysicalDeviceFeatures available{};
     vkGetPhysicalDeviceFeatures(physical_device_, &available);

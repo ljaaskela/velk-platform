@@ -17,6 +17,8 @@ endif()
 
 add_executable(velk_ui_tests
     test_text_field.cpp
+    test_scroll_view.cpp
+    test_tree_view.cpp
 )
 
 target_link_libraries(velk_ui_tests PRIVATE velk velk_scene velk_ui velk_render velk_text GTest::gtest_main)

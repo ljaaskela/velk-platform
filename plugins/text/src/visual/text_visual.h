@@ -25,11 +25,11 @@ IFont::Ptr resolve_font(const ObjectRef& ref);
 void bind_font_material(IVisual2D* visual, const IFont::Ptr& font);
 
 /**
- * @brief Appends one draw entry per laid-out glyph, aligned in @p bounds and moved right by
- *        @p shift_x. With @p clip, glyphs not entirely inside the bounds' width are skipped.
+ * @brief Appends one draw entry per laid-out glyph, aligned in @p bounds and moved by
+ *        @p shift_x, @p shift_y.
  */
 void append_glyphs(const IFont::TextLayoutResult& layout, const ::velk::size& bounds, HAlign ha, VAlign va,
-                   ::velk::color col, const IProgram::Ptr& material, float shift_x, bool clip,
+                   ::velk::color col, const IProgram::Ptr& material, float shift_x, float shift_y,
                    vector<DrawEntry>& out);
 
 /** @brief The glyph-silhouette shape intersect snippet, for IShaderSource kIntersect. */

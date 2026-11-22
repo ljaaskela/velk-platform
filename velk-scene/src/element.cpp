@@ -1,5 +1,7 @@
 #include "element.h"
 
+#include <velk-scene/interface/trait/intf_clip.h>
+
 #include <velk/interface/intf_metadata.h>
 #include <velk/interface/intf_object_storage.h>
 
@@ -68,8 +70,21 @@ ReturnValue Element::add_attachment(const IInterface::Ptr& attachment)
     if (succeeded(rv) && scene_.lock()) {
         subscribe_trait(attachment);
         sync_dependent_registration();
+        notify_if_clip(attachment);
     }
     return rv;
+}
+
+void Element::notify_if_clip(const IInterface::Ptr& attachment)
+{
+    // A clip changes what its whole subtree draws, which a visual change rebuilds.
+    if (!interface_cast<IClip>(attachment)) {
+        return;
+    }
+    if (auto scene = get_scene()) {
+        pending_dirty_ |= DirtyFlags::Visual;
+        scene->notify_dirty(*this, DirtyFlags::Visual);
+    }
 }
 
 ReturnValue Element::remove_attachment(const IInterface::Ptr& attachment)
@@ -83,6 +98,7 @@ ReturnValue Element::remove_attachment(const IInterface::Ptr& attachment)
             render_trait_count--;
         }
         subscribe_traits();
+        notify_if_clip(attachment);
     }
     return rv;
 }

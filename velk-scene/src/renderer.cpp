@@ -81,6 +81,7 @@ constexpr string_view velk_ui_glsl = R"(
 //   color        — visual tint.
 //   params.x     — shape_param (glyph index / material slot);
 //                  yzw reserved.
+//   offset.w     — bits of the clip: 0 for none, else 1 + its index in velk_clips.
 //
 // Vertex shaders compute:
 //   gl_Position = vp * world_matrix * vec4(offset + v.position * size, 1);
@@ -122,6 +123,27 @@ ElementInstance velk_quad_instance(uint quad)
     inst.params = uvec4(0u, 0u, 0u, 0xFFFFFFFFu);
     return inst;
 }
+
+// Clip rectangles (set = 1 slot 1): min xy, max xy in world space, written each frame
+// from the Clip traits. An instance's offset.w holds 1 + its clip's index, or 0.
+layout(set = 1, binding = 1, std430) readonly buffer VelkClips { vec4 data[]; } velk_clips;
+
+vec4 velk_clip_rect(ElementInstance inst)
+{
+    uint clip = floatBitsToUint(inst.offset.w);
+    return clip == 0u ? vec4(-3.0e38, -3.0e38, 3.0e38, 3.0e38) : velk_clips.data[clip - 1u];
+}
+
+// Vertex stage only: clips the primitive to the instance's clip rectangle. `world` is the
+// vertex's world position.
+#define velk_write_clip(inst, world)                       \
+    {                                                      \
+        vec4 velk_c_ = velk_clip_rect(inst);               \
+        gl_ClipDistance[0] = (world).x - velk_c_.x;        \
+        gl_ClipDistance[1] = velk_c_.z - (world).x;        \
+        gl_ClipDistance[2] = (world).y - velk_c_.y;        \
+        gl_ClipDistance[3] = velk_c_.w - (world).y;        \
+    }
 
 // Instance `slot` of draw `d`: from the instance arena, or for a draw of quads
 // (VELK_DRAW_QUADS) the quad at word `slot` of the culling arena.
@@ -476,6 +498,11 @@ FrameContext Renderer::make_frame_context()
     if (resources_ && !lights_arena_) {
         lights_arena_ = resources_->create_arena(IRenderBackend::kGlobalLights,
                                                  sizeof(GpuLight));
+    }
+    // Clip rectangles, one vec4 each, written by the batch builder.
+    if (resources_ && !clip_arena_) {
+        clip_arena_ = resources_->create_arena(IRenderBackend::kGlobalClips, 4 * sizeof(float));
+        batch_builder_.set_clip_arena(clip_arena_.get());
     }
 
     FrameContext ctx{};
@@ -1204,6 +1231,7 @@ Frame Renderer::prepare(const FrameDesc& desc)
     {
         VELK_PERF_SCOPE("renderer.build_frame_passes");
         build_frame_passes(desc, consumed_scenes, *slot);
+        batch_builder_.update_clips();
         // A mesh not ready to run yet stays for the next frame.
         for (const auto& mesh : gpu_deforms_recorded_) {
             gpu_deforms_.erase(std::remove(gpu_deforms_.begin(), gpu_deforms_.end(), mesh), gpu_deforms_.end());

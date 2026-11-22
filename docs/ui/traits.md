@@ -8,6 +8,8 @@ Traits are the primary extension mechanism in velk-ui. An element on its own has
 - [Attaching traits](#attaching-traits)
 - [CRTP base classes](#crtp-base-classes)
 - [Layout traits](#layout-traits)
+  - [Scroll view](#scroll-view)
+- [Clipping](#clipping)
 - [Transform traits](#transform-traits)
 - [Visual traits](#visual-traits)
   - [Visual phase](#visual-phase)
@@ -96,6 +98,7 @@ Layout traits implement `ILayoutTrait` and control how elements are sized and po
 | Padding | `IPadding` | Constraint | Space between the element's edges and its children |
 | Margin | `IMargin` | Constraint | Space around the element |
 | Align | `IAlign` | Constraint | The element's own alignment, overriding its parent's |
+| ScrollView | `IScrollView` | Layout | Scrolls and clips the children, with scroll bars |
 
 ```cpp
 auto stack = velk::ui::trait::layout::create_stack();
@@ -116,6 +119,36 @@ In a store file:
 { "targets": ["label"], "class": "velk-ui.Margin", "properties": { "left": "8px" } },
 { "targets": ["label"], "class": "velk-ui.Align", "properties": { "vertical": "center" } }
 ```
+
+### Scroll view
+
+`ScrollView` places each child at the start of the element, at least as large as the view and as large as it wants to be, and moves it by `scroll_x` and `scroll_y`. Give the content child an `auto` size on the axes it should scroll on. The view:
+
+* clips the children to its content area (it is an `IClip`, see [Clipping](#clipping)),
+* scrolls with the mouse wheel, `wheel_step` pixels per line, Shift for sideways; at the end of its content a wheel turn goes on to an enclosing view,
+* shows a bar on an axis whose content does not fit. A bar is `bar_width` pixels, taken from the content's space. Its thumb has the visual's `color` and can be dragged; a click on the track pages.
+
+The offsets are kept within the content. One attachment does the layout, the clipping, the input and the bars.
+
+```json
+{ "targets": ["panel"], "class": "velk-ui.FixedSize", "properties": { "width": "300px", "height": "220px" } },
+{ "targets": ["panel"], "class": "velk-ui.ScrollView", "properties": { "color": { "r": 0.7, "g": 0.72, "b": 0.78, "a": 0.8 } } },
+{ "targets": ["list"], "class": "velk-ui.FixedSize", "properties": { "width": "auto", "height": "auto" } }
+```
+
+## Clipping
+
+`velk-scene.Clip` (`IClip`) cuts an element and everything under it at the element's box: what lies outside is not drawn, to the pixel, and takes no pointer input. Nested clips intersect. `enabled` turns it off. `ScrollView` and `TextField` are clips themselves.
+
+A clip element's own visuals are cut at its box, its descendants at `IClip::clip_rect`, which is the box for `Clip` and the area without the bars for `ScrollView`.
+
+How it works: the batch builder gives each clipped instance the index of its clip rectangle, the rectangles are uploaded each frame, and the element vertex shader writes `gl_ClipDistance` against them. An element wholly outside its clip is not drawn at all. Limits:
+
+* The rectangle is axis-aligned in world x and y, so it suits 2D content; a rotated clip clips to its bounds.
+* Ray traced shadows and reflections ignore clipping.
+* A render target's subtree (`RenderCache`) is not clipped.
+* Up to 1024 clips are in use at once; more do not clip.
+* Moving an element that a clip left out rebuilds the batches rather than taking the transform-only path.
 
 ### Sizes
 
@@ -348,6 +381,8 @@ Constraints refine an element's size during layout solving. Multiple can be atta
 | ClassId | Implements | Description |
 |---|---|---|
 | `velk::ui::ClassId::Constraint::Stack` | `ILayoutTrait` | Lays out children along a single axis with optional spacing. Properties: `axis`, `spacing`, `h_align`, `v_align`. |
+| `velk::ui::ClassId::Constraint::ScrollView` | `ILayoutTrait`, `IScrollView`, `IClip`, `IInputTrait`, `IVisual2D` | Scrolls and clips its children, with scroll bars. Properties: `scroll_x`, `scroll_y`, `bar_width`, `wheel_step`. See [Scroll view](#scroll-view). |
+| `velk::ClassId::Clip` | `IClip` | Clips an element and its descendants to its box. See [Clipping](#clipping). |
 | `velk::ui::ClassId::Constraint::FixedSize` | `ILayoutTrait` | Clamps an element to a fixed `width` and/or `height`. Either dimension can be left unset to inherit from a parent layout. |
 
 ### Transform phase

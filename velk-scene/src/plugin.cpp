@@ -5,6 +5,7 @@
 #include "element.h"
 #include "renderer.h"
 #include "scene.h"
+#include "trait/clip.h"
 #include "trait/compute_mesh_deformer.h"
 #include "trait/light.h"
 #include "transform/look_at.h"
@@ -40,6 +41,7 @@ namespace velk {
     rv &= register_type<impl::MeshVisual>(velk);
     rv &= register_type<impl::InstancedMeshVisual>(velk);
     rv &= register_type<impl::ComputeMeshDeformer>(velk);
+    rv &= register_type<impl::Clip>(velk);
     rv &= register_type<impl::DefaultBatch>(velk);
     return rv;
 }

@@ -20,8 +20,10 @@ VELK_VARYINGS_OUT
 void main()
 {
     GlobalData globals = velk_global_data(root);
-    VelkVaryings s = VELK_VERTEX_FN(velk_vertex3d(root), velk_draw_instance(velk_draw(root), velk_instance_slot(root)), globals);
+    ElementInstance inst = velk_draw_instance(velk_draw(root), velk_instance_slot(root));
+    VelkVaryings s = VELK_VERTEX_FN(velk_vertex3d(root), inst, globals);
     gl_Position = globals.view_projection * vec4(s.rel_pos, 1.0);
+    velk_write_clip(inst, s.rel_pos + globals.cam_pos.xyz);
 
     v_color        = s.color * velk_vertex_color(root);
     v_local_uv     = s.local_uv;

@@ -63,6 +63,8 @@ add_library(velk_text SHARED
     src/visual/text_visual.cpp
     src/visual/text_field.h
     src/visual/text_field.cpp
+    src/visual/tree_view.h
+    src/visual/tree_view.cpp
     src/visual/text_material.h
     src/visual/text_material.cpp
     src/embedded/inter_regular.h
@@ -75,6 +77,7 @@ add_library(velk_text SHARED
     include/velk-ui/plugins/text/plugin.h
     include/velk-ui/plugins/text/intf_text_visual.h
     include/velk-ui/plugins/text/intf_text_field.h
+    include/velk-ui/plugins/text/intf_tree_view.h
 )
 
 target_link_libraries(velk_text PRIVATE velk velk_scene velk_ui velk_render freetype harfbuzz)

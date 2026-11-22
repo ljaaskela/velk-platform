@@ -27,6 +27,9 @@ inline constexpr Uid Margin{"cf78e3f9-4756-4e91-8057-60ec58828874"};
 /** @brief An element's own alignment in the space its parent gives it. */
 inline constexpr Uid Align{"137667f4-5932-4855-8f72-72e931986af7"};
 
+/** @brief Scrolls and clips its children, with scroll bars. See IScrollView. */
+inline constexpr Uid ScrollView{"aaf6476d-7c22-4f43-8285-efe8d760b683"};
+
 } // namespace Constraint
 
 // Note: Transform/* moved to velk-scene/plugin.h.

@@ -58,6 +58,7 @@ add_library(velk_scene SHARED
     src/camera.h
     src/camera.cpp
     src/trait/light.h
+    src/trait/clip.h
     src/trait/compute_mesh_deformer.h
 
     # Transform traits

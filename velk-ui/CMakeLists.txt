@@ -5,6 +5,8 @@ add_library(velk_ui SHARED
     src/layout_solver.cpp
     src/layout/stack.h
     src/layout/stack.cpp
+    src/layout/scroll_view.h
+    src/layout/scroll_view.cpp
     src/constraint/fixed_size.h
     src/constraint/fixed_size.cpp
     src/constraint/insets.h
@@ -55,6 +57,7 @@ add_library(velk_ui SHARED
     include/velk-ui/interface/intf_font.h
     include/velk-ui/interface/intf_layout_trait.h
     include/velk-ui/interface/trait/intf_stack.h
+    include/velk-ui/interface/trait/intf_scroll_view.h
     include/velk-ui/interface/trait/intf_fixed_size.h
     include/velk-ui/interface/trait/intf_insets.h
     include/velk-ui/interface/intf_content_size.h

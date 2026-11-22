@@ -34,6 +34,8 @@ public:
 private:
     void subscribe_traits();
     void subscribe_trait(const IInterface::Ptr& attachment);
+    /** @brief Marks the element visually dirty when @p attachment is a clip. */
+    void notify_if_clip(const IInterface::Ptr& attachment);
     void sync_dependent_registration();
 
     IScene::WeakPtr scene_;

@@ -41,6 +41,7 @@ void main()
 
     vec3 rel = velk_rel_position(inst.world_matrix, inst.offset.xyz + v.position * inst.size.xyz, globals);
     gl_Position = globals.view_projection * vec4(rel, 1.0);
+    velk_write_clip(inst, rel + globals.cam_pos.xyz);
 
     v_color = inst.color;
     v_local_uv = v.uv;

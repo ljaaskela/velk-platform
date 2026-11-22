@@ -243,6 +243,8 @@ InputResult TextField::on_key_event(KeyEvent& event)
     if (!editing_) {
         return InputResult::Ignored;
     }
+    // Shortcuts (Ctrl, Alt, Super) and key releases go on to the application.
+    const bool shortcut = !!(event.modifiers & (Modifier::Ctrl | Modifier::Alt | Modifier::Super));
     if (event.action == KeyAction::Text) {
         const char32_t cp = event.codepoint;
         if (cp >= 0x20 && cp != 0x7F) {
@@ -255,7 +257,7 @@ InputResult TextField::on_key_event(KeyEvent& event)
         }
         return InputResult::Consumed;
     }
-    if (event.action == KeyAction::Up) {
+    if (event.action == KeyAction::Up || shortcut) {
         return InputResult::Ignored;
     }
 
@@ -288,6 +290,9 @@ InputResult TextField::on_key_event(KeyEvent& event)
             end_edit(false);
         }
         break;
+    case Key::Unknown:
+        // A character key: its text arrives as a separate KeyAction::Text event.
+        return InputResult::Consumed;
     default: return InputResult::Ignored;
     }
     invoke_visual_changed();
@@ -359,7 +364,7 @@ vector<DrawEntry> TextField::get_draw_entries(::velk::IRenderContext& ctx, const
     }
 
     vector<DrawEntry> result;
-    text_detail::append_glyphs(layout_, bounds, HAlign::Left, va, col, material, -scroll_, true, result);
+    text_detail::append_glyphs(layout_, bounds, HAlign::Left, va, col, material, -scroll_, 0.f, result);
 
     if (editing_) {
         auto font_state = read_state<IFont>(font);

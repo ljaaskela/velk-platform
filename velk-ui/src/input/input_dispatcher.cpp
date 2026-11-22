@@ -129,14 +129,19 @@ void InputDispatcher::scroll_event(const ScrollEvent& event)
 
 void InputDispatcher::key_event(const KeyEvent& event)
 {
-    // Broadcast to external subscribers first (debug overlays, sample
-    // key handlers). Subscribers see every key regardless of focus
-    // state, mirroring the on_pointer_event / on_scroll_event paths.
-    ::velk::invoke_event(get_interface(IInterface::UID), "on_key_event", event);
-
-    // Key events dispatch to the focused element and bubble up.
-    if (!focused_) {
+    // The focused element and its ancestors get the key first. Only a key none of them
+    // consumed reaches the broadcast (global key handlers), so typing into a focused text
+    // field does not also trigger application shortcuts.
+    if (dispatch_key(event) != InputResult::Ignored) {
         return;
+    }
+    ::velk::invoke_event(get_interface(IInterface::UID), "on_key_event", event);
+}
+
+InputResult InputDispatcher::dispatch_key(const KeyEvent& event)
+{
+    if (!focused_) {
+        return InputResult::Ignored;
     }
 
     KeyEvent ev = event;
@@ -150,7 +155,7 @@ void InputDispatcher::key_event(const KeyEvent& event)
     if (trait) {
         InputResult r = trait->on_key_event(ev);
         if (r != InputResult::Ignored) {
-            return;
+            return r;
         }
     }
 
@@ -159,10 +164,11 @@ void InputDispatcher::key_event(const KeyEvent& event)
         if (at) {
             InputResult r = at->on_key_event(ev);
             if (r != InputResult::Ignored) {
-                return;
+                return r;
             }
         }
     }
+    return InputResult::Ignored;
 }
 
 IElement::Ptr InputDispatcher::get_hovered() const

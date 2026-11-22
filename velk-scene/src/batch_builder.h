@@ -8,6 +8,7 @@
 #include <velk-render/interface/intf_batch.h>
 #include <velk-render/frame/draw_call_emit.h>
 #include <velk-render/interface/intf_frame_data_manager.h>
+#include <velk-render/interface/intf_gpu_arena.h>
 #include <velk-render/interface/intf_gpu_resource_manager.h>
 #include <velk-render/frustum.h>
 #include <velk-render/interface/intf_buffer.h>
@@ -126,7 +127,46 @@ public:
     /** @brief Mutable access to render target passes (for moving batches in prepare). */
     vector<RenderTargetPassData>& render_target_passes() { return render_target_passes_; }
 
+    /** @brief Where clip rectangles go (set = 1 slot 1). Set once by the renderer. */
+    void set_clip_arena(IGpuArena* arena);
+
+    /**
+     * @brief Recomputes the clip rectangles from their elements' current boxes and writes
+     *        the changed ones. Run every frame, after the batches, since a clip element can
+     *        move without its batches being rebuilt.
+     */
+    void update_clips();
+
 private:
+    /// A clip rectangle of an element with an enabled IClip: its whole box, for its own
+    /// visuals, or its IClip::clip_rect, for its descendants. Its index is stable while the
+    /// element lives, so instances keep pointing at it when only transforms change.
+    struct ClipSlot
+    {
+        IObject::WeakPtr element;
+        bool content = false; ///< IClip::clip_rect, not the whole box.
+        uint32_t parent = 0;  ///< 1 + the enclosing clip's slot, or 0.
+        float rect[4]{};     ///< min x, min y, max x, max y in world space.
+        float written[4]{};  ///< What the arena holds.
+        bool uploaded = false;
+    };
+    static constexpr uint32_t kMaxClips = 1024;
+
+    /**
+     * @brief The slot of clip element @p obj's box, or with @p content of its clip_rect, inside
+     *        clip @p parent (1 + slot, or 0), as 1 + slot.
+     */
+    uint32_t clip_slot(const IObject::Ptr& obj, uint32_t parent, bool content);
+    /** @brief Fills every live slot's rect from its element's box and its parent's rect. */
+    void compute_clip_rects();
+    /** @brief The value an instance's offset.w holds for clip @p clip (1 + slot, or 0). */
+    uint32_t clip_bits(uint32_t clip) const;
+
+    std::unordered_map<IElement*, uint32_t> clip_slot_of_[2]; ///< Box slots, clip_rect slots.
+    vector<ClipSlot> clip_slots_;
+    IGpuArena* clip_arena_ = nullptr;
+    ArenaRegion clip_region_;
+
     std::unordered_map<IElement*, ElementCache> element_cache_;
     vector<RenderTargetPassData> render_target_passes_;
     /// What draws the quad batch: a 3D mesh visual of no element, for the shaders and options

@@ -159,6 +159,7 @@ private:
     /// persistent region for its light array, so the RT and deferred compute
     /// shaders read velk_lights.data[lights_base + i].
     IGpuArena::Ptr lights_arena_;
+    IGpuArena::Ptr clip_arena_; ///< Clip rectangles (set = 1 slot 1), filled by batch_builder_.
 
     // resources_ must outlive any member that holds IProgram::Ptr
     // refs (views_, batch_builder_): material dtors invoke

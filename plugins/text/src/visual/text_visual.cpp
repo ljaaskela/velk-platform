@@ -48,10 +48,10 @@ void bind_font_material(IVisual2D* visual, const IFont::Ptr& font)
 }
 
 void append_glyphs(const IFont::TextLayoutResult& layout, const ::velk::size& bounds, HAlign ha, VAlign va,
-                   ::velk::color col, const IProgram::Ptr& material, float shift_x, bool clip,
+                   ::velk::color col, const IProgram::Ptr& material, float shift_x, float shift_y,
                    vector<DrawEntry>& out)
 {
-    float offset_y = 0.f;
+    float offset_y = shift_y;
     switch (va) {
     case VAlign::Center: offset_y += (bounds.height - layout.total_height) * 0.5f; break;
     case VAlign::Bottom: offset_y += bounds.height - layout.total_height; break;
@@ -71,9 +71,6 @@ void append_glyphs(const IFont::TextLayoutResult& layout, const ::velk::size& bo
             auto& pg = layout.glyphs[line.first_glyph + i];
             const float x = pg.pos.x + offset_x;
             const float y = pg.pos.y + offset_y;
-            if (clip && (x < 0.f || x + pg.size.x > bounds.width)) {
-                continue;
-            }
 
             DrawEntry entry{};
             entry.pipeline_key = 0;
@@ -205,7 +202,7 @@ vector<DrawEntry> TextVisual::get_draw_entries(::velk::IRenderContext& /*ctx*/,
     }
 
     vector<DrawEntry> result;
-    text_detail::append_glyphs(layout_result_, bounds, ha, va, col, material, 0.f, false, result);
+    text_detail::append_glyphs(layout_result_, bounds, ha, va, col, material, 0.f, 0.f, result);
     return result;
 }
 

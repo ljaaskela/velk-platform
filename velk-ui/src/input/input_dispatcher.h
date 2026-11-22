@@ -45,6 +45,9 @@ private:
     /** @brief Dispatches a pointer event through the intercept + bubble pipeline. */
     InputResult dispatch_pointer(PointerEvent& event, const IElement::Ptr& hit);
 
+    /** @brief Sends a key event to the focused element, then its ancestors, until one consumes it. */
+    InputResult dispatch_key(const KeyEvent& event);
+
     /** @brief Dispatches a scroll event through the intercept + bubble pipeline. */
     InputResult dispatch_scroll(ScrollEvent& event, const IElement::Ptr& hit);
 

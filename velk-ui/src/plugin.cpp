@@ -17,6 +17,7 @@
 #include "input/drag.h"
 #include "input/hover.h"
 #include "input/input_dispatcher.h"
+#include "layout/scroll_view.h"
 #include "layout/stack.h"
 #include "material/gradient_material.h"
 #include "layout_solver.h"
@@ -39,6 +40,7 @@ ReturnValue VelkUiPlugin::initialize(IVelk& velk, PluginConfig& config)
     rv &= register_type<Padding>(velk);
     rv &= register_type<Margin>(velk);
     rv &= register_type<Align>(velk);
+    rv &= register_type<ScrollView>(velk);
     rv &= register_type<RectVisual>(velk);
     rv &= register_type<RoundedRectVisual>(velk);
     rv &= register_type<impl::TextureVisual>(velk);

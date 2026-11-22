@@ -9,6 +9,7 @@
 #include <velk/interface/intf_store.h>
 
 #include <velk-scene/interface/intf_render_to_texture.h>
+#include <velk-scene/interface/trait/intf_clip.h>
 #include <velk-scene/interface/intf_scene_plugin.h>
 #include <velk/interface/resource/intf_resource.h>
 #include <velk/interface/resource/intf_resource_store.h>
@@ -267,12 +268,36 @@ vector<IElement::Ptr> Scene::ray_cast(vec3 origin, vec3 /*direction*/, size_t ma
     // the old flat visual_list). Siblings are z-sorted so reverse
     // iteration visits the topmost element first, matching the
     // previous hit-testing semantics.
-    vector<IElement::Ptr> flat;
-    std::function<void(const IObject::Ptr&)> collect;
-    collect = [&](const IObject::Ptr& obj) {
+    // Each element with the rectangle its clips leave (min x, min y, max x, max y): a point
+    // outside it does not hit the element, as nothing of it is drawn there.
+    struct Entry
+    {
+        IElement::Ptr element;
+        float clip[4];
+    };
+    vector<Entry> flat;
+    std::function<void(const IObject::Ptr&, const float*)> collect;
+    collect = [&](const IObject::Ptr& obj, const float* outer) {
         auto elem = interface_pointer_cast<IElement>(obj);
         if (!elem) return;
-        flat.push_back(elem);
+        // The element itself is cut at the clips around it; its children also at its own.
+        flat.push_back({elem, {outer[0], outer[1], outer[2], outer[3]}});
+        float rect[4] = {outer[0], outer[1], outer[2], outer[3]};
+        if (auto clip = ::velk::find_attachment<IClip>(obj)) {
+            auto cs = read_state<IClip>(clip);
+            auto es = read_state<IElement>(elem);
+            if (cs && cs->enabled && es) {
+                // Translation only, as the hit test below.
+                const auto& m = es->world_matrix;
+                const ::velk::rect r = clip->clip_rect(es->size);
+                const float x = m(0, 3) + r.x;
+                const float y = m(1, 3) + r.y;
+                rect[0] = std::max(rect[0], x);
+                rect[1] = std::max(rect[1], y);
+                rect[2] = std::min(rect[2], x + r.width);
+                rect[3] = std::min(rect[3], y + r.height);
+            }
+        }
         auto kids = logical_.children_of(obj);
         std::sort(kids.begin(), kids.end(), [](const IObject::Ptr& a, const IObject::Ptr& b) {
             auto ra = read_state<IElement>(a);
@@ -282,16 +307,21 @@ vector<IElement::Ptr> Scene::ray_cast(vec3 origin, vec3 /*direction*/, size_t ma
             return za < zb;
         });
         for (auto& kid : kids) {
-            collect(kid);
+            collect(kid, rect);
         }
     };
     if (auto r = logical_.root()) {
-        collect(r);
+        const float everywhere[4] = {-3.0e38f, -3.0e38f, 3.0e38f, 3.0e38f};
+        collect(r, everywhere);
     }
 
     vector<IElement::Ptr> hits;
     for (size_t i = flat.size(); i > 0; --i) {
-        auto& elem = flat[i - 1];
+        auto& elem = flat[i - 1].element;
+        const float* clip = flat[i - 1].clip;
+        if (origin.x < clip[0] || origin.x >= clip[2] || origin.y < clip[1] || origin.y >= clip[3]) {
+            continue;
+        }
 
         auto* storage = interface_cast<IObjectStorage>(elem);
         if (!storage) continue;

@@ -14,6 +14,7 @@
 #include <velk/string.h>
 
 #include <velk-scene/instance_types.h>
+#include <velk-scene/interface/trait/intf_clip.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -199,6 +200,9 @@ void BatchBuilder::rebuild_batches(const SceneState& state,
         return phase == VisualPhase::AfterChildren ? cache.after_visuals : cache.before_visuals;
     };
 
+    // 1 + the clip slot that applies to each element (its own or an ancestor's), from the walk.
+    std::unordered_map<IElement*, uint32_t> element_clip;
+
     auto emit_visuals = [&](const vector<IElement*>& entries, VisualPhase phase,
                             vector<IBatch::Ptr>& target_batches,
                             float offset_x = 0.f, float offset_y = 0.f,
@@ -228,6 +232,26 @@ void BatchBuilder::rebuild_batches(const SceneState& state,
                 if (!elem_state) {
                     continue;
                 }
+
+                // Clipped instances carry their clip. A render target's subtree is drawn in
+                // target-local space, which the world-space rectangles do not match, so it
+                // is not clipped. An element wholly outside its clip is left out; it gets no
+                // slot, so moving it rebuilds the batches and it comes back when it shows.
+                uint32_t clip = 0;
+                if (track_slots) {
+                    if (auto found = element_clip.find(elem); found != element_clip.end()) {
+                        clip = found->second;
+                    }
+                }
+                if (clip != 0) {
+                    const auto& r = clip_slots_[clip - 1].rect;
+                    const auto& box = elem_state->world_aabb;
+                    if (box.position.x >= r[2] || box.position.x + box.extent.width <= r[0]
+                        || box.position.y >= r[3] || box.position.y + box.extent.height <= r[1]) {
+                        continue;
+                    }
+                }
+                const uint32_t clip_word = clip_bits(clip);
 
                 // Every instance layout begins with a mat4 world_matrix
                 // (see instance_types.h). We copy the element's transform
@@ -330,6 +354,10 @@ void BatchBuilder::rebuild_batches(const SceneState& state,
                         auto* instance = reinterpret_cast<ElementInstance*>(instance_data.data() + data_offset);
                         instance->params[3] = state.scene->get_object_ids(*elem, 1);
                     }
+                    if (de.instance_size == sizeof(ElementInstance)) {
+                        auto* instance = reinterpret_cast<ElementInstance*>(instance_data.data() + data_offset);
+                        std::memcpy(&instance->offset.w, &clip_word, sizeof(clip_word));
+                    }
 
                     batch->set_instance_count(slot_index + 1);
                     batch->set_world_aabb(aabb::merge(batch->world_aabb(), elem_state->world_aabb));
@@ -374,14 +402,28 @@ void BatchBuilder::rebuild_batches(const SceneState& state,
     // own RTT renders correctly into both.
     std::function<void(const IObject::Ptr&,
                        vector<IElement*>&, vector<IElement*>&,
-                       RenderTargetPassData*)> walk;
+                       RenderTargetPassData*, uint32_t)> walk;
     walk = [&](const IObject::Ptr& obj,
                vector<IElement*>& ambient_before,
                vector<IElement*>& ambient_after,
-               RenderTargetPassData* active_pass) {
+               RenderTargetPassData* active_pass,
+               uint32_t clip) {
         auto elem_ptr = interface_pointer_cast<IElement>(obj);
         if (!elem_ptr) return;
         auto* elem = elem_ptr.get();
+
+        // A clip element's own visuals are cut at its box, its descendants at its clip_rect.
+        if (auto c = ::velk::find_attachment<IClip>(obj); c) {
+            auto cs = read_state<IClip>(c);
+            if (cs && cs->enabled) {
+                const uint32_t own = clip_slot(obj, clip, false);
+                element_clip[elem] = own;
+                clip = clip_slot(obj, own, true);
+            }
+        }
+        if (clip != 0 && !element_clip.count(elem)) {
+            element_clip[elem] = clip;
+        }
 
         RenderTargetPassData* inner_pass = active_pass;
         if (elem->has_render_traits()) {
@@ -403,7 +445,7 @@ void BatchBuilder::rebuild_batches(const SceneState& state,
                     return za < zb;
                 });
             for (auto& kid : kids) {
-                walk(kid, ambient_before, ambient_after, inner_pass);
+                walk(kid, ambient_before, ambient_after, inner_pass, clip);
             }
         }
 
@@ -412,8 +454,9 @@ void BatchBuilder::rebuild_batches(const SceneState& state,
     };
 
     if (scene) {
-        walk(scene->root(), main_before, main_after, nullptr);
+        walk(scene->root(), main_before, main_after, nullptr, 0);
     }
+    compute_clip_rects();
 
     // Batch render target passes (offset by the element's world position).
     // Skip slot tracking for RTT subtrees: their batches live on the
@@ -499,6 +542,123 @@ void BatchBuilder::rebuild_batches(const SceneState& state,
     };
     for (auto& rtp : render_target_passes_) finalize_batches(rtp.batches);
     finalize_batches(out_batches);
+}
+
+void BatchBuilder::set_clip_arena(IGpuArena* arena)
+{
+    clip_arena_ = arena;
+    if (clip_arena_ && !clip_region_.valid()) {
+        clip_region_ = clip_arena_->alloc(kMaxClips * 4 * sizeof(float));
+    }
+}
+
+uint32_t BatchBuilder::clip_bits(uint32_t clip) const
+{
+    if (clip == 0 || !clip_region_.valid()) {
+        return 0;
+    }
+    return static_cast<uint32_t>(clip_region_.offset() / (4 * sizeof(float))) + clip;
+}
+
+uint32_t BatchBuilder::clip_slot(const IObject::Ptr& obj, uint32_t parent, bool content)
+{
+    auto* elem = interface_cast<IElement>(obj);
+    auto& slot_of = clip_slot_of_[content ? 1 : 0];
+    uint32_t slot = 0;
+    if (auto it = slot_of.find(elem); it != slot_of.end()) {
+        slot = it->second;
+    } else {
+        // Reuse the slot of an element that is gone, else add one.
+        slot = static_cast<uint32_t>(clip_slots_.size());
+        for (uint32_t i = 0; i < clip_slots_.size(); ++i) {
+            if (clip_slots_[i].element.expired()) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot == clip_slots_.size()) {
+            if (slot >= kMaxClips) {
+                VELK_LOG(W, "BatchBuilder: more than %u clips; the rest do not clip", kMaxClips);
+                return parent;
+            }
+            clip_slots_.emplace_back();
+        }
+        for (auto& map : clip_slot_of_) {
+            for (auto it = map.begin(); it != map.end();) {
+                it = it->second == slot ? map.erase(it) : std::next(it);
+            }
+        }
+        slot_of[elem] = slot;
+    }
+    clip_slots_[slot].element = obj;
+    clip_slots_[slot].content = content;
+    clip_slots_[slot].parent = parent;
+    return slot + 1;
+}
+
+void BatchBuilder::compute_clip_rects()
+{
+    vector<uint8_t> done(clip_slots_.size(), 0);
+    std::function<void(uint32_t)> compute = [&](uint32_t s) {
+        if (done[s]) {
+            return;
+        }
+        done[s] = 1;
+        auto& slot = clip_slots_[s];
+        float r[4] = {0.f, 0.f, 0.f, 0.f};
+        auto obj = slot.element.lock();
+        auto clip = obj ? ::velk::find_attachment<IClip>(obj) : nullptr;
+        if (auto state = read_state<IElement>(obj); state && clip) {
+            // The clip rectangle's corners in world space; their x and y extent is the rectangle.
+            const auto& m = state->world_matrix;
+            const rect local = slot.content ? clip->clip_rect(state->size)
+                                            : rect{0.f, 0.f, state->size.width, state->size.height};
+            const float x0 = local.x;
+            const float y0 = local.y;
+            const float x1 = local.x + local.width;
+            const float y1 = local.y + local.height;
+            const float xs[4] = {x0, x1, x0, x1};
+            const float ys[4] = {y0, y0, y1, y1};
+            for (int i = 0; i < 4; ++i) {
+                const float x = m(0, 0) * xs[i] + m(0, 1) * ys[i] + m(0, 3);
+                const float y = m(1, 0) * xs[i] + m(1, 1) * ys[i] + m(1, 3);
+                if (i == 0 || x < r[0]) r[0] = x;
+                if (i == 0 || y < r[1]) r[1] = y;
+                if (i == 0 || x > r[2]) r[2] = x;
+                if (i == 0 || y > r[3]) r[3] = y;
+            }
+        }
+        const uint32_t parent = slot.parent;
+        if (parent != 0 && parent - 1 < clip_slots_.size() && parent - 1 != s) {
+            compute(parent - 1);
+            const auto& p = clip_slots_[parent - 1].rect;
+            r[0] = std::max(r[0], p[0]);
+            r[1] = std::max(r[1], p[1]);
+            r[2] = std::min(r[2], p[2]);
+            r[3] = std::min(r[3], p[3]);
+        }
+        std::memcpy(slot.rect, r, sizeof(r));
+    };
+    for (uint32_t s = 0; s < clip_slots_.size(); ++s) {
+        compute(s);
+    }
+}
+
+void BatchBuilder::update_clips()
+{
+    if (clip_slots_.empty() || !clip_arena_ || !clip_region_.valid()) {
+        return;
+    }
+    compute_clip_rects();
+    for (uint32_t s = 0; s < clip_slots_.size(); ++s) {
+        auto& slot = clip_slots_[s];
+        if (slot.uploaded && std::memcmp(slot.rect, slot.written, sizeof(slot.rect)) == 0) {
+            continue;
+        }
+        clip_arena_->update_at(clip_region_.offset() + s * sizeof(slot.rect), slot.rect, sizeof(slot.rect));
+        std::memcpy(slot.written, slot.rect, sizeof(slot.rect));
+        slot.uploaded = true;
+    }
 }
 
 // build_draw_calls and build_gbuffer_draw_calls moved to

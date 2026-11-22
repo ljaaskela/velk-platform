@@ -150,6 +150,7 @@ The `IInputDispatcher` itself exposes typed events that fire BEFORE hit testing 
 | `on_pointer_event` | `PointerEvent` |
 | `on_scroll_event` | `ScrollEvent` |
 | `on_focus_changed` | `bool focused` |
+| `on_key_event` | `KeyEvent` |
 
 ```cpp
 velk::ScopedHandler raw_pointer(window.input()->on_pointer_event(),
@@ -161,7 +162,7 @@ velk::ScopedHandler raw_pointer(window.input()->on_pointer_event(),
     });
 ```
 
-These fire on every event, regardless of whether anything in the scene consumed them.
+Pointer and scroll events fire on every event, regardless of whether anything in the scene consumed them. A key event goes to the focused element and its ancestors first, and `on_key_event` fires only when none of them consumed it. A focused `TextField` consumes typed keys while editing, but not key releases or keys with Ctrl, Alt or Super, so shortcuts still reach global handlers.
 
 ## Event types
 

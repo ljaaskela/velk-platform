@@ -5,6 +5,7 @@
 
 #include <velk-render/interface/intf_analytic_shape.h>
 #include <velk-scene/ext/trait.h>
+#include <velk-scene/interface/trait/intf_clip.h>
 #include <velk-ui/interface/intf_content_size.h>
 #include <velk-ui/interface/intf_focus_target.h>
 #include <velk-ui/interface/intf_font.h>
@@ -20,11 +21,11 @@ namespace velk::ui {
  * @brief Single-line editable text.
  *
  * A text visual and an input trait in one attachment: it draws the text (or the edit buffer
- * while editing) and a caret, and takes focus and key events from the input dispatcher.
- * Glyphs not entirely inside the element's width are not drawn.
+ * while editing) and a caret, and takes focus and key events from the input dispatcher. It is
+ * also a clip, so text wider than the element is cut at its edges.
  */
 class TextField : public ::velk::ext::Visual2D<TextField, ITextVisual, ITextField, ::velk::IAnalyticShape,
-                                               IContentSize, IInputTrait, IFocusTarget>
+                                               IContentSize, IInputTrait, IFocusTarget, IClip>
 {
 public:
     VELK_CLASS_UID(ClassId::Visual::TextField, "TextField");
@@ -54,6 +55,9 @@ public:
 
     // IFocusTarget
     void on_focus_changed(bool focused) override;
+
+    // IClip
+    rect clip_rect(const size& box) const override { return {0.f, 0.f, box.width, box.height}; }
 
 protected:
     void on_state_changed(string_view name, IMetadata& owner, Uid interfaceId) override;

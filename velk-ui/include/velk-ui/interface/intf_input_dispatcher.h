@@ -33,7 +33,12 @@ public:
     /** @brief Feed a scroll event from the platform layer. */
     virtual void scroll_event(const ScrollEvent& event) = 0;
 
-    /** @brief Feed a key event from the platform layer. */
+    /**
+     * @brief Feed a key event from the platform layer.
+     *
+     * The focused element and its ancestors get it first; on_key_event fires only when none
+     * of them consumed it.
+     */
     virtual void key_event(const KeyEvent& event) = 0;
 
     /** @brief Returns the element currently under the pointer, or empty. */

@@ -219,4 +219,41 @@ TEST_F(TextFieldTest, ClickAfterEnterEditsAgain)
     EXPECT_EQ(text(), "ab12");
 }
 
+TEST_F(TextFieldTest, TypingDoesNotReachGlobalKeyHandlers)
+{
+    int global = 0;
+    ScopedHandler sub(dispatcher_->on_key_event(), [&global](const KeyEvent&) { ++global; });
+
+    KeyEvent w;
+    w.key = 87; // a character key: no named key
+    w.action = KeyAction::Down;
+
+    dispatcher_->key_event(w); // nothing focused: the broadcast gets it
+    EXPECT_EQ(global, 1);
+
+    click(190.f, 15.f);
+    dispatcher_->key_event(w); // the field takes it
+    type("w");
+    KeyEvent left;
+    left.named = Key::Left;
+    left.action = KeyAction::Down;
+    dispatcher_->key_event(left);
+    EXPECT_EQ(global, 1);
+
+    w.action = KeyAction::Up; // releases go on
+    dispatcher_->key_event(w);
+    EXPECT_EQ(global, 2);
+
+    w.action = KeyAction::Down; // shortcuts go on
+    w.modifiers = ui::Modifier::Ctrl;
+    dispatcher_->key_event(w);
+    EXPECT_EQ(global, 3);
+
+    press(Key::Enter); // ends editing (its release reaches the broadcast)
+    global = 0;
+    w.modifiers = ui::Modifier::None;
+    dispatcher_->key_event(w);
+    EXPECT_EQ(global, 1);
+}
+
 } // namespace

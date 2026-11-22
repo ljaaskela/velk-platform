@@ -19,6 +19,9 @@ inline constexpr Uid SceneBvh{"d9678826-947d-4f92-beee-5746340fe072"};
 /** @brief Default IBatch implementation. Hive-pooled per-frame batch produced by BatchBuilder. */
 inline constexpr Uid DefaultBatch{"60bc17f5-0e81-43e3-b82e-46a6fb7e479a"};
 
+/** @brief Clips an element and its descendants to the element's box. See IClip. */
+inline constexpr Uid Clip{"88595cee-731b-4413-b5f9-3ed9e5036d76"};
+
 namespace Transform {
 
 /** @brief Decomposed transform: translate, rotate (Z), scale. */

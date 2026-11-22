@@ -11,8 +11,9 @@ namespace velk::ui {
  *
  * Clicking the field focuses it and starts editing. While editing, typed text goes to an
  * edit buffer and the `text` property keeps its value. Enter or losing focus commits the
- * buffer to `text`; Escape restores the buffer from `text`. Text wider than the field is
- * clipped and scrolled to keep the caret in view.
+ * buffer to `text`; Escape restores the buffer from `text`. Text wider than the field
+ * scrolls to keep the caret in view. A text field is also an IClip, which cuts the text at
+ * the element's edges.
  */
 class ITextField : public Interface<ITextField>
 {
