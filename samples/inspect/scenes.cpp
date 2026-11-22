@@ -115,6 +115,30 @@ velk::IMesh::Ptr build_ground(velk::IRenderContext& ctx, float size, uint32_t ce
     return build(ctx, vertices, indices, material);
 }
 
+/// A flat disc on y = 0 around @p center, @p radius across its middle, facing up (-y): @p slices
+/// triangles from the center out, each long and thin, as a fan of paving round a corner.
+velk::IMesh::Ptr build_fan(velk::IRenderContext& ctx, const velk::vec3& center, float radius, uint32_t slices,
+                           const velk::IMaterial::Ptr& material)
+{
+    velk::vector<Vertex> vertices;
+    velk::vector<uint32_t> indices;
+    vertices.push_back({{center.x, 0.f, center.z}, {0.f, -1.f, 0.f}, {0.5f, 0.5f}, {1.f, 0.f, 0.f, 1.f}});
+    for (uint32_t i = 0; i < slices; ++i) {
+        const float a = 2.f * kPi * static_cast<float>(i) / static_cast<float>(slices);
+        const float x = std::cos(a);
+        const float z = std::sin(a);
+        vertices.push_back({{center.x + x * radius, 0.f, center.z + z * radius}, {0.f, -1.f, 0.f}, {0.5f + 0.5f * x, 0.5f + 0.5f * z},
+                            {1.f, 0.f, 0.f, 1.f}});
+    }
+    for (uint32_t i = 0; i < slices; ++i) {
+        // Wound so that it is seen from above, as add_grid's ground is.
+        indices.push_back(0u);
+        indices.push_back(1u + i);
+        indices.push_back(1u + (i + 1u) % slices);
+    }
+    return build(ctx, vertices, indices, material);
+}
+
 /// A box standing on y = 0, centered on x and z, each face a grid of cells by cells.
 velk::IMesh::Ptr build_box(velk::IRenderContext& ctx, const velk::vec3& size, uint32_t cells, const velk::IMaterial::Ptr& material)
 {
@@ -580,6 +604,20 @@ void build_soft(SceneBuilder& b)
         {add_mesh(b, build_box(raw(b), {60.f, 60.f, 60.f}, 8, standard(0.75f, 0.75f, 0.75f)), from), from, {150.f, 0.f, 40.f}});
 }
 
+/// Paving of long thin triangles fanned round a corner, under a sun of size 2 as bistro's, with
+/// a tall block whose shadow crosses it with a wide penumbra, a few posts and a thin board as a
+/// sign: shadows on long thin triangles, settled, coming into view, and after turning away and back.
+void build_pavement(SceneBuilder& b)
+{
+    set_sky(b, "pavement", 0.2f, 0.25f, 0.33f);
+    add_sun(b, {50.f, 30.f, 0.f}, 0.8f, 2.f);
+    add_mesh(b, build_fan(raw(b), {-150.f, 0.f, 150.f}, 900.f, 128, standard(0.55f, 0.55f, 0.55f)), {});
+    add_mesh(b, build_box(raw(b), {70.f, 400.f, 260.f}, 8, standard(0.75f, 0.72f, 0.68f)), {300.f, 0.f, 120.f});
+    const velk::IMesh::Ptr post = build_box(raw(b), {6.f, 70.f, 6.f}, 2, standard(0.2f, 0.2f, 0.2f));
+    for (int i = 0; i < 3; ++i) add_mesh(b, post, {-120.f + static_cast<float>(i) * 70.f, 0.f, 40.f});
+    add_mesh(b, build_box(raw(b), {40.f, 60.f, 3.f}, 2, standard(0.4f, 0.28f, 0.15f)), {60.f, 0.f, 70.f});
+}
+
 /// A line of text standing on a plane under a sun: the shadow of glyphs, not of their quads.
 void build_text(SceneBuilder& b)
 {
@@ -796,6 +834,10 @@ const velk::vector<SceneSpec>& scenes()
         {"soft", "a row of posts and a box moving through their shadows under a wide sun: soft shadows following a mover",
          {{"front", {{0.f, -120.f, 320.f}, 0.f, -15.f}}},
          build_soft},
+        {"pavement", "paving of long thin triangles under a wide sun, a tall block's shadow across it: shadows on long triangles",
+         {{"front", {{0.f, -110.f, 300.f}, 0.f, -15.f}},
+          {"turn", {{0.f, -110.f, 300.f}, 0.f, -15.f}, {{0.f, -110.f, 300.f}, 160.f, -15.f}, 10}},
+         build_pavement},
         {"text", "a line of text standing on a plane under a sun: glyph shadows",
          {{"front", {{0.f, -110.f, 300.f}, 0.f, -15.f}}, {"low", {{200.f, -50.f, 200.f}, 40.f, -8.f}}},
          build_text},
