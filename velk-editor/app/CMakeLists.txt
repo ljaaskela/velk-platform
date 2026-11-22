@@ -7,6 +7,8 @@ target_include_directories(velk_editor PRIVATE
     $<TARGET_PROPERTY:velk_importer,INTERFACE_INCLUDE_DIRECTORIES>
     $<TARGET_PROPERTY:velk_editor_core,INTERFACE_INCLUDE_DIRECTORIES>
     $<TARGET_PROPERTY:velk_remote,INTERFACE_INCLUDE_DIRECTORIES>
+    $<TARGET_PROPERTY:velk_data,INTERFACE_INCLUDE_DIRECTORIES>
+    $<TARGET_PROPERTY:velk_image,INTERFACE_INCLUDE_DIRECTORIES>
 )
 
 # The editor UI is store files, read through app:// next to the executable.
