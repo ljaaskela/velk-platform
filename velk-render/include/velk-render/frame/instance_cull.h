@@ -5646,11 +5646,14 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
                         "one a quarter as strong",
                      h[kLightPoolSumSlotChoices], h[kLightPoolSumLeftOutTenth], h[kLightPoolSumLeftOutQuarter]);
             // Pieces: those kept at the last frame's mark and the deepest of them, and since the
-            // last log those made, freed and asked for but not made.
-            VELK_LOG(I, "light pieces: %u kept, the deepest at %u; last frame %u asks; since the last log %u made, %u freed, "
-                        "%u asks not made",
+            // last log those made, freed and asked for but not made; and why pieces were let go
+            // of (unread, or their parent's light), the rest of those freed going with their record.
+            VELK_LOG(I, "light pieces: %u kept, the deepest at %u; last frame %u asks; since the last log %u made, %u freed "
+                        "(%u unread, %u with their parent's light), %u asks not made",
                      h[kLightPoolLastMarkPieces], h[kLightPoolLastMarkDeepest], h[kLightPoolLastSplits], h[kLightPoolSumPiecesMade],
-                     h[kLightPoolSumPiecesFreed], h[kLightPoolSumSplitsRefused]);
+                     h[kLightPoolSumPiecesFreed], h[kLightPoolSumPiecesUnread], h[kLightPoolSumPiecesMerged],
+                     h[kLightPoolSumSplitsRefused]);
+            clear(kLightPoolSumPiecesUnread, 2u);
             // What the culling arena holds: in use of its buffer, and this view's part of it.
             uint64_t cut_bytes = 0;
             for (const auto& c : state.cuts) cut_bytes += c.region.size();

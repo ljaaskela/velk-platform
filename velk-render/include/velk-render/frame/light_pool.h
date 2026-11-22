@@ -305,7 +305,9 @@ inline constexpr uint32_t kLightMaxSegments = 64;
     X(SpreadLanes, SPREAD_LANES, 180)            /* the lanes this frame's points traced from none spread over */    \
     X(FirstRaysNow, FIRST_RAYS_NOW, 181)         /* the rays this frame's points traced from none cast at most */    \
     X(SumLaidInherited, SUM_LAID_INHERITED, 182) /* summed: own points laid out from a coarser record's (kLightInherit) */ \
-    X(HeaderEnd, HEADER_END, 183)
+    X(SumPiecesUnread, SUM_PIECES_UNREAD, 183)   /* summed: pieces let go of as no pixel read them */                \
+    X(SumPiecesMerged, SUM_PIECES_MERGED, 184)   /* summed: pieces let go of with their parent's light */            \
+    X(HeaderEnd, HEADER_END, 185)
 
 #define VELK_LIGHT_POOL_CPP_WORD(cpp, glsl, word) inline constexpr uint32_t kLightPool##cpp = word;
 VELK_LIGHT_POOL_HEADER(VELK_LIGHT_POOL_CPP_WORD)
@@ -3870,6 +3872,15 @@ uint velk_piece_coarse_depth(float tri_px, float light_pixels, uint from)
     return max(from, deepest);
 }
 
+// The piece starting at word `at` read in the pool's frame `now`, once a frame.
+void velk_light_piece_read(uint at, uint now)
+{
+    uint read = light_words.data[at + VELK_PIECE_READ];
+    if ((read & VELK_PIECE_FRAME_BITS) != now) {
+        atomicCompSwap(light_words.data[at + VELK_PIECE_READ], read, now | (read & VELK_PIECE_SAME_BITS));
+    }
+}
+
 // Lists the points of light the pixel at weights `b` of triangle `triangle` (corners `corners`)
 // of the record whose first page starts at `first` reads on its way down (velk_piece_way), when
 // they are due: its coarse level's three around it as coarse, then those of the level it
@@ -3894,15 +3905,19 @@ void velk_light_list_way(uint first, uvec3 corners, uint triangle, vec3 b, float
     // points' light even when a change made them stale, so that the finer points an edge needs
     // are traced while it moves; the lighting judges it again with what is traced.
     uint cell = velk_way_cell(pool, first, corners, way, false);
+    uint deepest = way.piece;
     if (cell < 2u) velk_way_stop_at_coarse(way);
     bool on_piece = way.piece != VELK_PIECE_VERTICES;
     uint piece_first = on_piece ? velk_light_page(pool, way.piece) : 0u;
-    if (on_piece) {
-        uint now = light_words.data[pool + VELK_POOL_FRAME] & VELK_PIECE_FRAME_BITS;
-        uint read = light_words.data[piece_first + VELK_PIECE_READ];
-        if ((read & VELK_PIECE_FRAME_BITS) != now) {
-            atomicCompSwap(light_words.data[piece_first + VELK_PIECE_READ], read, now | (read & VELK_PIECE_SAME_BITS));
-        }
+    uint now = light_words.data[pool + VELK_POOL_FRAME] & VELK_PIECE_FRAME_BITS;
+    if (on_piece) velk_light_piece_read(piece_first, now);
+    // The pieces under a coarse cell it stopped at stay while it is in view, which bounds them,
+    // and the pool is not short (an eighth free, where it grows): a shadow's edge sweeping back
+    // and forth (a light swaying) finds them, and their light, instead of making them again from
+    // none. Short of room, they go as unread.
+    if (deepest != way.piece && deepest != VELK_PIECE_VERTICES
+        && light_words.data[pool + VELK_POOL_FREE_PAGES] * 8u > light_words.data[pool + VELK_POOL_PAGES]) {
+        velk_light_piece_read(velk_light_page(pool, deepest), now);
     }
 
     // The vertex points: its coarse level when it is them, else read only by bounces.
@@ -5196,9 +5211,12 @@ void main()
             }
             if (unread || merge) {
                 for (uint k = 0u; k < 4u; ++k) light_words.data[at + VELK_PIECE_CHILDREN + k] = VELK_LIGHT_NONE;
+                atomicAdd(light_words.data[pool + (unread ? VELK_POOL_SUM_PIECES_UNREAD : VELK_POOL_SUM_PIECES_MERGED)], 4u);
             }
         } else if (parent == VELK_LIGHT_NONE && velk_pieces_unread(at, now, keep)) {
-            atomicCompSwap(light_words.data[velk_light_root_word(pool, first, triangle)], page, VELK_LIGHT_NONE);
+            if (atomicCompSwap(light_words.data[velk_light_root_word(pool, first, triangle)], page, VELK_LIGHT_NONE) == page) {
+                atomicAdd(light_words.data[pool + VELK_POOL_SUM_PIECES_UNREAD], 1u);
+            }
         }
         return;
     }
