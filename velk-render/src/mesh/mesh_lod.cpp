@@ -362,11 +362,26 @@ void simplify_group(LodVertices& v, const vector<uint32_t>& merged, bool whole, 
         vector<uint32_t> simplified;
         simplified.resize(surface.size());
         // Clamped keeps normals' error from overstating how far the surface moved.
-        const size_t count = meshopt_simplifyWithAttributes(
-            simplified.data(), surface.data(), surface.size(), v.positions.data(), v.positions.size() / 3, sizeof(float) * 3,
-            has_normals ? v.normals.data() : nullptr, sizeof(float) * 3, has_normals ? kNormalWeights : nullptr,
-            has_normals ? 3 : 0, v.locks.data(), surface.size() / 6 * 3, FLT_MAX,
-            meshopt_SimplifySparse | meshopt_SimplifyErrorAbsolute | meshopt_SimplifyErrorClamped, nullptr);
+        const auto simplify = [&](unsigned int extra) {
+            return meshopt_simplifyWithAttributes(
+                simplified.data(), surface.data(), surface.size(), v.positions.data(), v.positions.size() / 3, sizeof(float) * 3,
+                has_normals ? v.normals.data() : nullptr, sizeof(float) * 3, has_normals ? kNormalWeights : nullptr,
+                has_normals ? 3 : 0, v.locks.data(), surface.size() / 6 * 3, FLT_MAX,
+                meshopt_SimplifySparse | meshopt_SimplifyErrorAbsolute | meshopt_SimplifyErrorClamped | extra, nullptr);
+        };
+        size_t count = simplify(0u);
+        // Seams (vertices split for uvs or normals) block collapses, so a surface with many keeps
+        // nearly all of it. Where it does, collapses may cross them; the locks still hold.
+        if (count == 0 || static_cast<float>(count) > kStopAboveKept * static_cast<float>(surface.size())) {
+            const size_t before = count;
+            vector<uint32_t> first;
+            first.assign(simplified.begin(), simplified.begin() + before);
+            count = simplify(meshopt_SimplifyPermissive);
+            if (count == 0 || (before != 0 && count >= before)) {
+                std::copy(first.begin(), first.end(), simplified.begin());
+                count = before;
+            }
+        }
         if (count == 0) {
             kept = surface;
         } else {
