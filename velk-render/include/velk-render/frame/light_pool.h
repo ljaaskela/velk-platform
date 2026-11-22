@@ -3091,13 +3091,9 @@ uint velk_cell_hash(uvec3 v)
 // place's distance (at least an eighth), and one of six ways a surface faces. `level` is its width
 // as a power of two, from -3. At most as wide as the square, so that a cell has about one probe
 // and gets as many rays as a probe while light changes.
-void velk_cell_key(vec3 pos, vec3 n, out uint key, out uint check, out int level)
+void velk_cell_key_at(vec3 pos, vec3 n, int level, out uint key, out uint check)
 {
     GlobalData g = VELK_GLOBALS;
-    mat4 vp = g.view_projection;
-    float pixels_per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * g.viewport.y * 0.5;
-    float square = float(VELK_PROBE_PIXELS) * length(pos) / max(pixels_per_unit, 1e-6);
-    level = min(int(floor(log2(max(square, 0.125)))), 28);
     float size = exp2(float(level));
     // The camera's place in whole cells and what is left of it, so that far from the origin the
     // cell is found without adding a large number to a small one.
@@ -3109,6 +3105,45 @@ void velk_cell_key(vec3 pos, vec3 n, out uint key, out uint check, out int level
     uint level_face = (uint(level + 32) << 3u) | face;
     key = velk_cell_hash(uvec3(c) ^ uvec3(level_face * 0x9e3779b9u, level_face, 0u)) | 1u;
     check = velk_cell_hash(uvec3(c.yzx) + uvec3(level_face, 0x51ed270bu, level_face * 0x2545f491u));
+}
+
+void velk_cell_key(vec3 pos, vec3 n, out uint key, out uint check, out int level)
+{
+    GlobalData g = VELK_GLOBALS;
+    mat4 vp = g.view_projection;
+    float pixels_per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * g.viewport.y * 0.5;
+    float square = float(VELK_PROBE_PIXELS) * length(pos) / max(pixels_per_unit, 1e-6);
+    level = min(int(floor(log2(max(square, 0.125)))), 27);
+    velk_cell_key_at(pos, n, level, key, check);
+}
+
+// The cell with `key` and `check` in the table at word `table` that holds light, without taking
+// a slot for it: 0xFFFFFFFF when there is none. All its slots are looked at, as one let go of
+// (velk_probe_cells_age) leaves a free slot before cells that are still there.
+uint velk_cell_lookup(uint table, uint key, uint check)
+{
+    for (uint p = 0u; p < VELK_CELL_PROBES; ++p) {
+        uint cell = table + ((key + p) & (VELK_CELL_SLOTS - 1u)) * VELK_CELL_WORDS;
+        uint k = VELK_LIGHT_WORDS.data[cell + VELK_CELL_KEY];
+        if (k == key && VELK_LIGHT_WORDS.data[cell + VELK_CELL_CHECK] == check) {
+            return VELK_LIGHT_WORDS.data[cell + VELK_CELL_SAMPLES] > 0u ? cell : 0xFFFFFFFFu;
+        }
+    }
+    return 0xFFFFFFFFu;
+}
+
+// The cell holding light for a place at `pos` (relative to the camera) facing `n`, as wide as a
+// probe there would take or the next width up: 0xFFFFFFFF when neither holds any.
+uint velk_cell_light_at(uint table, vec3 pos, vec3 n)
+{
+    uint key;
+    uint check;
+    int level;
+    velk_cell_key(pos, n, key, check, level);
+    uint cell = velk_cell_lookup(table, key, check);
+    if (cell != 0xFFFFFFFFu) return cell;
+    velk_cell_key_at(pos, n, level + 1, key, check);
+    return velk_cell_lookup(table, key, check);
 }
 
 // The cell with `key` and `check` in the table at word `table`, or a free slot taken for it:
@@ -3417,15 +3452,21 @@ vec3 velk_probe_sky(vec3 rd)
     return velk_probe_env(rd, 1.0);
 }
 
-// The indirect light a hit at `at` facing `n` gets, as the lighting pass would light it: the
-// last frame's probe where the hit was on screen, when that probe was on the same surface, so
-// that light bounces once more each frame; else what its record or quad node keeps at
-// `radiance` from the pixels that showed it, where those faced about as it does (`radiance_dir`,
-// their way on average, VELK_LIGHT_NONE for a quad's); else the environment around its normal,
-// unshadowed. A record seen all round averages to a short way, which no hit agrees with.
-vec3 velk_probe_hit_indirect(vec3 at, vec3 n, uint radiance, uint radiance_dir, uint width, uint height, uint across)
+// The indirect light a hit at `at` facing `n` gets, as the lighting pass would light it: its
+// probes' cell in the table at word `cells` (VELK_PROBE_CELL_GLSL), as wide as a probe there takes
+// or the next width up, so that light bounces once more each frame and stays where the camera
+// left it; else the last frame's probe where the hit was on screen, when that probe was on the
+// same surface; else what its record or quad node keeps at `radiance` from the pixels that showed
+// it, where those faced about as it does (`radiance_dir`, their way on average, VELK_LIGHT_NONE
+// for a quad's); else the environment around its normal, unshadowed. A record seen all round
+// averages to a short way, which no hit agrees with.
+vec3 velk_probe_hit_indirect(uint cells, vec3 at, vec3 n, uint radiance, uint radiance_dir, uint width, uint height, uint across)
 {
     GlobalData g = VELK_GLOBALS;
+    if (cells != 0xFFFFFFFFu) {
+        uint cell = velk_cell_light_at(cells, at, n);
+        if (cell != 0xFFFFFFFFu) return velk_probe_eval(velk_probe_read(cell + VELK_CELL_LIGHT), velk_cell_normal(cell), n);
+    }
     uint was_store = pc.env.w;
     vec4 clip = g.prev_view_projection * vec4(at + g.cam_moved, 1.0);
     if (was_store != 0xFFFFFFFFu && clip.w > 1e-5) {
@@ -3612,7 +3653,7 @@ void velk_probes_trace(uint lane)
             if (lit && ask && pc.shapes_base != 0xFFFFFFFFu) velk_probe_ask(light_word);
             // As the lighting pass lights a pixel: albedo times each light's N.L and strength, and
             // its indirect light.
-            vec3 indirect = lit ? velk_probe_hit_indirect(at, hn, radiance, radiance_dir, width, height, across) : vec3(0.0);
+            vec3 indirect = lit ? velk_probe_hit_indirect(pc.more.x, at, hn, radiance, radiance_dir, width, height, across) : vec3(0.0);
             light = albedo * (velk_probe_direct(hit, light_word, center, at, hn) + indirect) + emission;
         } else {
             light = velk_probe_sky(dir);
@@ -3746,7 +3787,7 @@ void velk_reflect_trace(uint lane)
         bool ask;
         velk_probe_hit_words(hit, at, light_word, radiance, radiance_dir, center, ask);
         if (lit && ask && pc.shapes_base != 0xFFFFFFFFu) velk_probe_ask(light_word);
-        vec3 indirect = lit ? velk_probe_hit_indirect(at, hn, radiance, radiance_dir, width, height, across) : vec3(0.0);
+        vec3 indirect = lit ? velk_probe_hit_indirect(0xFFFFFFFFu, at, hn, radiance, radiance_dir, width, height, across) : vec3(0.0);
         // Its metal: what it mirrors of the environment, half blurred, its own roughness not known.
         light = albedo * (velk_probe_direct(hit, light_word, center, at, hn) + indirect) + emission
               + metal * velk_probe_env(reflect(dir, hn), 0.5);
