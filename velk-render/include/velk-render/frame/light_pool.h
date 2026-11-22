@@ -530,13 +530,15 @@ uint velk_light_blocker_word(uint pool, uint first, uint p)
     return velk_light_page_blocker(pool, page, at % VELK_LIGHT_PAGE_WORDS);
 }
 
-// A blocker's distance as 4 bits: 1 for 1/128 or nearer, doubling each step, 14 for 64 or more.
-// 0 is a light no ray of the point went to yet, 15 one whose rays found nothing in the way.
+// A blocker's distance as 4 bits: 1 for 1/128 or nearer, doubling each step, 13 for 32 or more.
+// 0 is a light no ray of the point went to yet, 14 one a change made stale (what the point has of
+// it is a guess its next rays move from), 15 one whose rays found nothing in the way.
 uint velk_light_blocker_code(float d)
 {
-    return uint(clamp(round(log2(max(d, 1e-6))) + 8.0, 1.0, 14.0));
+    return uint(clamp(round(log2(max(d, 1e-6))) + 8.0, 1.0, 13.0));
 }
 #define VELK_LIGHT_BLOCKER_UNTRACED 0u
+#define VELK_LIGHT_BLOCKER_STALE 14u
 #define VELK_LIGHT_BLOCKER_CLEAR 15u
 
 float velk_light_blocker_distance(uint code)
@@ -1164,8 +1166,8 @@ void velk_light_list_coarse(uint pool, uint page, uint instance, uint frame, uin
 // (VELK_LIGHT_LIST_UNTRACED and the others): never traced; stale since a change, of a pixel's
 // `coarse` level; stale, finer; warming up. Its trace state takes the frame, and its count as
 // velk_light_point_traces says, so that the trace reads which trace this is. A settled point with
-// a light a change left untraced (its blocker word `bw` has a code VELK_LIGHT_BLOCKER_UNTRACED)
-// warms up again. Past the list's room it waits for a later frame.
+// a light untraced or stale (its blocker word `bw` has a code VELK_LIGHT_BLOCKER_UNTRACED or
+// VELK_LIGHT_BLOCKER_STALE) warms up again. Past the list's room it waits for a later frame.
 void velk_light_list_at(uint pool, uint word, uint bw, uint first, uint entry_first, uint entry_point, uint instance,
                         uint frame, bool coarse)
 {
@@ -1175,8 +1177,9 @@ void velk_light_list_at(uint pool, uint word, uint bw, uint first, uint entry_fi
     uint traces = velk_light_point_traces(pool, first, piece, state);
     if (!velk_light_point_due(traces)) {
         uint codes = VELK_LIGHT_WORDS.data[bw];
-        // Any 4 bits all clear.
-        if (((codes - 0x11111111u) & ~codes & 0x88888888u) == 0u) return;
+        // Any 4 bits untraced (0) or stale (14, which the xor makes 0).
+        uint stale = codes ^ 0xEEEEEEEEu;
+        if (((((codes - 0x11111111u) & ~codes) | ((stale - 0x11111111u) & ~stale)) & 0x88888888u) == 0u) return;
         traces = VELK_LIGHT_WARM_TRACES - 1u;
     }
     uint now = frame & 0x0FFFFFFFu;
@@ -1372,11 +1375,11 @@ bool velk_piece_light(uint pool, uint page, uint first, uvec3 corners, vec3 l, b
             if (trust < 1.0) full = false;
             if (trust > 0.0 && sized) {
                 uint codes = VELK_LIGHT_WORDS.data[velk_way_blocker(pool, first, corners, page, k, words[k])];
-                // The nearest per light: the lower of each 4 bits, 0 counting as none.
+                // The nearest per light: the lower of each 4 bits, 0, stale and clear counting as none.
                 for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) {
                     uint c = (codes >> (4u * s)) & 15u;
                     uint had = (nearest >> (4u * s)) & 15u;
-                    if (c != 0u && c < had) nearest = (nearest & ~(15u << (4u * s))) | (c << (4u * s));
+                    if (c != 0u && c < VELK_LIGHT_BLOCKER_STALE && c < had) nearest = (nearest & ~(15u << (4u * s))) | (c << (4u * s));
                 }
             }
         }
@@ -1453,9 +1456,9 @@ bool velk_light_add_points(uint pool, uint first, uint t, uvec3 corners, vec3 b,
                 if (slot == VELK_LIGHT_NONE) continue;
                 Light light = velk_light_at(pc.lights_base + slot);
                 if (light.params.w <= 0.0) continue;
-                // 15 is none read, or a blocker so far away that the edge is wider than any piece.
+                // 15 is none read: no blocker, or none known.
                 uint c = (nearest >> (4u * s)) & 15u;
-                if (c == 15u) continue;
+                if (c >= VELK_LIGHT_BLOCKER_STALE) continue;
                 float wide = velk_light_penumbra(light, at, velk_light_blocker_distance(c)) * px_per_world;
                 if (wide > fine_px) {
                     blend[s] = clamp((wide - fine_px) / max(coarse_px - fine_px, 1e-3), 0.0, 1.0);
@@ -1694,22 +1697,25 @@ uint velk_points_none_clear(uint slots[VELK_LIGHT_SLOTS])
 
 // The slot of `slots` to trace once more at `p`, chosen at random by `seed` in proportion to
 // how much each could bring: among the lights no ray of the point went to yet (their codes in
-// `blockers` VELK_LIGHT_BLOCKER_UNTRACED) while there are any.
+// `blockers` VELK_LIGHT_BLOCKER_UNTRACED) or that a change made stale (VELK_LIGHT_BLOCKER_STALE)
+// while there are any.
 uint velk_points_pick(uint slots[VELK_LIGHT_SLOTS], vec3 p, uint seed, uint blockers)
 {
     float strengths[VELK_LIGHT_SLOTS];
     float total = 0.0;
-    float untraced = 0.0;
+    float due = 0.0;
     for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) {
         strengths[s] = slots[s] == VELK_LIGHT_NONE ? 0.0 : velk_light_strength(velk_light_at(pc.lights_base + slots[s]), p);
         total += strengths[s];
-        if (((blockers >> (4u * s)) & 15u) == VELK_LIGHT_BLOCKER_UNTRACED) untraced += strengths[s];
+        uint code = (blockers >> (4u * s)) & 15u;
+        if (code == VELK_LIGHT_BLOCKER_UNTRACED || code == VELK_LIGHT_BLOCKER_STALE) due += strengths[s];
     }
-    if (untraced > 0.0) {
+    if (due > 0.0) {
         for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) {
-            if (((blockers >> (4u * s)) & 15u) != VELK_LIGHT_BLOCKER_UNTRACED) strengths[s] = 0.0;
+            uint code = (blockers >> (4u * s)) & 15u;
+            if (code != VELK_LIGHT_BLOCKER_UNTRACED && code != VELK_LIGHT_BLOCKER_STALE) strengths[s] = 0.0;
         }
-        total = untraced;
+        total = due;
     }
     float pick = float(velk_points_hash(seed) & 0xFFFFFFu) / 16777215.0 * total;
     for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) {
@@ -2150,16 +2156,20 @@ void velk_points_trace_point(uint pool, uint i, uint frame, uint counts[4], uint
         // One ray: the point's first lane's.
         if (lane != 0u) return;
         g_rays_charged = 1u;
-        // Warming up, a running mean of its rays; a light's first ray replaces what it kept.
+        // Warming up, a running mean of its rays; a light's first ray replaces what it kept, and
+        // the rays of one a change made stale move its light from what it had as a settled
+        // point's would, so that a light moving a little does not turn a soft shadow into one ray.
         float step = 1.0 / float(traces + 1u);
         value = old;
         blockers = VELK_LIGHT_WORDS.data[bw];
         uint s = velk_points_pick(slots, p, seed, blockers);
         if (slots[s] != VELK_LIGHT_NONE) {
             float blocked = velk_points_blocked(velk_light_at(pc.lights_base + slots[s]), p, n, lift, seed + 7u, traces & 3u);
-            bool first_ray = ((blockers >> (4u * s)) & 15u) == VELK_LIGHT_BLOCKER_UNTRACED;
+            uint had = (blockers >> (4u * s)) & 15u;
+            bool first_ray = had == VELK_LIGHT_BLOCKER_UNTRACED;
             if (first_ray) step = 1.0;
-            if (blocked > 0.0 || first_ray) {
+            if (had == VELK_LIGHT_BLOCKER_STALE) step = 1.0 / float(VELK_LIGHT_WARM_TRACES);
+            if (blocked > 0.0 || first_ray || had == VELK_LIGHT_BLOCKER_STALE) {
                 uint code = blocked > 0.0 ? velk_light_blocker_code(velk_ray_blocker_t) : VELK_LIGHT_BLOCKER_CLEAR;
                 blockers = (blockers & ~(15u << (4u * s))) | (code << (4u * s));
             }
@@ -2170,10 +2180,11 @@ void velk_points_trace_point(uint pool, uint i, uint frame, uint counts[4], uint
             uint now = min(uint(mix(was, blocked * 15.0, step) + dither), 15u);
             value = (old & ~(15u << (4u * s))) | (now << (4u * s));
         }
-        // Not settled while a light that brings something here has had no ray: it warms on. One
-        // that brings nothing here (moved out of reach since a change) needs none.
+        // Not settled while a light that brings something here has had no ray, or is stale: it
+        // warms on. One that brings nothing here (moved out of reach since a change) needs none.
         for (uint t = 0u; t < VELK_LIGHT_SLOTS; ++t) {
-            if (slots[t] == VELK_LIGHT_NONE || ((blockers >> (4u * t)) & 15u) != VELK_LIGHT_BLOCKER_UNTRACED) continue;
+            uint code = (blockers >> (4u * t)) & 15u;
+            if (slots[t] == VELK_LIGHT_NONE || (code != VELK_LIGHT_BLOCKER_UNTRACED && code != VELK_LIGHT_BLOCKER_STALE)) continue;
             if (velk_light_strength(velk_light_at(pc.lights_base + slots[t]), p) > 0.0) {
                 traces = min(traces, VELK_LIGHT_WARM_TRACES - 2u);
             } else {
@@ -2524,14 +2535,15 @@ uint velk_change_lit(uint slots[VELK_LIGHT_SLOTS])
     return lit;
 }
 
-// Slot bits as a blocker word's mask: 4 bits a slot.
-uint velk_change_nibbles(uint bits)
+// Blocker codes `codes` with the slots of `bits` made stale (VELK_LIGHT_BLOCKER_STALE), those not
+// traced yet left so: their first ray still replaces what they have.
+uint velk_change_stale(uint codes, uint bits)
 {
-    uint mask = 0u;
     for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) {
-        if ((bits & (1u << s)) != 0u) mask |= 15u << (4u * s);
+        if ((bits & (1u << s)) == 0u || ((codes >> (4u * s)) & 15u) == VELK_LIGHT_BLOCKER_UNTRACED) continue;
+        codes = (codes & ~(15u << (4u * s))) | (VELK_LIGHT_BLOCKER_STALE << (4u * s));
     }
-    return mask;
+    return codes;
 }
 
 // How much `light` could bring some place of a sphere at `center` (relative to the camera) of
@@ -2651,16 +2663,15 @@ void velk_change_pieces(uint pool, uint changes, uint page)
     uint altered = velk_change_slots(changes, center, radius, slots);
     if (altered == 0u) return;
     // All its lights, or all its record's: its points stale, traced from none again. Some: those
-    // lights untraced at its points (VELK_LIGHT_BLOCKER_UNTRACED), which keep the rest and what
-    // they had of those until a warm-up ray replaces it.
+    // lights stale at its points (velk_change_stale), which keep the rest, and what they had of
+    // those for warm-up rays to move from.
     if (altered == velk_change_lit(slots) || VELK_LIGHT_WORDS.data[first + VELK_PAGE_CHANGED] == now) {
         VELK_LIGHT_WORDS.data[velk_piece_changed_word(pool, page)] = now;
         return;
     }
-    uint clear = ~velk_change_nibbles(altered);
     for (uint q = 0u; q < VELK_PIECE_POINTS; ++q) {
         uint bw = velk_light_page_blocker(pool, page, 2u * q);
-        VELK_LIGHT_WORDS.data[bw] &= clear;
+        VELK_LIGHT_WORDS.data[bw] = velk_change_stale(VELK_LIGHT_WORDS.data[bw], altered);
     }
 }
 
@@ -2767,19 +2778,18 @@ void main()
     atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_CHANGED], 1u);
     uint lit = velk_change_lit(slots);
     if (own_points && !all && !entered && altered != lit) {
-        // Some of its lights: those untraced at its vertices' points (VELK_LIGHT_BLOCKER_UNTRACED),
-        // which keep the rest and what they had of those until a warm-up ray replaces it; its
+        // Some of its lights: those stale at its vertices' points (velk_change_stale), which keep
+        // the rest, and what they had of those for warm-up rays to move from; its
         // pieces likewise as far as the change is in their way (the pieces pass, pc.mode 1). Its
         // coarse light stays: its points are trusted, and a coarse light's rays (eight a light)
         // every frame a light moves would take the budget from them.
         uint now = VELK_GLOBALS.present_counter & 0x0FFFFFFFu;
         VELK_LIGHT_WORDS.data[first + VELK_PAGE_INSTANCE] = instance;
         VELK_LIGHT_WORDS.data[first + VELK_PAGE_TOUCHED] = now;
-        uint clear = ~velk_change_nibbles(altered);
         uint points = velk_light_own_points(first);
         for (uint p = 0u; p < points; ++p) {
             uint bw = velk_light_blocker_word(pool, first, p);
-            VELK_LIGHT_WORDS.data[bw] &= clear;
+            VELK_LIGHT_WORDS.data[bw] = velk_change_stale(VELK_LIGHT_WORDS.data[bw], altered);
         }
         return;
     }
