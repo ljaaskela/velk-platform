@@ -5538,9 +5538,24 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
                 arena->update_at(wanted_at, &none, sizeof(none));
             }
             uint32_t free_pages = 0;
-            if (wanted != 0) {
-                arena->read_at(pool.header.offset() + uint64_t(kLightPoolFreePages) * sizeof(uint32_t), &free_pages,
-                               sizeof(free_pages));
+            arena->read_at(pool.header.offset() + uint64_t(kLightPoolFreePages) * sizeof(uint32_t), &free_pages, sizeof(free_pages));
+            // Short for long without a frame asking for more: under a sixteenth free for
+            // kLightPoolAheadFrames, which the sweep had at its shortest keep (velk_pieces_keep_frames)
+            // to free what is out of view, so that what holds the pool is what is read. A quarter
+            // more, then, before a burst finds it full; at most once every kLightPoolAheadEvery
+            // frames.
+            const bool low = free_pages * 16u < pool.pages();
+            if (!low) {
+                pool.low_since = 0;
+            } else if (pool.low_since == 0) {
+                pool.low_since = ctx.present_counter;
+            } else if (wanted == 0 && ctx.present_counter >= pool.low_since + kLightPoolAheadFrames
+                       && ctx.present_counter >= pool.ahead_frame + kLightPoolAheadEvery && pool.segments.size() < pool.max_segments) {
+                pool.ahead_frame = ctx.present_counter;
+                pool.low_since = 0;
+                const uint32_t added = grow_light_pool(pool, *arena, (pool.pages() / 4u + kLightSegmentPages - 1u) / kLightSegmentPages);
+                VELK_LOG(I, "light pool +%u to %u pg ahead: %u free for %u frames", added, pool.pages(), free_pages,
+                         kLightPoolAheadFrames);
             }
             // Short only when a frame wanted more than the last sweep had free, or the pool is
             // nearly full: else what pieces out of view hold (velk_pieces_keep_frames) is given back

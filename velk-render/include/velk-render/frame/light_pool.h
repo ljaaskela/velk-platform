@@ -201,6 +201,11 @@ inline constexpr uint32_t kLightSegmentPages = 16384;
 inline constexpr uint32_t kLightSegmentWordsPerPage = kLightPageWords + kLightPageWords / 2u;
 static_assert(uint64_t(kLightSegmentPages) * kLightPageWords == 1048576u, "Mirrors VELK_LIGHT_SEGMENT_PAGE_WORDS");
 inline constexpr uint32_t kLightMaxSegments = 64;
+/// The pool grows a quarter ahead of a frame asking when it stayed under a sixteenth free this
+/// many frames, at most once every kLightPoolAheadEvery: past a full keep of the sweep's shortest
+/// (VELK_PIECE_KEEP_FRAMES), so that pieces out of view were let go of first.
+inline constexpr uint32_t kLightPoolAheadFrames = 40;
+inline constexpr uint32_t kLightPoolAheadEvery = 60;
 
 /// The light pool's header, its words in order: each one's name in C++ (kLightPool, then the
 /// first name) and in the shaders (VELK_POOL_, then the second), and its place. "This frame":
@@ -5366,15 +5371,17 @@ bool velk_pieces_marked(uint pool, uint page)
 }
 
 // Frames an unread piece is kept: VELK_PIECE_KEEP_FRAMES when the pool is short of pages, longer
-// while it has room, so that turning back to what went out of view finds its pieces and their
-// light. They never take the last quarter of the pool, which bursts of new pieces while the
-// camera moves need, so that keeping them does not make the pool grow.
+// the more room it has, so that turning back to what went out of view finds its pieces and their
+// light. It shortens a step at a time as the pool fills, so that a burst of new pieces while the
+// camera turns does not let every piece out of view go at once.
 uint velk_pieces_keep_frames(uint pool)
 {
     uint free_pages = light_words.data[pool + VELK_POOL_FREE_PAGES];
     uint pages = light_words.data[pool + VELK_POOL_PAGES];
     if (free_pages * 2u > pages) return 32u * VELK_PIECE_KEEP_FRAMES;
     if (free_pages * 4u > pages) return 8u * VELK_PIECE_KEEP_FRAMES;
+    if (free_pages * 8u > pages) return 4u * VELK_PIECE_KEEP_FRAMES;
+    if (free_pages * 16u > pages) return 2u * VELK_PIECE_KEEP_FRAMES;
     return VELK_PIECE_KEEP_FRAMES;
 }
 
@@ -5602,6 +5609,8 @@ struct LightPool
     vector<ArenaRegion> segments;
     uint32_t max_segments = 0;     ///< As many as the device has room for.
     uint64_t check_frame = 0;      ///< When pages asked for were last read back.
+    uint64_t low_since = 0;        ///< Since when it has been under a sixteenth free, 0 while not.
+    uint64_t ahead_frame = 0;      ///< When it last grew ahead of a frame asking (kLightPoolAheadFrames).
     uint64_t log_frame = 0;        ///< When its counts were last logged.
     uint32_t recorded_pages = 0;   ///< What the culling recording sweeps.
     float rays = kLightTraceRays;  ///< The trace's budget in rays a frame (adjust_light_rays).
