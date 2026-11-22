@@ -391,6 +391,9 @@ bool velk_light_inherits(uint value)
 #define VELK_LIGHT_POINT_COARSE 0x40000000u
 // A split list entry's how (VELK_SPLIT_ENTRY_HOW) with this asks for a triangle's root.
 #define VELK_LIGHT_SPLIT_ROOT 0x80000000u
+// With this in a split list entry's how, an ask where light differs (an edge or a penumbra), not
+// one made only to bring the levels to the light spacing: its pieces have VELK_PIECE_PLACE_EDGE.
+#define VELK_LIGHT_SPLIT_EDGE 0x40000000u
 // From this bit of a split list entry's how, 2 bits a level from the first made under the top: the
 // child the asking pixel is in, the one whose children are made next (velk_split).
 #define VELK_SPLIT_PATH_SHIFT 20u
@@ -676,8 +679,11 @@ uvec2 velk_piece_place(uint q)
 // 2^depth steps along each edge, its weights (1 - (x + y) / 2^depth, x / 2^depth, y / 2^depth)
 // at step (x, y); a piece is at (i, j) with its corners at (i, j), (i + 1, j) and (i, j + 1), or
 // turned (`turned`), at (i + 1, j + 1), (i, j + 1) and (i + 1, j). i in bits 0 to 12, j in 13 to 25,
-// turned bit 26, the depth from bit 27. A root, at depth 0, is at (0, 0) and keeps its grid's
-// level in bits 0 to 2 instead (velk_piece_root_place).
+// turned bit 26, the depth in bits 27 to 30, and bit 31 (VELK_PIECE_PLACE_EDGE) for a piece made
+// where light differed rather than to bring the levels to the light spacing, which alone may be
+// joined back into its parent (light_pieces_src). A root, at depth 0, is at (0, 0) and keeps its
+// grid's level in bits 0 to 2 instead (velk_piece_root_place).
+#define VELK_PIECE_PLACE_EDGE 0x80000000u
 uint velk_piece_place_word(uint depth, uint i, uint j, bool turned)
 {
     return (i & 8191u) | ((j & 8191u) << 13u) | (turned ? (1u << 26u) : 0u) | (depth << 27u);
@@ -3968,6 +3974,7 @@ void velk_light_list_way(uint first, uvec3 corners, uint triangle, vec3 b, float
     uint path = 0u;
     for (uint r = 0u; r + 1u < VELK_PIECE_LEVELS_AT_ONCE; ++r) path |= velk_piece_step(l) << (2u * r);
     path <<= VELK_SPLIT_PATH_SHIFT;
+    if (edge) path |= VELK_LIGHT_SPLIT_EDGE;
     if (on_piece) {
         uint before = atomicOr(light_words.data[piece_first + VELK_PIECE_READ], VELK_PIECE_ASKED);
         if ((before & VELK_PIECE_ASKED) == 0u) velk_light_split(way.piece, (depth << 8u) | path);
@@ -4480,6 +4487,7 @@ shared uint s_record_first;
 shared uint s_triangle;
 shared uint s_root_word;
 shared uint s_path;         // the asking pixel's way down (VELK_SPLIT_PATH_SHIFT), 2 bits a level
+shared uint s_edge;         // VELK_PIECE_PLACE_EDGE for pieces asked where light differs, else 0
 
 // Which child of the path's piece at level `level` (1 and on) the path goes on in: the one whose
 // four children make the next level.
@@ -4528,7 +4536,7 @@ void velk_split_write(uint level, uint q, uint frame)
     for (uint k = 0u; k < 4u; ++k) {
         light_words.data[at + VELK_PIECE_CHILDREN + k] = on_path ? velk_split_page(level + 1u, k) : VELK_LIGHT_NONE;
     }
-    light_words.data[at + VELK_PIECE_PLACE] = place;
+    light_words.data[at + VELK_PIECE_PLACE] = place | s_edge;
     light_words.data[at + VELK_PIECE_OWNER] = s_record | (s_triangle << 24u);
     light_words.data[at + VELK_PIECE_PARENT] = level == 0u ? VELK_LIGHT_NONE
                                              : velk_split_page(level - 1u, level == 1u ? 0u : velk_split_digit(level - 1u));
@@ -4587,6 +4595,7 @@ void velk_split(uint index)
         uint depth = min((how >> 8u) & 255u, VELK_PIECE_DEEPEST);
         bool root = (how & VELK_LIGHT_SPLIT_ROOT) != 0u;
         s_path = (how >> VELK_SPLIT_PATH_SHIFT) & 0xFFu;
+        s_edge = (how & VELK_LIGHT_SPLIT_EDGE) != 0u ? VELK_PIECE_PLACE_EDGE : 0u;
         if (page < pages) {
             if (root) {
                 // The root word is pending while the ask is on the list: it is this group's.
@@ -5086,8 +5095,8 @@ void main()
  * per page of the pool, twice. First (`phase` 0) it unlinks what no pixel read for
  * kLightPieceKeepFrames: a piece's four children, when all are without children of their own and
  * none was read, and a root without children likewise, from its record; and a piece's four
- * children without children of their own whose light has been the same as the piece's for
- * kLightPieceSameFrames and one more (velk_pieces_same), so that pixels read the piece again and
+ * children without children of their own, made where light differed (VELK_PIECE_PLACE_EDGE), whose
+ * light has been the same as the piece's for kLightPieceSameFrames and one more (velk_pieces_same), so that pixels read the piece again and
  * ask for children again where its light differs. Then (`phase` 1) it marks
  * every piece still linked, from its parent or its record, whose record is marked; the sweep frees
  * the rest. Only childless pieces are unlinked, so a piece's parent is in use while it is.
@@ -5197,7 +5206,10 @@ void main()
                 }
             }
             bool merge = false;
-            if (!unread && leaves) {
+            // Only children made where light differed (VELK_PIECE_PLACE_EDGE): those made to bring
+            // the levels to the light spacing would be asked for again at once.
+            bool edge = (light_words.data[velk_light_page(pool, child0) + VELK_PIECE_PLACE] & VELK_PIECE_PLACE_EDGE) != 0u;
+            if (!unread && leaves && edge) {
                 uint read = light_words.data[at + VELK_PIECE_READ];
                 uint count = read >> VELK_PIECE_SAME_SHIFT;
                 if (velk_pieces_same(pool, at, pages)) {
