@@ -353,6 +353,8 @@ inline constexpr uint32_t kLightTraceRaysUnlimited = 1u << 30;
 #define VELK_LIGHT_PAGE_WORDS 64u
 #define VELK_LIGHT_SEGMENT_PAGE_WORDS 1048576u
 #define VELK_LIGHT_WARM_TRACES 8u
+// The fewest rays a never traced coarse point's first trace casts (velk_points_first_rays).
+#define VELK_LIGHT_FIRST_RAYS_LEAST 1u
 #define VELK_LIGHT_DIRECT_PAGES 15u
 #define VELK_LIGHT_PIECED 0x40000000u
 #define VELK_LIGHT_SLOTS 8u
@@ -1838,18 +1840,20 @@ uint velk_points_list(uint k)
 }
 
 // The rays a point traced from none casts this frame: a ray a lit light, four with a size
-// (pc.spare6, as the path counts them), up to four; but for a coarse point never traced, one, to
-// its light that could bring the most, while those waiting would take more than the budget in
-// rays has left. Its other lights stay untraced, and its warm-ups trace them next: a new view's
-// points each get their own light four times as fast. A point traced again after a change takes
-// all its rays: it had light, which its new rays replace at once.
+// (pc.spare6, as the path counts them), up to four; but for a coarse point never traced, as many
+// as still let all those waiting be traced in the budget in rays left, to its lights that could
+// bring the most, and at least VELK_LIGHT_FIRST_RAYS_LEAST: a new view's coarse points all get
+// light at once, each from as many rays as there is room for, so that a light with a size is not
+// fully through or fully blocked from one ray where it is soft. Its other lights stay untraced,
+// and its warm-ups trace them next. A point traced again after a change takes all its rays: it
+// had light, which its new rays replace at once.
 uint velk_points_first_rays(uint pool)
 {
     uint from_none = max(pc.spare6, 1u);
     uint budget = VELK_LIGHT_WORDS.data[pool + VELK_POOL_RAY_BUDGET];
     uint left = budget - min(VELK_LIGHT_WORDS.data[pool + VELK_POOL_RAYS_LISTED], budget);
     uint waiting = min(VELK_LIGHT_WORDS.data[pool + velk_light_list_count_word(VELK_LIGHT_LIST_UNTRACED)], VELK_LIGHT_POINT_CAPACITY);
-    return waiting * from_none > left ? 1u : from_none;
+    return clamp(left / max(waiting, 1u), min(VELK_LIGHT_FIRST_RAYS_LEAST, from_none), from_none);
 }
 
 // The points of each list (velk_points_list's order) the frame has, and those it traces: each
