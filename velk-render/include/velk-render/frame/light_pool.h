@@ -1069,6 +1069,16 @@ bool velk_light_one_due(uint value)
     return (value & VELK_LIGHT_ONE_TRACED) == 0u;
 }
 
+// Whether a coarse light not traced yet already has its light: that of the one value its record
+// had before its points (light_search_src). Its trace then only chooses its lights, which are the
+// one value's, chosen from the same sphere, and casts no rays. A one value whose every light got
+// through is not told apart; it is traced as any other.
+bool velk_light_seeded(uint value)
+{
+    return value >= VELK_LIGHT_ONE_VALUE && value < VELK_LIGHT_PENDING && (value & VELK_LIGHT_ONE_TRACED) == 0u
+        && (value & VELK_LIGHT_ONE_SHADE_BITS) != 0u;
+}
+
 // The node of the quad tree at `tree` over node `node` whose quad is as wide on screen as
 // `light_pixels`, the light of all the quads under it: the topmost going up from `node` that is
 // not wider. In world space; `cam` the camera.
@@ -1158,8 +1168,9 @@ void velk_light_list_coarse(uint pool, uint page, uint instance, uint frame, uin
     if (value < VELK_LIGHT_ONE_VALUE || value >= VELK_LIGHT_PENDING || !velk_light_one_due(value)) return;
     uint listed = (value & ~(31u << VELK_LIGHT_ONE_QUEUED_SHIFT)) | ((frame & 31u) << VELK_LIGHT_ONE_QUEUED_SHIFT);
     if (listed == value || atomicCompSwap(VELK_LIGHT_WORDS.data[at], value, listed) != value) return;
+    // Seeded, its trace casts no rays.
     velk_light_list_entry(pool, VELK_LIGHT_TRACE_COARSE, page, instance, VELK_LIGHT_WORDS.data[first + VELK_PAGE_CLUSTER],
-                          8u * max(lights, 1u));
+                          velk_light_seeded(value) ? 1u : 8u * max(lights, 1u));
 }
 
 // Puts the point of light whose words start at `word` on a point list, as `entry_first` and
@@ -2401,6 +2412,11 @@ void main()
         }
     }
     barrier();
+    // Seeded from its record's one value (velk_light_seeded), whose lights these are: traced.
+    if (kind == VELK_LIGHT_TRACE_COARSE && velk_light_seeded(old)) {
+        if (lane == 0u) VELK_LIGHT_WORDS.data[word] = old | VELK_LIGHT_ONE_TRACED;
+        return;
+    }
     // The same rays each time it is traced, two in each quarter of the light, so that it changes
     // only where what is in its way does.
     uint seed = velk_points_hash(at);
@@ -2641,6 +2657,16 @@ void velk_change_one(uint word)
     if (value >= VELK_LIGHT_ONE_VALUE && value < VELK_LIGHT_PENDING) atomicAnd(VELK_LIGHT_WORDS.data[word], ~VELK_LIGHT_ONE_TRACED);
 }
 
+// A coarse light (VELK_PAGE_COARSE) traced again on its next listing, from nothing: no pixel
+// reads it until it is traced, and light left in it would read as seeded (velk_light_seeded).
+void velk_change_coarse(uint word)
+{
+    uint value = VELK_LIGHT_WORDS.data[word];
+    if (value >= VELK_LIGHT_ONE_VALUE && value < VELK_LIGHT_PENDING) {
+        atomicAnd(VELK_LIGHT_WORDS.data[word], ~(VELK_LIGHT_ONE_TRACED | VELK_LIGHT_ONE_SHADE_BITS));
+    }
+}
+
 // The pieces pass (pc.mode 1), after the records': a thread a page of the pool. A piece of a
 // record a change altered this frame is stale only where the change is in its own way: its
 // triangle's part, placed by the record's instance, in a sphere a little wider than its points
@@ -2824,7 +2850,7 @@ void main()
         // A light that came into reach is new to every point too. Else its vertices' points are
         // stale, and its pieces' as far as the change is in their way (the pieces pass, pc.mode 1,
         // which finds its instance here).
-        velk_change_one(first + VELK_PAGE_COARSE);
+        velk_change_coarse(first + VELK_PAGE_COARSE);
         uint now = VELK_GLOBALS.present_counter & 0x0FFFFFFFu;
         if (all || entered) VELK_LIGHT_WORDS.data[first + VELK_PAGE_RESET] = now;
         if (all) {
@@ -4765,6 +4791,12 @@ void main()
         memoryBarrierBuffer();
         barrier();
         if (lane == 0u) {
+            // Grown from a traced one value: its coarse light starts as that one value, from the
+            // same sphere and lights (velk_light_seeded), so that its pixels show what they showed
+            // until its points are traced.
+            if (was >= VELK_LIGHT_ONE_VALUE && was < VELK_LIGHT_PENDING && (was & VELK_LIGHT_ONE_TRACED) != 0u) {
+                light_words.data[s_first + VELK_PAGE_COARSE] = VELK_LIGHT_ONE_VALUE | (was & VELK_LIGHT_ONE_SHADE_BITS);
+            }
             light_words.data[record + VELK_RECORD_LIGHT] = s_page;
             velk_light_trace_now(s_page, instance);
             // For the log, why: no light before, or one value before.
