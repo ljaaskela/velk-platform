@@ -1812,6 +1812,17 @@ void DeferredPath::emit_reflection_pass(ViewState& vs, const RenderView& render_
     }
     if (!vs.reflect_samples || !vs.reflect_result[0] || !vs.reflect_result[1]) return;
 
+    // Still: the camera neither moved nor turned and nothing was listed as changed
+    // (emit_light_changes_pass runs first). Once the glossy blend holds all it takes and a full
+    // turn of each block's four pixels more, the last result is kept as it is, nothing run.
+    const bool camera_same = std::memcmp(&vs.reflect_view, &render_view.view_projection, sizeof(mat4)) == 0
+                          && std::memcmp(&vs.reflect_cam, &render_view.cam_pos, sizeof(vec3)) == 0;
+    vs.reflect_view = render_view.view_projection;
+    vs.reflect_cam = render_view.cam_pos;
+    const bool still = camera_same && !vs.reflect_fresh && !vs.light_changes_all && !vs.light_changes_listed;
+    vs.reflect_still = still ? std::min(vs.reflect_still + 1u, kReflectStillFrames) : 0u;
+    if (vs.reflect_still >= kReflectStillFrames) return;
+
     // The trace is the probes' shader with VELK_REFLECT: their hit shading, no material code.
     constexpr uint64_t kFnvPrime = 0x100000001b3ULL;
     uint64_t key = 0xcbf29ce484222325ULL ^ 0x5245'464c'4543'0001ULL;
@@ -1859,10 +1870,14 @@ void DeferredPath::emit_reflection_pass(ViewState& vs, const RenderView& render_
     pc.env[3] = vs.light_probe_count != 0 ? static_cast<uint32_t>(vs.light_probes[vs.light_probe_parity ^ 1u].offset() / sizeof(uint32_t))
                                           : kLightNone;
     pc.more[0] = material_id;
+    // A hit's bounce light from the probes' cells first, as a probe's ray takes it.
+    pc.more[3] = vs.probe_cells.valid() ? static_cast<uint32_t>(vs.probe_cells.offset() / sizeof(uint32_t)) : kLightNone;
     RtPushC resolve_pc = pc;
     resolve_pc.more[1] = handle(previous);
     resolve_pc.more[2] = handle(current);
     resolve_pc.more[3] = vs.reflect_fresh ? 1u : 0u;
+    // The most frames a glossy reflection blends: more while the camera stands still.
+    resolve_pc.env[3] = vs.reflect_still > 0u ? kReflectSettledFrames : kReflectMovingFrames;
     vs.reflect_fresh = false;
 
     // A thread a 2 by 2 block of pixels, a group 8 by 4 blocks.

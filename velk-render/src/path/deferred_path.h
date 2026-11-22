@@ -189,6 +189,12 @@ public:
         uvec2 reflect_size{};
         uint32_t reflect_parity = 0;
         bool reflect_fresh = true;
+        /// Frames the camera stood still and nothing was listed as changed, with the camera
+        /// they were counted against: the glossy reflections blend over more frames while it
+        /// stands, and once kReflectStillFrames are held neither the trace nor the resolve runs.
+        uint32_t reflect_still = 0;
+        mat4 reflect_view{};
+        vec3 reflect_cam{};
         IRenderPass::Ptr reflect_trace_pass;
         IRenderPass::Ptr reflect_resolve_pass;
         IRenderPass::Ptr visibility_debug_pass;

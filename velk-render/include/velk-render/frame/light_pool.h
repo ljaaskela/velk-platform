@@ -2926,6 +2926,12 @@ inline constexpr uint32_t kLightProbeRays = 4;
 inline constexpr uint32_t kLightProbeGroupThreads = 16;
 /// Threads in a work group of the reflections' trace: 8 by 4 blocks of 2 by 2 pixels, a block each.
 inline constexpr uint32_t kReflectGroupThreads = 32;
+/// The most frames a glossy reflection blends (reflect_resolve_src): few while the camera moves,
+/// more while it stands still; and the still frames after which the reflections are kept as they
+/// are, neither traced nor resolved: the blend full, then each block's four pixels once more.
+inline constexpr uint32_t kReflectMovingFrames = 16;
+inline constexpr uint32_t kReflectSettledFrames = 64;
+inline constexpr uint32_t kReflectStillFrames = kReflectSettledFrames + 4;
 /// The probes' light kept in world space (VELK_PROBE_CELL_GLSL): a cell for a place and the way a
 /// surface there faces, as wide as a probe's square is at its distance from the camera, found by
 /// a hash. A probe whose cell has kProbeCellSettled samples and nothing changed since casts no
@@ -3787,7 +3793,7 @@ void velk_reflect_trace(uint lane)
         bool ask;
         velk_probe_hit_words(hit, at, light_word, radiance, radiance_dir, center, ask);
         if (lit && ask && pc.shapes_base != 0xFFFFFFFFu) velk_probe_ask(light_word);
-        vec3 indirect = lit ? velk_probe_hit_indirect(0xFFFFFFFFu, at, hn, radiance, radiance_dir, width, height, across) : vec3(0.0);
+        vec3 indirect = lit ? velk_probe_hit_indirect(pc.more.w, at, hn, radiance, radiance_dir, width, height, across) : vec3(0.0);
         // Its metal: what it mirrors of the environment, half blurred, its own roughness not known.
         light = albedo * (velk_probe_direct(hit, light_word, center, at, hn) + indirect) + emission
               + metal * velk_probe_env(reflect(dir, hn), 0.5);
@@ -3827,7 +3833,8 @@ void main()
  * (pc.more.z): the light, and how many frames it holds, 0 for no reflection. Traces nothing:
  * composed after rt_compute_prelude_src alone. pc.extras.y is the G-buffer's size (x low, y
  * high), z its positions, w its normals; pc.more.x its material parameters, y the last frame's
- * result, w not 0 when there is none.
+ * result, w not 0 when there is none; pc.env.w the most frames a glossy result blends
+ * (kReflectMovingFrames, kReflectSettledFrames).
  */
 inline constexpr string_view reflect_resolve_src = R"(
 #define VELK_REFLECT_CUTOFF 0.3
@@ -3924,7 +3931,7 @@ void main()
         history = clamp(was.rgb, lo - spread, hi + spread);
         frames = was.a;
     }
-    frames = min(frames + 1.0, 16.0);
+    frames = min(frames + 1.0, float(pc.env.w));
     imageStore(gStorageImagesF16[nonuniformEXT(pc.more.z)], coord, vec4(mix(history, now, 1.0 / frames), frames));
 }
 )";
