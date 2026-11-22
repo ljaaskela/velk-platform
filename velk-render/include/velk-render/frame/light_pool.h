@@ -183,8 +183,8 @@ inline constexpr uint32_t kLightCoarsePieces = 2;
 inline constexpr uint32_t kLightPieceLevelsAtOnce = 4;
 /// Frames a piece's four children are kept when no pixel reads any of them, nor anything under
 /// them, while the pool is short of pages; a root likewise. With room they are kept longer
-/// (velk_pieces_keep_frames): 8 times as long past an eighth of its pages free, 32 times past a
-/// quarter.
+/// (velk_pieces_keep_frames): 8 times as long past a quarter of its pages free, 32 times past
+/// half.
 inline constexpr uint32_t kLightPieceKeepFrames = 32;
 /// A piece's four children without children of their own are dropped when all their points and
 /// the piece's carry the same light, each light fully through or fully blocked, for this many
@@ -5099,13 +5099,14 @@ bool velk_pieces_marked(uint pool, uint page)
 
 // Frames an unread piece is kept: VELK_PIECE_KEEP_FRAMES when the pool is short of pages, longer
 // while it has room, so that turning back to what went out of view finds its pieces and their
-// light. Never makes the pool grow: past a quarter free they stay, under an eighth they go.
+// light. They never take the last quarter of the pool, which bursts of new pieces while the
+// camera moves need, so that keeping them does not make the pool grow.
 uint velk_pieces_keep_frames(uint pool)
 {
     uint free_pages = light_words.data[pool + VELK_POOL_FREE_PAGES];
     uint pages = light_words.data[pool + VELK_POOL_PAGES];
-    if (free_pages * 4u > pages) return 32u * VELK_PIECE_KEEP_FRAMES;
-    if (free_pages * 8u > pages) return 8u * VELK_PIECE_KEEP_FRAMES;
+    if (free_pages * 2u > pages) return 32u * VELK_PIECE_KEEP_FRAMES;
+    if (free_pages * 4u > pages) return 8u * VELK_PIECE_KEEP_FRAMES;
     return VELK_PIECE_KEEP_FRAMES;
 }
 
