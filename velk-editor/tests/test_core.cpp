@@ -1,4 +1,5 @@
-// Launches the fixture app with velk_run and edits it through the core: apply, undo, redo, reset.
+// Launches a copy of the fixture app with velk_run and edits it through the core: apply, undo,
+// redo, reset, save.
 
 #include <velk/api/future.h>
 #include <velk/api/state.h>
@@ -12,8 +13,15 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
+#include <ctime>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <string>
 #include <thread>
 
 using namespace velk;
@@ -45,6 +53,27 @@ T resolve(const IFuture::Ptr& f, T fallback = {})
     return r ? r.get_value() : fallback;
 }
 
+namespace fs = std::filesystem;
+
+std::string read_file(const fs::path& path)
+{
+    std::ifstream in(path, std::ios::binary);
+    std::stringstream ss;
+    ss << in.rdbuf();
+    return ss.str();
+}
+
+std::vector<std::string> lines_of(const std::string& text)
+{
+    std::vector<std::string> out;
+    std::stringstream ss(text);
+    std::string line;
+    while (std::getline(ss, line)) {
+        out.push_back(line);
+    }
+    return out;
+}
+
 JsonValue parse(const string& text)
 {
     JsonValue v;
@@ -70,12 +99,17 @@ protected:
 
     void SetUp() override
     {
+        // Each test edits its own copy; the checked-in fixture is never written.
+        static std::atomic<int> counter{0};
+        folder_ = fs::temp_directory_path()
+                  / ("velk_editor_test_" + std::to_string(static_cast<unsigned long>(std::time(nullptr))) + "_"
+                     + std::to_string(++counter));
+        fs::remove_all(folder_);
+        fs::create_directories(folder_);
+        fs::copy(VELK_EDITOR_TEST_FIXTURE, folder_, fs::copy_options::recursive);
         core_ = instance().create<IEditorCore>(editor::ClassId::EditorCore);
         ASSERT_TRUE(core_);
-        ASSERT_TRUE(succeeded(core_->fn_launch(VELK_EDITOR_TEST_FIXTURE)));
-        const uint32_t revision = state()->revision;
-        ASSERT_TRUE(pump_until([&] { return state()->revision != revision; }));
-        ASSERT_TRUE(state()->editing);
+        launch();
     }
 
     void TearDown() override
@@ -84,7 +118,31 @@ protected:
             core_->fn_detach();
         }
         core_ = nullptr;
+        std::error_code ec;
+        fs::remove_all(folder_, ec);
     }
+
+    void launch()
+    {
+        const std::string folder = folder_.u8string();
+        ASSERT_TRUE(succeeded(core_->fn_launch(string(string_view(folder.data(), folder.size())))));
+        const uint32_t revision = state()->revision;
+        ASSERT_TRUE(pump_until([&] { return state()->revision != revision; }));
+        ASSERT_TRUE(state()->editing);
+    }
+
+    std::string scene_text() { return read_file(folder_ / "scene.velk"); }
+
+    /// Sets the width of @p object.
+    string set_width(uint64_t object, const char* width)
+    {
+        char commands[160];
+        std::snprintf(commands, sizeof(commands), R"([{"op":"set","object":%llu,"name":"width","value":"%s"}])",
+                      static_cast<unsigned long long>(object), width);
+        return apply(commands);
+    }
+
+    fs::path folder_;
 
     detail::StateReader<IEditorCore> state() { return read_state<IEditorCore>(core_); }
 
@@ -198,4 +256,77 @@ TEST_F(CoreTest, RefusesBadCommands)
     EXPECT_NE(apply("not json").find("\"error\""), string::npos);
     EXPECT_FALSE(state()->can_undo);
     EXPECT_EQ(describe(size)["authored"]["width"].as_string(), string("200px"));
+}
+
+TEST_F(CoreTest, SaveWritesTheFile)
+{
+    const uint64_t size = attachment("attachments/panel_size");
+    ASSERT_NE(size, 0u);
+    const std::string before = scene_text();
+    EXPECT_FALSE(state()->modified);
+    EXPECT_EQ(set_width(size, "120px"), string("{\"ok\":true}"));
+    EXPECT_TRUE(state()->modified);
+    EXPECT_EQ(scene_text(), before); // nothing written until save
+
+    const string saved = core_->fn_save();
+    EXPECT_NE(saved.find("scene.velk"), string::npos) << saved.c_str();
+    EXPECT_FALSE(state()->modified);
+    EXPECT_FALSE(fs::exists(folder_ / "scene.velk.tmp"));
+
+    // The file is the original with the one value changed.
+    JsonValue expected = parse(string(string_view(before.data(), before.size())));
+    for (auto& a : expected.find("attachments")->as_array()) {
+        if (a["id"].as_string() == string("panel_size")) {
+            a.find("properties")->replace("width", JsonValue::string("120px"));
+        }
+    }
+    const std::string after = scene_text();
+    EXPECT_TRUE(parse(string(string_view(after.data(), after.size()))) == expected) << after;
+    EXPECT_EQ(string(string_view(after.data(), after.size())), json_write(expected));
+
+    EXPECT_EQ(core_->fn_save(), string("{\"saved\":[]}"));
+}
+
+TEST_F(CoreTest, SecondSaveChangesOneLine)
+{
+    const uint64_t size = attachment("attachments/panel_size");
+    ASSERT_NE(size, 0u);
+    EXPECT_EQ(set_width(size, "120px"), string("{\"ok\":true}"));
+    core_->fn_save();
+    const auto first = lines_of(scene_text());
+    EXPECT_EQ(set_width(size, "90px"), string("{\"ok\":true}"));
+    core_->fn_save();
+    const auto second = lines_of(scene_text());
+    ASSERT_EQ(first.size(), second.size());
+    size_t changed = 0;
+    for (size_t i = 0; i < first.size(); ++i) {
+        if (first[i] != second[i]) {
+            ++changed;
+            EXPECT_NE(second[i].find("90px"), std::string::npos) << second[i];
+        }
+    }
+    EXPECT_EQ(changed, 1u);
+}
+
+TEST_F(CoreTest, SavedFileLoadsInANewLaunch)
+{
+    const uint64_t size = attachment("attachments/panel_size");
+    ASSERT_NE(size, 0u);
+    EXPECT_EQ(set_width(size, "120px"), string("{\"ok\":true}"));
+    core_->fn_save();
+    core_->fn_detach();
+    EXPECT_FALSE(state()->editing);
+    launch();
+    const uint64_t reloaded = attachment("attachments/panel_size");
+    ASSERT_NE(reloaded, 0u);
+    auto d = describe(reloaded);
+    EXPECT_EQ(d["authored"]["width"].as_string(), string("120px"));
+    EXPECT_EQ(d["properties"]["width"].as_string(), string("120px"));
+    EXPECT_FALSE(state()->modified);
+}
+
+TEST_F(CoreTest, SaveNeedsALaunchedApplication)
+{
+    core_->fn_detach();
+    EXPECT_NE(core_->fn_save().find("\"error\""), string::npos);
 }

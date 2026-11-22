@@ -2,7 +2,7 @@
 //
 // MCP server (stdio) for AI agents. Talks to the core of a running editor on PORT (47900 by
 // default), or, with no editor running, to a core of its own. Tools: launch, attach, tree,
-// describe, apply, undo, redo, screenshot. Values are store-file JSON. Logs go to stderr; stdout
+// describe, apply, undo, redo, save, screenshot. Values are store-file JSON. Logs go to stderr; stdout
 // carries only protocol.
 
 #include <velk/json.h>
@@ -227,6 +227,7 @@ const char* kTools = R"([
 {"name":"apply","description":"Applies commands as one undo step. Each is {\"op\":\"set\",\"object\":handle,\"name\":property,\"value\":store-file JSON value, for example \"240px\", \"center\", 1.5 or {\"r\":1,\"g\":0,\"b\":0,\"a\":1}} or {\"op\":\"reset\",\"object\":handle,\"name\":property}, which removes the value from the file. After launch, changes go to the document and the application; after attach, to the application only.","inputSchema":{"type":"object","properties":{"commands":{"type":"array","items":{"type":"object"}}},"required":["commands"]}},
 {"name":"undo","description":"Takes back the last apply.","inputSchema":{"type":"object","properties":{}}},
 {"name":"redo","description":"Applies the last undone step again.","inputSchema":{"type":"object","properties":{}}},
+{"name":"save","description":"Writes the files with unsaved changes. Needs a launched application.","inputSchema":{"type":"object","properties":{}}},
 {"name":"screenshot","description":"The attached application's window as a PNG image.","inputSchema":{"type":"object","properties":{"window":{"type":"integer","description":"0 by default"}}}}
 ])";
 
@@ -290,6 +291,15 @@ string call_tool(Session& session, const string& name, const JsonValue& args)
         read_remote_value(r.value, rv);
         return succeeded(rv) ? text_result(name == "undo" ? string_view("undone") : string_view("redone"))
                              : text_result(name == "undo" ? string_view("nothing to undo") : string_view("nothing to redo"), true);
+    }
+    if (name == "save") {
+        auto r = session.call("save", {});
+        string text;
+        read_remote_value(r.value, text);
+        if (text.empty()) {
+            return text_result("no reply from the core", true);
+        }
+        return text_result(text, text.find("\"error\"") != string::npos);
     }
     if (name == "screenshot") {
         const auto window = static_cast<uint32_t>(args["window"].as_number());

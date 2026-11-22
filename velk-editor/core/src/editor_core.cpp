@@ -583,7 +583,32 @@ void EditorCore::history_changed()
     write_state<IEditorCore>(this, [&](IEditorCore::State& s) {
         s.can_undo = !undo_.empty();
         s.can_redo = !redo_.empty();
+        s.modified = document_.any_modified();
     });
+}
+
+string EditorCore::fn_save()
+{
+    if (!editing_) {
+        return error_json("save needs a launched application");
+    }
+    string out = "{\"saved\":[";
+    bool first = true;
+    for (auto& source : document_.modified_sources()) {
+        string error;
+        if (!document_.save(source, error)) {
+            history_changed();
+            return error_json(error);
+        }
+        if (!first) {
+            out += ",";
+        }
+        first = false;
+        json_quote(out, source);
+    }
+    out += "]}";
+    history_changed();
+    return out;
 }
 
 IFuture::Ptr EditorCore::fn_capture(uint32_t window)
@@ -747,6 +772,7 @@ void EditorCore::detached()
         s.editing = false;
         s.can_undo = false;
         s.can_redo = false;
+        s.modified = false;
         ++s.revision;
     });
 }

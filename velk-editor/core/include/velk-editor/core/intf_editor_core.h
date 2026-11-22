@@ -42,6 +42,7 @@ public:
         (RPROP, bool, editing, false),         ///< True when the application was launched for editing.
         (RPROP, bool, can_undo, false),
         (RPROP, bool, can_redo, false),
+        (RPROP, bool, modified, false),        ///< True when a document has unsaved changes.
         /// Attaches to an application's editor endpoint, for inspecting: changes are not kept.
         (FN, ReturnValue, attach, (string, host), (uint32_t, port)),
         /// Starts velk_run on the app.velk in @p folder with source tracking and attaches to it, for editing.
@@ -55,6 +56,8 @@ public:
         (FN, IFuture::Ptr, apply, (string, commands)),
         (FN, IFuture::Ptr, undo),              ///< Resolves to a ReturnValue.
         (FN, IFuture::Ptr, redo),              ///< Resolves to a ReturnValue.
+        /// Writes the documents with unsaved changes to their files. Returns {"saved":[files]} or {"error":"..."}.
+        (FN, string, save),
         /// Resolves to vector<uint8_t>: the application window's last frame as PNG, empty on failure.
         (FN, IFuture::Ptr, capture, (uint32_t, window))
     )

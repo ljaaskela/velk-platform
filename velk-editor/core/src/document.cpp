@@ -1,6 +1,8 @@
 #include "document.h"
 
 #include <cstdio>
+#include <filesystem>
+#include <system_error>
 
 namespace velk::editor {
 
@@ -148,6 +150,60 @@ bool Document::modified(string_view source) const
 {
     auto it = files_.find(key_of(source));
     return it != files_.end() && it->second.modified;
+}
+
+bool Document::any_modified() const
+{
+    for (auto& [source, file] : files_) {
+        if (file.modified) {
+            return true;
+        }
+    }
+    return false;
+}
+
+vector<string> Document::modified_sources() const
+{
+    vector<string> out;
+    for (auto& [source, file] : files_) {
+        if (file.modified) {
+            out.push_back(string(string_view(source.data(), source.size())));
+        }
+    }
+    return out;
+}
+
+bool Document::save(string_view source, string& error)
+{
+    auto it = files_.find(key_of(source));
+    if (it == files_.end()) {
+        error = string("not open: ") + source;
+        return false;
+    }
+    const string path = source_path(source);
+    const string temp = path + ".tmp";
+    const string text = json_write(it->second.root);
+    std::FILE* f = std::fopen(temp.c_str(), "wb");
+    if (!f) {
+        error = string("cannot write ") + temp;
+        return false;
+    }
+    const bool written = std::fwrite(text.data(), 1, text.size(), f) == text.size();
+    if (std::fclose(f) != 0 || !written) {
+        std::remove(temp.c_str());
+        error = string("cannot write ") + temp;
+        return false;
+    }
+    // Replaces the file in one step, so a failed save never leaves half a file.
+    std::error_code ec;
+    std::filesystem::rename(std::filesystem::u8path(temp.c_str()), std::filesystem::u8path(path.c_str()), ec);
+    if (ec) {
+        std::remove(temp.c_str());
+        error = string("cannot replace ") + path;
+        return false;
+    }
+    it->second.modified = false;
+    return true;
 }
 
 } // namespace velk::editor

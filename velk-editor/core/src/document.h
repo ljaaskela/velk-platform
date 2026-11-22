@@ -49,8 +49,20 @@ public:
     /** @brief The file's JSON as it would be saved. */
     string text(string_view source) const;
 
-    /** @brief True when the file changed since it was loaded. */
+    /** @brief True when the file changed since it was loaded or saved. */
     bool modified(string_view source) const;
+
+    /** @brief True when any file changed since it was loaded or saved. */
+    bool any_modified() const;
+
+    /** @brief The files with unsaved changes. */
+    vector<string> modified_sources() const;
+
+    /**
+     * @brief Writes the file to disk, through a temporary file renamed over it, and marks it saved.
+     * @return false with @p error set when it cannot be written.
+     */
+    bool save(string_view source, string& error);
 
     void clear() { files_.clear(); }
 

@@ -40,6 +40,7 @@ public:
     IFuture::Ptr fn_apply(string commands) override;
     IFuture::Ptr fn_undo() override;
     IFuture::Ptr fn_redo() override;
+    string fn_save() override;
     IFuture::Ptr fn_capture(uint32_t window) override;
 
 private:
