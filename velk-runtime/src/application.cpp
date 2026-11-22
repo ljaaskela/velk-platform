@@ -3,6 +3,7 @@
 #include <velk/api/perf.h>
 #include <velk/api/velk.h>
 #include <velk/interface/intf_plugin_registry.h>
+#include <velk/interface/resource/intf_resource_protocol.h>
 
 #include <algorithm>
 #include <cmath>
@@ -119,6 +120,10 @@ bool Application::init(const ApplicationConfig& config)
         VELK_LOG(E, "Platform plugin does not implement IWindowProvider");
         return false;
     }
+    set_resource_roots();
+    if (!load_config_plugins()) {
+        return false;
+    }
 
     start_editor_endpoint();
     return true;
@@ -139,6 +144,47 @@ void Application::start_source_tracking()
         return;
     }
     importer->set_track_sources(true);
+}
+
+void Application::set_resource_roots()
+{
+    // File protocols prepend the base path as is.
+    auto with_slash = [](string_view path) {
+        string s(path);
+        if (s.back() != '/' && s.back() != '\\') {
+            s.append("/");
+        }
+        return s;
+    };
+    auto& store = instance().resource_store();
+    if (!config_.app_root.empty()) {
+        // The platform plugin registers app://; desktop's is a file protocol.
+        if (auto* app = interface_cast<IResourceProtocolInternal>(store.find_protocol("app"))) {
+            app->set_base_path(with_slash(config_.app_root));
+        } else {
+            VELK_LOG(E, "app_root: app:// cannot take a base path on this platform");
+        }
+    }
+    if (!config_.assets_root.empty()) {
+        auto assets = instance().create<IResourceProtocolInternal>(ClassId::FileProtocol);
+        if (assets) {
+            assets->set_scheme("assets");
+            assets->set_base_path(with_slash(config_.assets_root));
+            store.register_protocol(interface_pointer_cast<IResourceProtocol>(assets));
+        }
+    }
+}
+
+bool Application::load_config_plugins()
+{
+    auto& reg = instance().plugin_registry();
+    for (auto& uri : config_.plugins) {
+        if (failed(reg.load_plugin(uri))) {
+            VELK_LOG(E, "create_app: cannot load %s", uri.c_str());
+            return false;
+        }
+    }
+    return true;
 }
 
 void Application::start_editor_endpoint()

@@ -100,7 +100,7 @@ IWindow::Ptr GlfwPlugin::create_window(const WindowConfig& config,
 
     GLFWwindow* glfw_win = glfwCreateWindow(
         config.width, config.height,
-        string(config.title).c_str(),
+        config.title.c_str(),
         nullptr, nullptr);
 
     if (!glfw_win) {

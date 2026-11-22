@@ -7,6 +7,7 @@
 #include <velk-render/api/render_context.h>
 #include <velk-runtime/api/window.h>
 #include <velk-runtime/interface/intf_application.h>
+#include <velk-runtime/interface/intf_runtime_plugin.h>
 #include <velk-runtime/plugin.h>
 #include <velk-scene/api/element.h>
 
@@ -22,7 +23,7 @@ namespace velk {
  *
  * @par Example
  * @code
- * auto app = velk::create_app({});
+ * auto app = velk::create_app();
  * auto window = app.create_window({.width = 1280, .height = 720});
  * auto scene = velk::create_scene("app://scenes/main.json");
  * app.add_view(window, scene.child_at(scene.root(), 0));
@@ -163,12 +164,31 @@ public:
 };
 
 /**
+ * @brief Reads an app.velk file.
+ * @param path The file's path.
+ * @return Its contents, or the reason it could not be read in @c error.
+ */
+inline AppConfigFile read_app_config(string_view path)
+{
+    auto& reg = instance().plugin_registry();
+    reg.load_plugin("plugin:velk_runtime");
+    AppConfigFile out;
+    auto* runtime = interface_cast<IRuntimePlugin>(reg.find_plugin(PluginId::RuntimePlugin));
+    if (!runtime) {
+        out.error = "velk_runtime plugin not found";
+        return out;
+    }
+    runtime->read_app_config(path, out);
+    return out;
+}
+
+/**
  * @brief Creates and initializes an Application with the given config.
  *
  * Loads the runtime plugin, creates an IApplication implementation, and calls
  * init() on it. The init() in turn loads all standard plugins (UI, render,
- * text, image, importer, platform plugin) and prepares the runtime to accept
- * window creation calls.
+ * text, image, importer, platform plugin), then the plugins in
+ * @c config.plugins, and prepares the runtime to accept window creation calls.
  *
  * @param config Application-wide options.
  * @return The constructed Application, or an empty Application on failure.
@@ -179,6 +199,23 @@ inline Application create_app(const ApplicationConfig& config = {})
     v.plugin_registry().load_plugin("plugin:velk_runtime");
     auto app = v.create<IApplication>(ClassId::Application);
     return Application(app && app->init(config) ? std::move(app) : nullptr);
+}
+
+/**
+ * @brief Creates and initializes an Application with the config in an app.velk file.
+ * @param path The file's path.
+ * @return The constructed Application, or an empty Application when the file cannot be
+ *         read or create_app() fails.
+ * @see read_app_config
+ */
+inline Application create_app(string_view path)
+{
+    auto file = read_app_config(path);
+    if (!file.error.empty()) {
+        VELK_LOG(E, "%s", file.error.c_str());
+        return {};
+    }
+    return create_app(file.app);
 }
 
 } // namespace velk

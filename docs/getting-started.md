@@ -41,7 +41,7 @@ The smallest velk-platform program creates an application, opens a window, loads
 
 int main()
 {
-    auto app = velk::create_app({});
+    auto app = velk::create_app();
     if (!app) {
         return 1;
     }

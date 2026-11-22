@@ -2,6 +2,8 @@
 #define VELK_RUNTIME_INTF_APPLICATION_H
 
 #include <velk/interface/intf_interface.h>
+#include <velk/string.h>
+#include <velk/vector.h>
 
 #include <velk-render/interface/intf_render_context.h>
 #include <velk-render/render_types.h>
@@ -21,7 +23,7 @@ struct WindowConfig
 {
     int width{1280};                            ///< Initial window width in pixels.
     int height{720};                            ///< Initial window height in pixels.
-    string_view title{"velk"};                  ///< Window title shown in the title bar.
+    string title{"velk"};                       ///< Window title shown in the title bar.
     bool resizable{true};                       ///< Whether the user can resize the window.
     UpdateRate update_rate{UpdateRate::VSync};  ///< Surface pacing mode (VSync, Unlimited, or Targeted).
     uint32_t target_fps{60};                    ///< Target framerate for UpdateRate::Targeted
@@ -38,14 +40,17 @@ struct WindowConfig
 struct ApplicationConfig
 {
     RenderBackendType backend{RenderBackendType::Default}; ///< GPU backend selection (Default = platform best).
-    string_view app_root;                                  ///< Override path for the @c app:// resource scheme.
-    string_view assets_root;                               ///< Override path for the @c assets:// resource scheme.
+    string app_root;                                       ///< Override path for the @c app:// resource scheme.
+    string assets_root;                                    ///< Override path for the @c assets:// resource scheme.
     /// Port on localhost the editor attaches to; 0 leaves the editor endpoint off. The
     /// VELK_EDITOR_PORT environment variable overrides it.
     uint16_t editor_port{0};
     /// Records which file and entry each imported object came from (IImporterPlugin::source_of),
     /// for editing. The VELK_TRACK_SOURCES environment variable (0 or 1) overrides it.
     bool track_sources{false};
+    /// Plugin URIs loaded after the standard plugins, for example "plugin:velk_js". create_app()
+    /// fails if one does not load.
+    vector<string> plugins;
 };
 
 /**

@@ -9,6 +9,7 @@
   - [Framework-driven (Android, embedded host)](#framework-driven-android-embedded-host)
 - [Application](#application)
   - [`ApplicationConfig`](#applicationconfig)
+- [app.velk and velk_run](#appvelk-and-velk_run)
 - [Window](#window)
   - [`WindowConfig`](#windowconfig)
   - [Update rate](#update-rate)
@@ -38,7 +39,7 @@ For most apps, this is the only setup code you write. The runtime hides GLFW, Vu
 
 int main()
 {
-    auto app = velk::create_app({});
+    auto app = velk::create_app();
     auto window = app.create_window({.width = 1280, .height = 720, .title = "demo"});
 
     auto scene = velk::create_scene("app://scenes/main.json");
@@ -64,7 +65,7 @@ The runtime supports two distinct modes for who owns the platform window and the
 velk creates the native window via the GLFW platform plugin and runs its own poll/update/present loop. This is what `create_window()` does. The user controls the loop but doesn't touch GLFW or Vulkan directly.
 
 ```cpp
-auto app = velk::create_app({});
+auto app = velk::create_app();
 auto window = app.create_window({.width = 1280, .height = 720});
 
 while (app.poll()) {            // pumps GLFW events
@@ -110,6 +111,7 @@ if (!app) {
    - Switches on the importer's source tracking when `track_sources` is set.
    - Loads the platform plugin (`velk_runtime_glfw` on desktop, `velk_runtime_android` on Android — selected via `#ifdef`).
    - Resolves the `IWindowProvider` from the platform plugin.
+   - Loads the plugins in `config.plugins`. If one does not load, `init` fails and `create_app()` returns an empty `Application`.
 
 The render context and the default renderer are NOT created at this point. Both are created lazily on the first `create_window()` or `wrap_native_surface()` call, because Vulkan instance initialization needs to know about the first surface to enumerate the right device extensions.
 
@@ -118,10 +120,54 @@ The render context and the default renderer are NOT created at this point. Both 
 | Field | Default | Description |
 |---|---|---|
 | `backend` | `RenderBackendType::Default` | GPU backend (Default = platform best). |
-| `app_root` | empty | Override path for the `app://` resource scheme. |
-| `assets_root` | empty | Override path for the `assets://` resource scheme. |
+| `app_root` | empty | Folder `app://` reads from. Empty leaves the platform's default: the working directory on desktop. Not supported on Android. |
+| `assets_root` | empty | Folder `assets://` reads from. Empty leaves `assets://` unregistered. |
 | `editor_port` | 0 | Port on localhost the editor attaches to. 0 leaves the editor endpoint off. The `VELK_EDITOR_PORT` environment variable overrides it, so any application can be started with the endpoint on. With it on, the runtime loads `velk_remote` and `velk_editor_endpoint` and makes every scene it shows visible to the editor. |
+| `plugins` | empty | Plugin URIs loaded after the standard plugins, for example `"plugin:velk_js"`. A plugin that does not load makes `create_app()` fail. |
 | `track_sources` | false | Records which file and entry each imported object came from, so the editor can write changes back to the files. The `VELK_TRACK_SOURCES` environment variable (0 or 1) overrides it. It switches on the importer plugin's source tracking before any content loads; see the importer docs in velk. |
+
+## app.velk and velk_run
+
+An application can be described by a file named `app.velk`:
+
+```json
+{
+  "app": {
+    "plugins": ["plugin:velk_js"],
+    "store": "scene.velk",
+    "window": { "width": 1280, "height": 720, "title": "My app" }
+  }
+}
+```
+
+| Key | Default | Description |
+|---|---|---|
+| `store` | required | The first store file. |
+| `plugins` | none | Plugin URIs loaded after the standard plugins. |
+| `window` | 1280×720, `"velk"` | `width`, `height` and `title` of the window. |
+| `app_root` | the file's folder | Folder `app://` reads from. |
+| `assets_root` | none | Folder `assets://` reads from. |
+| `backend` | `"default"` | `"default"` or `"vulkan"`. |
+
+Relative paths are taken from the folder `app.velk` is in. Unknown keys and wrong types are errors. Editor settings are not part of the file; `VELK_EDITOR_PORT` and `VELK_TRACK_SOURCES` set them.
+
+`velk_run [folder]` runs the application in `<folder>/app.velk`, the current directory by default. It loads the plugins, opens the window, loads the store file and shows its first camera. It exits with 1 if any of these fails.
+
+From code, `create_app(path)` creates the application from an `app.velk`:
+
+```cpp
+auto app = velk::create_app("app.velk");
+```
+
+`read_app_config(path)` returns the file's contents as an `AppConfigFile`: an `ApplicationConfig` (`app`), a `WindowConfig` (`window`), the store file's path (`store`), and `error`, which says what failed:
+
+```cpp
+auto file = velk::read_app_config("app.velk");
+auto app = velk::create_app(file.app);
+auto window = app.create_window(file.window);
+```
+
+`app.velk` shares the extension of store files but is not one. Loading it as a store file fails with an error naming it an application config, and reading a store file as `app.velk` fails with an error that it has no `"app"` object.
 
 ## Window
 
@@ -298,10 +344,18 @@ The dispatcher routes events through the bound scene's element hierarchy via hit
 | `velk_importer` | JSON scene loader. |
 | Platform plugin | `velk_runtime_glfw` on desktop, `velk_runtime_android` on Android (planned). |
 
-Custom plugins can be loaded explicitly after `create_app()`:
+Other plugins go in `ApplicationConfig::plugins`:
 
 ```cpp
-auto app = velk::create_app({});
+velk::ApplicationConfig config;
+config.plugins.push_back("plugin:velk_js");
+auto app = velk::create_app(config);
+```
+
+Plugins can also be loaded at any time after `create_app()`:
+
+```cpp
+auto app = velk::create_app();
 velk::instance().plugin_registry().load_plugin_from_path("my_plugin.dll");
 ```
 
@@ -326,7 +380,7 @@ The runtime ships as two cooperating plugins:
 
 | PluginId | Description |
 |---|---|
-| `velk::PluginId::RuntimePlugin` | Core plugin (`velk_runtime`) that registers the `Application` type. Loaded automatically by `create_app()`. |
+| `velk::PluginId::RuntimePlugin` | Core plugin (`velk_runtime`) that registers the `Application` type and reads `app.velk` (`IRuntimePlugin`). Loaded automatically by `create_app()`. |
 | `velk::PluginId::RuntimeGlfwPlugin` | Desktop platform plugin (`velk_runtime_glfw`) implementing `IWindowProvider` for GLFW. Loaded by `Application::init()` via compile-time selection. |
 | `velk::PluginId::RuntimeAndroidPlugin` | Android platform plugin (planned). Placeholder UID until implementation lands. |
 

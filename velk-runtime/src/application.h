@@ -74,6 +74,8 @@ private:
     /** @brief Loads the editor endpoint and listens, when a port is configured. */
     void start_editor_endpoint();
     void start_source_tracking();
+    void set_resource_roots();
+    bool load_config_plugins();
 
     /// Updates performance overlay timings (called after each submit).
     void tick_overlays(double cpu_time, double frame_time,

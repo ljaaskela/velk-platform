@@ -110,7 +110,7 @@ A minimal application which shows a fixed 64px*64px velk logo on screen.
 int main()
 {
     // Initialize velk
-    auto app = velk::create_app({});
+    auto app = velk::create_app();
     // Create a window
     auto window = app.create_window({.width = 1280, .height = 720, .title = "demo"});
     // Load a scene from a file
