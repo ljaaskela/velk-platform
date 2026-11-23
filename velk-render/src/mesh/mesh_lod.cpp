@@ -1033,13 +1033,17 @@ struct FoundPatch
 
 /// The patches of two triangles or more in @p cluster: neighbouring triangles (sharing a welded
 /// edge) within 2 degrees of a seed's plane and within a thousandth of the cluster's radius of
-/// it, the largest triangles seeding first.
+/// it, whose vertex normals (@p normals, by vertex like @p positions, or empty) are too, the
+/// largest triangles seeding first.
 void find_patches(const MeshLod& lod, const MeshLodCluster& cluster, const vector<float>& positions,
-                  const vector<uint32_t>& remap, vector<FoundPatch>& out)
+                  const vector<float>& normals, const vector<uint32_t>& remap, vector<FoundPatch>& out)
 {
     out.clear();
     const uint32_t n = cluster.triangle_count;
     if (n == 0) return;
+    // Only flat shaded triangles: their vertex normals as close to the patch's normal as their
+    // faces must be, as a patch's points all face its plane's way.
+    const bool by_normals = normals.size() == positions.size();
     const uint32_t* ids = lod.indices.data() + cluster.index_word;
     const auto pos = [&](uint32_t id, int k) { return positions[size_t(id) * 3 + k]; };
     vector<float> normal(size_t(n) * 3, 0.f);
@@ -1086,9 +1090,22 @@ void find_patches(const MeshLod& lod, const MeshLodCluster& cluster, const vecto
         const float eps = std::max(cluster.own_radius * 1e-3f, 1e-6f);
         const float cos_tol = 0.99939f;
         vector<uint32_t> queue;
+        const auto shaded_flat = [&](uint32_t tri, const float* towards) {
+            if (!by_normals) return true;
+            for (int v = 0; v < 3; ++v) {
+                const float* vn = normals.data() + size_t(ids[tri * 3 + v]) * 3;
+                const float len = std::sqrt(vn[0] * vn[0] + vn[1] * vn[1] + vn[2] * vn[2]);
+                if (len <= 0.f || (vn[0] * towards[0] + vn[1] * towards[1] + vn[2] * towards[2]) < cos_tol * len) return false;
+            }
+            return true;
+        };
         for (uint32_t seed : order) {
             if (patch_of[seed] != -1 || area[seed] <= 0.f) continue;
             const float* n0 = normal.data() + size_t(seed) * 3;
+            if (!shaded_flat(seed, n0)) {
+                patch_of[seed] = static_cast<int32_t>(seed);
+                continue;
+            }
             const float d0 = n0[0] * pos(ids[seed * 3], 0) + n0[1] * pos(ids[seed * 3], 1) + n0[2] * pos(ids[seed * 3], 2);
             const int32_t id = static_cast<int32_t>(seed);
             queue.clear();
@@ -1107,6 +1124,7 @@ void find_patches(const MeshLod& lod, const MeshLodCluster& cluster, const vecto
                         if (patch_of[other] != -1 || area[other] <= 0.f) continue;
                         const float* no = normal.data() + size_t(other) * 3;
                         if (no[0] * n0[0] + no[1] * n0[1] + no[2] * n0[2] < cos_tol) continue;
+                        if (!shaded_flat(other, n0)) continue;
                         bool near = true;
                         for (int v = 0; v < 3 && near; ++v) {
                             const uint32_t vid = ids[other * 3 + v];
@@ -1217,14 +1235,14 @@ void find_patches(const MeshLod& lod, const MeshLodCluster& cluster, const vecto
 /// MeshLod::patch_words: the patches are the first light roots, in order, and each triangle in
 /// none has one of its own after them. A patch's square is over its rectangle's longer side,
 /// centred across the shorter.
-void build_patches(MeshLod& lod, const vector<float>& positions, const vector<uint32_t>& remap)
+void build_patches(MeshLod& lod, const vector<float>& positions, const vector<float>& normals, const vector<uint32_t>& remap)
 {
     vector<FoundPatch> found;
     vector<uint32_t> slot;
     for (MeshLodCluster& cluster : lod.clusters) {
         const uint32_t n = cluster.triangle_count;
         if (n == 0 || n > 256u) continue;
-        find_patches(lod, cluster, positions, remap, found);
+        find_patches(lod, cluster, positions, normals, remap, found);
         if (found.empty()) continue;
         const auto patches = static_cast<uint32_t>(found.size());
         constexpr uint32_t kNone = 0xFFFFFFFFu;
@@ -1266,7 +1284,8 @@ void build_patches(MeshLod& lod, const vector<float>& positions, const vector<ui
 // rectangle around it. Logs triangles, long thin ones (an edge over four times the height to
 // it), those in well filled patches, roots per triangle against roots per patch, and patches
 // that fill their bounds poorly.
-void log_patch_stats(const MeshLod& lod, const vector<float>& positions, const vector<uint32_t>& remap)
+void log_patch_stats(const MeshLod& lod, const vector<float>& positions, const vector<float>& normals,
+                     const vector<uint32_t>& remap)
 {
     struct Totals
     {
@@ -1298,7 +1317,7 @@ void log_patch_stats(const MeshLod& lod, const vector<float>& positions, const v
             t.triangles += 1;
             t.slivers += sliver[i];
         }
-        find_patches(lod, cluster, positions, remap, found);
+        find_patches(lod, cluster, positions, normals, remap, found);
         for (const FoundPatch& patch : found) {
             const vector<uint32_t>& queue = patch.triangles;
             const double longer = patch.length, shorter = std::max(double(patch.width), 1e-9);
@@ -1550,8 +1569,8 @@ MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, const flo
         fill_cluster_bounds(cluster, lod.indices, positions);
     }
     LodTreeBuilder{lod}.build();
-    if (!deforming && std::getenv("VELK_PATCH_STATS")) log_patch_stats(lod, positions, remap);
-    if (!deforming && std::getenv("VELK_FLAT_PATCHES")) build_patches(lod, positions, remap);
+    if (!deforming && std::getenv("VELK_PATCH_STATS")) log_patch_stats(lod, positions, normals, remap);
+    if (!deforming && std::getenv("VELK_FLAT_PATCHES")) build_patches(lod, positions, normals, remap);
     if (vertices && !deforming) {
         own_vertices(lod, lod_vertices, lod_vertices.bytes.empty() ? vertices : lod_vertices.bytes.data(), uv1, colors);
     }

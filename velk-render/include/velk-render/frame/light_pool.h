@@ -323,11 +323,15 @@ inline constexpr uint32_t kLightPoolAheadEvery = 60;
                                                     change woke: four words */                                       \
     X(LastFreePages, LAST_FREE_PAGES, 189)       /* pages the last frame left on the stack, for the pieces' keep */  \
     X(DemandFrames, DEMAND_FRAMES, 190)          /* frames in a row, up to 3, that asked for pages not there */      \
-    X(ReadPixels, READ_PIXELS, 191)              /* VELK_LIGHT_READ's pixels, x | y << 16, kLightNone for none: \
+    X(PatchOutside, PATCH_OUTSIDE, 191)          /* not 0 with VELK_PATCH_OUTSIDE: the trace counts the flat patch \
+                                                    points it traces outside their patch's triangles */              \
+    X(SumPatchPoints, SUM_PATCH_POINTS, 192)     /* summed: flat patch points traced, and of them outside their \
+                                                    triangles: two words */                                          \
+    X(ReadPixels, READ_PIXELS, 194)              /* VELK_LIGHT_READ's pixels, x | y << 16, kLightNone for none: \
                                                     kLightReadPixels words */                                        \
-    X(ReadTerms, READ_TERMS, 195)                /* the lighting's terms at them, kLightReadWords each \
+    X(ReadTerms, READ_TERMS, 198)                /* the lighting's terms at them, kLightReadWords each \
                                                     (VELK_LIGHT_READ_*) */                                           \
-    X(HeaderEnd, HEADER_END, 475)
+    X(HeaderEnd, HEADER_END, 478)
 
 #define VELK_LIGHT_POOL_CPP_WORD(cpp, glsl, word) inline constexpr uint32_t kLightPool##cpp = word;
 VELK_LIGHT_POOL_HEADER(VELK_LIGHT_POOL_CPP_WORD)
@@ -2312,6 +2316,7 @@ shared uint s_slot_rays[VELK_LIGHT_SPREAD_POINTS * VELK_LIGHT_SLOTS];
 // Stores a point's light `value`, its `blockers` and its trace state, whose words start at `pw`
 // and `bw`: the count it was traced to, `traces`, and the frame it was listed, from `state` as the
 // listing left it.
+)" R"(
 void velk_points_store(uint pw, uint bw, uint value, uint blockers, uint traces, uint state, uint frame)
 {
     // Never the word for untraced: all eight slots fully dark reads one step lighter.
@@ -2438,6 +2443,30 @@ void velk_points_trace_point(uint pool, uint i, uint frame, uint counts[4], uint
         at.is_patch = true;
         at.b = origin + xy.x * u + xy.y * v;
         at.normal = cross(u, v);
+        // VELK_PATCH_OUTSIDE: on its first trace, whether its place is in one of its patch's
+        // triangles, edges counting as in.
+        if (VELK_LIGHT_WORDS.data[pool + VELK_POOL_PATCH_OUTSIDE] != 0u && lane == 0u && traces == 0u) {
+            bool inside = false;
+            uint triangles = min(VELK_LIGHT_WORDS.data[cluster + VELK_LOD_CLUSTER_TRIANGLES], 256u);
+            float tolerance = 1e-6 * side * side;
+            for (uint t = 0u; t < triangles && !inside; ++t) {
+                if (velk_patch_slot(cluster, t) != piece_slot) continue;
+                vec2 c[3];
+                for (uint k = 0u; k < 3u; ++k) {
+                    uint vw = vertex_word + velk_mesh_words.data[first_index + t * 3u + k] * VELK_VERTEX3D_WORDS;
+                    vec3 corner = vec3(uintBitsToFloat(velk_mesh_words.data[vw]), uintBitsToFloat(velk_mesh_words.data[vw + 1u]),
+                                       uintBitsToFloat(velk_mesh_words.data[vw + 2u]));
+                    c[k] = vec2(dot(corner - origin, u), dot(corner - origin, v));
+                }
+                float d0 = (c[1].x - c[0].x) * (xy.y - c[0].y) - (c[1].y - c[0].y) * (xy.x - c[0].x);
+                float d1 = (c[2].x - c[1].x) * (xy.y - c[1].y) - (c[2].y - c[1].y) * (xy.x - c[1].x);
+                float d2 = (c[0].x - c[2].x) * (xy.y - c[2].y) - (c[0].y - c[2].y) * (xy.x - c[2].x);
+                inside = (d0 >= -tolerance && d1 >= -tolerance && d2 >= -tolerance)
+                      || (d0 <= tolerance && d1 <= tolerance && d2 <= tolerance);
+            }
+            atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_PATCH_POINTS], 1u);
+            if (!inside) atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_PATCH_POINTS + 1u], 1u);
+        }
         if (around) {
             uint own = velk_points_hash(piece * 977u + q);
             at.start = vec2(float(own & 0xFFFFu), float(own >> 16u)) / 65536.0;
@@ -6189,6 +6218,9 @@ inline bool ensure_light_pool(LightPool& pool, IGpuArena& arena, uint64_t device
     initial[kLightPoolWarmupPointsWord] = base + static_cast<uint32_t>(points_word + point_list_words);
     initial[kLightPoolCoarsePointsWord] = base + static_cast<uint32_t>(points_word + 2u * point_list_words);
     initial[kLightPoolFinePointsWord] = base + static_cast<uint32_t>(points_word + 3u * point_list_words);
+    // A development aid: with VELK_PATCH_OUTSIDE set, the trace counts the flat patch points it
+    // traces outside their patch's triangles, for the log.
+    initial[kLightPoolPatchOutside] = std::getenv("VELK_PATCH_OUTSIDE") ? 1u : 0u;
     // A development aid: VELK_LIGHT_READ=x,y;x,y;... names up to kLightReadPixels pixels whose
     // lighting terms the lighting writes and the log prints.
     for (uint32_t k = 0; k < kLightReadPixels; ++k) initial[kLightPoolReadPixels + k] = kLightNone;
