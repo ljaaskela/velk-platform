@@ -2,7 +2,7 @@
 // each with a few fixed views, for looking at the renderer's structures and for checking its
 // images against references.
 //
-// velk_ui_inspect [scene=NAME] [view=NAME] [level=N] [at=X,Y,Z,YAW,PITCH] [path[=FRAME]] [capture=N]
+// velk_ui_inspect [scene=NAME] [view=NAME] [level=N] [at=X,Y,Z,YAW,PITCH] [path[=FRAME]] [capture=N [then=VIEW]]
 // velk_ui_inspect verify [scene=NAMES] [skip=NAMES] [settle=N]
 // velk_ui_inspect reference [scene=NAMES] [skip=NAMES] [frames=N]
 // velk_ui_inspect trend [scene=NAMES]
@@ -253,6 +253,7 @@ int main(int argc, char* argv[])
     long settle_frames = 10;
     long reference_frames = 128;
     long capture_frame = 0;
+    size_t then_view = kViewCount;
     for (int i = 1; i < argc; ++i) {
         const char* arg = argv[i];
         if (std::strcmp(arg, "verify") == 0) {
@@ -282,6 +283,13 @@ int main(int argc, char* argv[])
                 }
             }
             if (!known) {
+                VELK_LOG(E, "inspect: unknown view '%s'", arg + 5);
+            }
+        } else if (std::strncmp(arg, "then=", 5) == 0) {
+            for (size_t v = 0; v < kViewCount; ++v) {
+                if (std::strcmp(arg + 5, kViews[v].key) == 0) then_view = v;
+            }
+            if (then_view == kViewCount) {
                 VELK_LOG(E, "inspect: unknown view '%s'", arg + 5);
             }
         } else if (std::strncmp(arg, "at=", 3) == 0) {
@@ -1201,20 +1209,31 @@ int main(int argc, char* argv[])
         app.update();
         app.present();
         check_slow(frame);
-        // With capture=N: frame N saved, then the run ends.
-        if (capture_frame > 0 && frame == capture_frame) {
+        // With capture=N: frame N saved, then the run ends. With then=VIEW too, that debug view
+        // next, the scene and camera as they were, saved two frames later as capture_VIEW.png.
+        const auto save_frame = [&](const char* name) {
             auto writer = velk::instance().create<velk::IImageWriter>(velk::ui::ClassId::ImageEncoder);
             inspect::Image image;
             std::error_code ec;
             std::filesystem::create_directories(INSPECT_RUN_DIR, ec);
             char path[256];
-            std::snprintf(path, sizeof(path), "%s/capture.png", INSPECT_RUN_DIR);
+            std::snprintf(path, sizeof(path), "%s/%s.png", INSPECT_RUN_DIR, name);
             if (writer && frame_backend && inspect::grab_window(*frame_backend, velk::get_render_target_id(window.surface()), image)
                 && inspect::save_png(*writer, image, path)) {
                 VELK_LOG(I, "inspect: frame %ld saved to %s", frame, path);
             } else {
                 VELK_LOG(E, "inspect: could not save frame %ld", frame);
             }
+        };
+        if (capture_frame > 0 && frame == capture_frame) {
+            save_frame("capture");
+            if (then_view == kViewCount) break;
+            show_view(then_view);
+        }
+        if (capture_frame > 0 && then_view != kViewCount && frame == capture_frame + 2) {
+            char name[64];
+            std::snprintf(name, sizeof(name), "capture_%s", kViews[then_view].key);
+            save_frame(name);
             break;
         }
     }
