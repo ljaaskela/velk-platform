@@ -212,6 +212,8 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
     hit.weights = vec2(0.0);
     hit.record = VELK_NO_RECORD;
     hit.triangle = VELK_NO_CORNERS;
+    hit.stand_in = -1.0;
+    hit.plane = vec3(0.0);
 
     uint top = VELK_GLOBALS.ray_top;
     if (top == VELK_RAY_NONE || velk_culling.data[top + VELK_RAY_TOP_LEAVES] == 0u) return closest ? 0.0 : 1.0;
@@ -672,6 +674,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
     hit.weights = best_weights;
     ElementInstance inst = best_quad ? velk_quad_instance(best_instance) : velk_instances.data[best_instance];
     hit.object = inst.params.w;
+    hit.stand_in = best_quad ? velk_surface_flatness(inst.params.y) : -1.0;
     mat3 to_world = mat3(inst.world_matrix);
     mat3 to_local = inverse(to_world);
     // Where on its object, in the object's own axes but world units, as the G-buffer has it.
@@ -695,12 +698,17 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
             vec3 w = vec3(1.0 - best_weights.x - best_weights.y, best_weights);
             vec3 smooth_normal = c0.normal * w.x + c1.normal * w.y + c2.normal * w.z;
             if (dot(smooth_normal, smooth_normal) > 0.0) mesh_normal = smooth_normal;
+            if (best_cluster != VELK_NO_CLUSTER) {
+                hit.stand_in = velk_stand_in_flatness(dot(w, vec3(length(c0.normal), length(c1.normal), length(c2.normal))));
+            }
             hit.uv = c0.uv * w.x + c1.uv * w.y + c2.uv * w.z;
         }
         // From the mesh's space to the instance's: the inverse transpose of the size.
         local_normal = mesh_normal / size;
+        hit.plane = normalize(transpose(to_local) * (best_normal / size));
     }
     hit.normal = normalize(transpose(to_local) * local_normal);
+    if (best_corners.x == VELK_NO_CORNERS) hit.plane = hit.normal;
     hit.side = velk_facing_side(local_normal);
     return 1.0;
 }

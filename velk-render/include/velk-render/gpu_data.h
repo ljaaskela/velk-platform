@@ -155,6 +155,9 @@ inline constexpr uint32_t kDrawFlagQuads = 1u << 2;
 /// (IMaterial::get_opacity_words), the factor's word at kDrawOpacityFactorShift and the texture
 /// id's word at kDrawOpacityTextureShift, a byte each. Mirrors VELK_DRAW_OPACITY.
 inline constexpr uint32_t kDrawFlagOpacity = 1u << 3;
+/// DrawDataHeader::flags: its material is seen from both sides (MaterialOptions::get_double_sided):
+/// a pixel shades the side it sees. Mirrors VELK_DRAW_DOUBLE_SIDED.
+inline constexpr uint32_t kDrawFlagDoubleSided = 1u << 4;
 inline constexpr uint32_t kDrawOpacityFactorShift = 8;
 inline constexpr uint32_t kDrawOpacityTextureShift = 16;
 

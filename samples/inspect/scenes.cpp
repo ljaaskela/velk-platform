@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstring>
 #include <initializer_list>
+#include <velk-render/api/material/material.h>
 #include <velk-render/api/material/standard_material.h>
 #include <velk-render/api/shadow_technique.h>
 #include <velk-render/blas.h>
@@ -723,6 +724,112 @@ void build_trees(SceneBuilder& b)
     for (size_t k = 0; k < 3; ++k) add_instances(b, species[k], transforms[k]);
 }
 
+/// Stand-ins for what is too small to draw, lit: groups of a tree, a rock, a wall (a slab), an
+/// open roof, a card drawn from both sides, a glossy wall and a metal rock, around the origin
+/// under a sun, seen from far at four headings, so lit from behind the camera, from the side and
+/// from behind them, and near.
+void build_stand_ins(SceneBuilder& b)
+{
+    set_sky(b, "stand_ins", 0.2f, 0.25f, 0.33f);
+    add_sun(b, {50.f, 30.f, 0.f}, 0.8f);
+    add_mesh(b, build_ground(raw(b), 20000.f, 128, standard(0.3f, 0.3f, 0.28f)), {});
+
+    const velk_samples::NatureTrees trees = velk_samples::build_nature_trees(raw(b), false);
+    const velk::IMesh::Ptr rock = build_rock(raw(b), 24.f, 48, 24, standard(0.45f, 0.42f, 0.38f));
+    const velk::IMesh::Ptr wall = build_box(raw(b), {100.f, 60.f, 6.f}, 4, standard(0.7f, 0.68f, 0.62f));
+    velk::IMesh::Ptr roof;
+    {
+        // Two slopes from a ridge 30 up down to eaves 40 to either side, open underneath.
+        velk::vector<Vertex> vertices;
+        velk::vector<uint32_t> indices;
+        add_grid(vertices, indices, {-40.f, -30.f, 0.f}, {80.f, 0.f, 0.f}, {0.f, 30.f, -40.f}, {0.f, -0.8f, -0.6f}, 4);
+        add_grid(vertices, indices, {-40.f, -30.f, 0.f}, {80.f, 0.f, 0.f}, {0.f, 30.f, 40.f}, {0.f, -0.8f, 0.6f}, 4);
+        roof = build(raw(b), vertices, indices, standard(0.55f, 0.3f, 0.22f));
+    }
+    velk::IMesh::Ptr card;
+    {
+        velk::vector<Vertex> vertices;
+        velk::vector<uint32_t> indices;
+        add_grid(vertices, indices, {-30.f, -60.f, 0.f}, {60.f, 0.f, 0.f}, {0.f, 60.f, 0.f}, {0.f, 0.f, 1.f}, 2);
+        const velk::IMaterial::Ptr both_sides = standard(0.35f, 0.5f, 0.3f);
+        velk::Material options(interface_pointer_cast<velk::IObject>(both_sides));
+        options.options().set_double_sided(true);
+        card = build(raw(b), vertices, indices, both_sides);
+    }
+    // And a glossy wall and a metal rock, whose reflections a stand-in keeps.
+    const velk::IMesh::Ptr glossy_wall = build_box(raw(b), {100.f, 60.f, 6.f}, 4, standard(0.6f, 0.62f, 0.66f, 0.15f));
+    const velk::IMesh::Ptr metal_rock =
+        build_rock(raw(b), 24.f, 48, 24, velk::material::create_standard(velk::color{0.9f, 0.75f, 0.45f, 1.f}, 1.f, 0.35f));
+    const velk::IMesh::Ptr groups[] = {trees.oak, rock, wall, roof, card, glossy_wall, metal_rock};
+    constexpr size_t kGroups = sizeof(groups) / sizeof(groups[0]);
+    for (size_t k = 0; k < kGroups; ++k) {
+        const float around = static_cast<float>(k) * 2.f * kPi / static_cast<float>(kGroups);
+        const float cx = std::cos(around) * 700.f;
+        const float cz = std::sin(around) * 700.f;
+        velk::vector<velk::InstanceTransform> transforms;
+        for (long i = 0; i < 8 * 8; ++i) {
+            const float x = cx + (static_cast<float>(i % 8) - 3.5f + 0.6f * jitter(i, 3.1f + k)) * 80.f;
+            const float z = cz + (static_cast<float>(i / 8) - 3.5f + 0.6f * jitter(i, 5.9f + k)) * 80.f;
+            const float turn = (jitter(i, 9.7f + k) + 0.5f) * 2.f * kPi;
+            const float c = std::cos(turn);
+            const float n = std::sin(turn);
+            transforms.push_back(velk::InstanceTransform{{{c, 0.f, n, x}, {0.f, 1.f, 0.f, 0.f}, {-n, 0.f, c, z}}});
+        }
+        add_instances(b, groups[k], transforms);
+    }
+}
+
+/// A leaf seen from both sides: a large card drawn from both sides, standing on the ground under a
+/// sun, and beside it one passing light through as a leaf does, posts on either side shadowing
+/// them; seen from the side the sun lights and from the other, whose side gets no sun directly.
+void build_leaf_lit(SceneBuilder& b, bool sun)
+{
+    set_sky(b, "leaf", 0.2f, 0.25f, 0.33f);
+    if (sun) {
+        add_sun(b, {50.f, 30.f, 0.f}, 0.8f);
+    } else {
+        // A square light before them, facing them.
+        auto light = velk::trait::render::create_area_light(velk::color{1.f, 0.96f, 0.88f, 1.f}, 3.f, 40.f, 2000.f);
+        light.add_technique(velk::technique::create_rt_shadow());
+        auto element = velk::create_element();
+        auto trs = velk::trait::transform::create_trs();
+        trs.set_translate({100.f, -160.f, 260.f});
+        element.add_trait(trs);
+        element.add_trait(light);
+        place(b, element);
+    }
+    add_mesh(b, build_ground(raw(b), 2000.f, 32, standard(0.5f, 0.5f, 0.5f)), {});
+    velk::vector<Vertex> vertices;
+    velk::vector<uint32_t> indices;
+    add_grid(vertices, indices, {-80.f, -140.f, 0.f}, {160.f, 0.f, 0.f}, {0.f, 140.f, 0.f}, {0.f, 0.f, 1.f}, 8);
+    const velk::IMaterial::Ptr both_sides = standard(0.3f, 0.55f, 0.2f);
+    velk::Material options(interface_pointer_cast<velk::IObject>(both_sides));
+    options.options().set_double_sided(true);
+    add_mesh(b, build(raw(b), vertices, indices, both_sides), {});
+    // And beside it one that passes light through as a leaf does.
+    velk::vector<Vertex> leaf_vertices;
+    velk::vector<uint32_t> leaf_indices;
+    add_grid(leaf_vertices, leaf_indices, {120.f, -140.f, 0.f}, {160.f, 0.f, 0.f}, {0.f, 140.f, 0.f}, {0.f, 0.f, 1.f}, 8);
+    add_mesh(b,
+             build(raw(b), leaf_vertices, leaf_indices,
+                   velk_samples::tree_material(velk::color{0.3f, 0.55f, 0.2f, 1.f}, 0.9f, true, false, velk_samples::kLeafTransmission)),
+             {});
+    // Posts on either side of it, so that each side has a shadow across it wherever the sun is.
+    add_mesh(b, build_box(raw(b), {12.f, 180.f, 12.f}, 4, standard(0.6f, 0.6f, 0.6f)), {-30.f, 0.f, 60.f});
+    add_mesh(b, build_box(raw(b), {12.f, 180.f, 12.f}, 4, standard(0.6f, 0.6f, 0.6f)), {30.f, 0.f, -60.f});
+}
+
+void build_leaf(SceneBuilder& b)
+{
+    build_leaf_lit(b, true);
+}
+
+/// The leaf scene lit by a square light before the cards instead of the sun.
+void build_leaf_area(SceneBuilder& b)
+{
+    build_leaf_lit(b, false);
+}
+
 velk::Light add_look_light(SceneBuilder& b, const velk::vec3& position, bool sun, float size, float day, float night)
 {
     auto light = sun ? velk::trait::render::create_directional_light(velk::color{1.f, 0.96f, 0.88f, 1.f}, day)
@@ -900,6 +1007,19 @@ const velk::vector<SceneSpec>& scenes()
         {"trees", "nature's trees in the wind, a forest from near to far: far trees as specks of the wrong colour (#49)",
          {{"near", {{0.f, -25.f, 60.f}, 0.f, -3.f}}, {"far", {{0.f, -1500.f, 1500.f}, 0.f, -10.f}}},
          build_trees, nullptr, false},
+        {"leaf", "two cards drawn from both sides under a sun, one passing light through, posts shadowing either side: the side seen is the side shaded",
+         {{"front", {{100.f, -90.f, 520.f}, 0.f, -8.f}}, {"back", {{100.f, -90.f, -520.f}, 180.f, -8.f}}},
+         build_leaf, nullptr, false},
+        {"leaf_area", "the leaf scene under a square light before the cards: the side seen, shaded by an area light",
+         {{"front", {{100.f, -90.f, 520.f}, 0.f, -8.f}}, {"back", {{100.f, -90.f, -520.f}, 180.f, -8.f}}},
+         build_leaf_area, nullptr, false},
+        {"stand_ins", "a tree, a rock, a wall, a roof and a card far away, lit from the camera's side, across and from behind: stand-ins' light",
+         {{"y0", {{0.f, -630.f, 4500.f}, 0.f, -8.f}},
+          {"y90", {{4500.f, -630.f, 0.f}, 90.f, -8.f}},
+          {"y180", {{0.f, -630.f, -4500.f}, 180.f, -8.f}},
+          {"y270", {{-4500.f, -630.f, 0.f}, 270.f, -8.f}},
+          {"near", {{0.f, -200.f, 1700.f}, 0.f, -8.f}}},
+         build_stand_ins, nullptr, false},
         {"forest", "instanced tree sized solids and pebbles",
          {{"near", {{0.f, -60.f, 250.f}, 0.f, -8.f}}, {"far", {{0.f, -260.f, 500.f}, 0.f, -20.f}}},
          build_forest},

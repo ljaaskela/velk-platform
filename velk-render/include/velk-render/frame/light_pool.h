@@ -133,6 +133,9 @@ static_assert(kLightPageIndex == kLightPageSlots + 8u, "eight light slots");
 /// Own points in pieces have this in their header's word 1, with their triangle count under it:
 /// a word per triangle follows the header, naming its root piece.
 inline constexpr uint32_t kLightPieced = 0x40000000u;
+/// Own points of a surface seen from both sides (kDrawFlagDoubleSided) have this in their kind
+/// too: each light is traced from the side it shines on.
+inline constexpr uint32_t kLightTwoSided = 0x20000000u;
 /// The pages a record has at most, all named in its header: its header, a root word for each of
 /// up to 256 triangles and its points, two words for each of up to 256 vertices, or three when it
 /// links.
@@ -209,7 +212,7 @@ inline constexpr uint32_t kLightMaxSegments = 64;
 /// Pixels VELK_LIGHT_READ can name for the lighting to write its terms at (VELK_POOL_READ_TERMS),
 /// and the words of each one's terms (VELK_LIGHT_READ_WORDS).
 inline constexpr uint32_t kLightReadPixels = 4;
-inline constexpr uint32_t kLightReadWords = 74;
+inline constexpr uint32_t kLightReadWords = 77;
 inline constexpr uint32_t kLightPoolAheadFrames = 40;
 inline constexpr uint32_t kLightPoolAheadEvery = 60;
 
@@ -331,7 +334,7 @@ inline constexpr uint32_t kLightPoolAheadEvery = 60;
                                                     kLightReadPixels words */                                        \
     X(ReadTerms, READ_TERMS, 198)                /* the lighting's terms at them, kLightReadWords each \
                                                     (VELK_LIGHT_READ_*) */                                           \
-    X(HeaderEnd, HEADER_END, 494)
+    X(HeaderEnd, HEADER_END, 506)
 
 #define VELK_LIGHT_POOL_CPP_WORD(cpp, glsl, word) inline constexpr uint32_t kLightPool##cpp = word;
 VELK_LIGHT_POOL_HEADER(VELK_LIGHT_POOL_CPP_WORD)
@@ -381,6 +384,7 @@ inline constexpr uint32_t kLightTraceRaysUnlimited = 1u << 30;
 #define VELK_LIGHT_FIRST_RAYS_LEAST 1u
 #define VELK_LIGHT_DIRECT_PAGES 15u
 #define VELK_LIGHT_PIECED 0x40000000u
+#define VELK_LIGHT_TWO_SIDED 0x20000000u
 #define VELK_LIGHT_SLOTS 8u
 #define VELK_LIGHT_ONE_TRACED 0x40000000u
 #define VELK_LIGHT_ONE_ASKED 0x20000000u
@@ -460,10 +464,12 @@ bool velk_light_inherits(uint value)
 // light and the colour before tonemapping, three words each; then its metallic, whether its points
 // of light were traced and probes covered it (bits 0 and 1) with the frame that wrote them (the
 // bits from 8 on, its present counter), and how well the probes matched.
-#define VELK_LIGHT_READ_WORDS 74u
+#define VELK_LIGHT_READ_WORDS 77u
 // Then its first light: its index (VELK_LIGHT_NONE for none), how much of it gets through and the
-// cosine of its way to the normal, floats as their bits; and the pixel's ids' first word.
+// cosine of its way to the normal, floats as their bits; and the pixel's ids' first word. Then the
+// lights' highlights alone, of all its specular light, three words.
 #define VELK_LIGHT_READ_FIRST_LIGHT 70u
+#define VELK_LIGHT_READ_HIGHLIGHTS 74u
 // Then what it reads of its triangle's pieces (velk_light_explain), from word 24: its record's
 // light word, its triangle, its record's triangles in pieces, its record's coarse light, its
 // triangle's root word, the level it reads (a page, or VELK_PIECE_VERTICES), that level's depth
@@ -2043,7 +2049,7 @@ uint g_first_rays = 0u;  // of those, for lights traced for the first time
 // patches of small members on the way (VELK_CUT_RAY_QUAD). How far away what kept it was is in
 // velk_ray_blocker_t, 0 when the surface faces away. With `stratum` 0 to 3, the point is in that
 // quarter of the light's samples, so that four rays with each cover the light evenly; 4 for anywhere.
-float velk_points_blocked(Light light, vec3 p, vec3 n, float lift, uint seed, uint stratum)
+float velk_points_blocked(Light light, vec3 p, vec3 n, float lift, uint seed, uint stratum, bool two_sided)
 {
     velk_ray_blocker_t = 0.0;
     vec2 r = vec2(float(velk_points_hash(seed) & 0xFFFFu), float(velk_points_hash(seed ^ 0x9e3779b9u) & 0xFFFFu)) / 65535.0;
@@ -2074,10 +2080,14 @@ float velk_points_blocked(Light light, vec3 p, vec3 n, float lift, uint seed, ui
         dir = to / max(dist, 1e-6);
         t_max = dist * 0.999;
     }
-    // Facing away, the surface is in its own way.
-    if (dot(n, dir) <= 0.0) return 1.0;
+    // Facing away, the surface is in its own way. A stand-in for small pieces (`n` of no length,
+    // velk_point_place) faces every way: its ray starts off it toward the light. One seen from both
+    // sides (`two_sided`) is lit on the side the light is on, from that side.
+    bool faces = dot(n, n) > 0.0;
+    if (two_sided && dot(n, dir) < 0.0) n = -n;
+    if (faces && dot(n, dir) <= 0.0) return 1.0;
     Ray ray;
-    ray.origin = p + n * lift;
+    ray.origin = p + (faces ? n : dir) * lift;
     ray.dir = dir;
     ++g_rays;
     return 1.0 - trace_visibility(ray, max(t_max - lift, 0.0));
@@ -2199,12 +2209,16 @@ void velk_point_place(VelkPointPlace at, uint trace, out vec3 p, out vec3 n, out
     ElementInstance inst = velk_instances.data[at.instance];
     vec3 local = vec3(0.0);
     vec3 normal = vec3(0.0);
+    // The length its normals were authored with: shorter than unit for a stand-in for small
+    // pieces (velk_stand_in_flatness), which faces every way: `n` then has no length.
+    float authored = 1.0;
     if (at.vertex != VELK_LIGHT_NONE) {
         uint vw = at.vertex_word + at.vertex * VELK_VERTEX3D_WORDS;
         local = vec3(uintBitsToFloat(velk_mesh_words.data[vw]), uintBitsToFloat(velk_mesh_words.data[vw + 1u]),
                      uintBitsToFloat(velk_mesh_words.data[vw + 2u]));
         normal = vec3(uintBitsToFloat(velk_mesh_words.data[vw + 3u]), uintBitsToFloat(velk_mesh_words.data[vw + 4u]),
                       uintBitsToFloat(velk_mesh_words.data[vw + 5u]));
+        authored = length(normal);
     } else if (at.is_patch) {
         local = at.b;
         if (at.around && trace > 0u) {
@@ -2220,16 +2234,20 @@ void velk_point_place(VelkPointPlace at, uint trace, out vec3 p, out vec3 n, out
             b = max(b, vec3(0.0));
             b /= max(b.x + b.y + b.z, 1e-6);
         }
+        authored = 0.0;
         for (uint k = 0u; k < 3u; ++k) {
             uint vw = at.vertex_word + velk_mesh_words.data[at.first_index + at.triangle * 3u + k] * VELK_VERTEX3D_WORDS;
             local += b[k] * vec3(uintBitsToFloat(velk_mesh_words.data[vw]), uintBitsToFloat(velk_mesh_words.data[vw + 1u]),
                                  uintBitsToFloat(velk_mesh_words.data[vw + 2u]));
-            normal += b[k] * vec3(uintBitsToFloat(velk_mesh_words.data[vw + 3u]), uintBitsToFloat(velk_mesh_words.data[vw + 4u]),
-                                  uintBitsToFloat(velk_mesh_words.data[vw + 5u]));
+            vec3 corner_normal = vec3(uintBitsToFloat(velk_mesh_words.data[vw + 3u]), uintBitsToFloat(velk_mesh_words.data[vw + 4u]),
+                                      uintBitsToFloat(velk_mesh_words.data[vw + 5u]));
+            normal += b[k] * corner_normal;
+            authored += b[k] * length(corner_normal);
         }
     }
     p = velk_rel_position(inst.world_matrix, inst.offset.xyz + local * inst.size.xyz, g);
-    n = normalize(mat3(inst.world_matrix) * (normal / max(abs(inst.size.xyz), vec3(1e-6))));
+    n = velk_stand_in_flatness(authored) >= 0.0 ? vec3(0.0)
+      : normalize(mat3(inst.world_matrix) * (normal / max(abs(inst.size.xyz), vec3(1e-6))));
     mat4 vp = g.view_projection;
     float spacing = VELK_LIGHT_PIXELS / max(length(vec3(vp[0][1], vp[1][1], vp[2][1])) * g.viewport.y * 0.5, 1e-6);
     lift = max(0.05 * spacing * length(p), length(p) * 1e-4);
@@ -2599,7 +2617,8 @@ void velk_points_trace_point(uint pool, uint i, uint frame, uint counts[4], uint
             if (around && j > 0u) velk_point_place(at, j, pj, nj, lj);
             // A light's rays over its quarters: all four, or two opposite ones.
             uint stratum = ((full >> (4u * s)) & 15u) == 4u ? (n_s == 4u ? j : n_s == 2u ? j * 3u : 4u) : 4u;
-            float blocked = velk_points_blocked(velk_light_at(pc.lights_base + slots[s]), pj, nj, lj, seed + s * 4u + j, stratum);
+            float blocked = velk_points_blocked(velk_light_at(pc.lights_base + slots[s]), pj, nj, lj, seed + s * 4u + j, stratum,
+                                                (kind & VELK_LIGHT_TWO_SIDED) != 0u);
             if (spread) {
                 atomicAdd(s_slot_rays[slot_base + s], 1u);
                 if (blocked > 0.0) {
@@ -2678,7 +2697,8 @@ void velk_points_trace_point(uint pool, uint i, uint frame, uint counts[4], uint
         blockers = VELK_LIGHT_WORDS.data[bw];
         uint s = velk_points_pick(slots, p, seed, blockers);
         if (slots[s] != VELK_LIGHT_NONE) {
-            float blocked = velk_points_blocked(velk_light_at(pc.lights_base + slots[s]), p, n, lift, seed + 7u, traces & 3u);
+            float blocked = velk_points_blocked(velk_light_at(pc.lights_base + slots[s]), p, n, lift, seed + 7u, traces & 3u,
+                                                (kind & VELK_LIGHT_TWO_SIDED) != 0u);
             uint had = (blockers >> (4u * s)) & 15u;
             bool first_ray = had == VELK_LIGHT_BLOCKER_UNTRACED;
             if (first_ray) step = 1.0;
@@ -2932,7 +2952,7 @@ void main()
         Light l = velk_light_at(pc.lights_base + light);
         vec3 toward = l.flags.x == 0u ? -l.direction.xyz : normalize(l.position.xyz - center);
         ++g_first_rays;
-        blocked = velk_points_blocked(l, center, toward, radius * 1.01 + length(center) * 1e-4, seed + lane, lane & 3u);
+        blocked = velk_points_blocked(l, center, toward, radius * 1.01 + length(center) * 1e-4, seed + lane, lane & 3u, false);
     }
     s_blocked[lane] = blocked;
     barrier();
@@ -3815,8 +3835,9 @@ bool velk_cell_changed(uint changes, vec3 pos, int level)
     return false;
 }
 
-// What light `index` brings a surface at `at` facing `n`, unshadowed.
-vec3 velk_probe_light(uint index, vec3 at, vec3 n)
+// What light `index` brings a surface at `at` facing `n`, seen along `to_viewer`, unshadowed; a
+// stand-in's as velk_diffuse_response has it (`stand_in` its flatness, below 0 for none).
+vec3 velk_probe_light(uint index, vec3 at, vec3 n, float stand_in, vec3 to_viewer)
 {
     Light light = velk_light_at(pc.lights_base + index);
     vec3 l = -light.direction.xyz;
@@ -3829,7 +3850,7 @@ vec3 velk_probe_light(uint index, vec3 at, vec3 n)
         atten = t * t;
         if (light.flags.x == 2u) atten *= smoothstep(light.params.z, light.params.y, dot(-l, light.direction.xyz));
     }
-    return light.color_intensity.rgb * light.color_intensity.a * atten * max(dot(n, l), 0.0);
+    return light.color_intensity.rgb * light.color_intensity.a * atten * velk_diffuse_response(n, l, to_viewer, stand_in);
 }
 
 // Where a hit at `at` keeps its light: the word of its light, of its radiance and of the way the
@@ -3891,8 +3912,8 @@ void velk_probe_ask(uint word)
 // whose light is at `word`: its one value, its lights chosen at `center`, or its record's points:
 // down its triangle's pieces where the hit knows its triangle (RayHit::triangle,
 // velk_light_add_points), else at its triangle's corners; each light by how much of it gets
-// through.
-vec3 velk_probe_direct(RayHit hit, uint word, vec3 center, vec3 at, vec3 n)
+// through. `to_viewer` points back along the ray that hit it, for a stand-in (RayHit::stand_in).
+vec3 velk_probe_direct(RayHit hit, uint word, vec3 center, vec3 at, vec3 n, vec3 to_viewer)
 {
     uint pool = pc.shapes_base;
     if (word == VELK_LIGHT_NONE || pool == 0xFFFFFFFFu) return vec3(0.0);
@@ -3921,7 +3942,7 @@ vec3 velk_probe_direct(RayHit hit, uint word, vec3 center, vec3 at, vec3 n)
     vec3 total = vec3(0.0);
     for (uint k = 0u; k < VELK_LIGHT_SLOTS; ++k) {
         if (lights[k] == VELK_LIGHT_NONE) continue;
-        total += velk_probe_light(lights[k], at, n) * (sums[k].y / max(sums[k].x, 1e-6));
+        total += velk_probe_light(lights[k], at, n, hit.stand_in, to_viewer) * (sums[k].y / max(sums[k].x, 1e-6));
     }
     return total;
 }
@@ -4147,7 +4168,7 @@ void velk_probes_trace(uint lane)
             // As the lighting pass lights a pixel: albedo times each light's N.L and strength, and
             // its indirect light.
             vec3 indirect = lit ? velk_probe_hit_indirect(pc.more.x, at, hn, radiance, radiance_dir, width, height, across) : vec3(0.0);
-            light = albedo * (velk_probe_direct(hit, light_word, center, at, hn) + indirect) + emission;
+            light = albedo * (velk_probe_direct(hit, light_word, center, at, hn, -dir) + indirect) + emission;
         } else {
             light = velk_probe_sky(dir);
         }
@@ -4282,7 +4303,7 @@ void velk_reflect_trace(uint lane)
         if (lit && ask && pc.shapes_base != 0xFFFFFFFFu) velk_probe_ask(light_word);
         vec3 indirect = lit ? velk_probe_hit_indirect(pc.more.w, at, hn, radiance, radiance_dir, width, height, across) : vec3(0.0);
         // Its metal: what it mirrors of the environment, half blurred, its own roughness not known.
-        light = albedo * (velk_probe_direct(hit, light_word, center, at, hn) + indirect) + emission
+        light = albedo * (velk_probe_direct(hit, light_word, center, at, hn, -dir) + indirect) + emission
               + metal * velk_probe_env(reflect(dir, hn), 0.5);
         // Within what half floats hold.
         t = clamp(hit.t, 1e-4, 65000.0);
@@ -5602,6 +5623,7 @@ void main()
             uint triangles = min(counts != 0u ? counts >> 16u : light_words.data[cluster + VELK_LOD_CLUSTER_TRIANGLES], kMaxTriangles);
             uint table = index_base != VELK_LIGHT_NONE ? triangles : 0u;
             uint kind = table != 0u ? VELK_LIGHT_PIECED | triangles : VELK_LIGHT_OWN;
+            if (draw != 0xFFFFFFFFu && (velk_draw_data.data[draw].flags & VELK_DRAW_DOUBLE_SIDED) != 0u) kind |= VELK_LIGHT_TWO_SIDED;
             uint laid;
             if (velk_light_lay_out(vertices, cluster, kind, table, 2u * vertices, index_base, laid)) {
                 s_page = laid;

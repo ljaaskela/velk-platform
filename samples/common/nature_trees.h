@@ -29,7 +29,8 @@ public:
     VELK_INTERFACE(
         (PROP, velk::color, albedo, velk::color{}),
         (PROP, float, roughness, 0.8f),
-        (PROP, bool, wind, true)
+        (PROP, bool, wind, true),
+        (PROP, float, transmission, 0.f)
     )
 };
 
@@ -39,12 +40,13 @@ VELK_GPU_STRUCT TreeParams
 {
     velk::color albedo;
     float roughness;
+    float transmission;
 };
 
 inline constexpr velk::string_view kTreeEvalSrc = R"(
 struct TreeData {
     vec4 albedo;
-    vec4 roughness_pad;
+    vec4 roughness_transmission;
 };
 VELK_MATERIAL(TreeData)
 
@@ -54,7 +56,8 @@ MaterialEval velk_eval_tree(EvalContext ctx)
     MaterialEval e = velk_default_material_eval();
     e.color = d.albedo;
     e.normal = ctx.normal;
-    e.roughness = d.roughness_pad.x;
+    e.roughness = d.roughness_transmission.x;
+    e.transmission = d.roughness_transmission.y;
     e.lighting_mode = VELK_LIGHTING_STANDARD;
     return e;
 }
@@ -98,6 +101,7 @@ public:
         return set_material<TreeParams>(out, size, [&](auto& p) {
             p.albedo = state->albedo;
             p.roughness = state->roughness;
+            p.transmission = state->transmission;
         });
     }
 
@@ -105,6 +109,12 @@ public:
     {
         auto state = velk::read_state<ITreeMaterial>(this);
         return state ? state->albedo : velk::color::white();
+    }
+
+    float get_average_roughness() const override
+    {
+        auto state = velk::read_state<ITreeMaterial>(this);
+        return state ? state->roughness : 1.f;
     }
 
     velk::string_view get_source(velk::string_view role) const override
@@ -133,8 +143,12 @@ private:
     mutable velk::string vertex_src_;
 };
 
-/// A tree material of colour @p c, its wind on or off, drawn from both sides or not.
-velk::IMaterial::Ptr tree_material(const velk::color& c, float roughness, bool double_sided, bool wind);
+/// What of their diffuse light leaves pass through to their other side.
+inline constexpr float kLeafTransmission = 0.3f;
+
+/// A tree material of colour @p c, its wind on or off, drawn from both sides or not, passing
+/// @p transmission of its diffuse light to its other side (0 for wood, about a third for leaves).
+velk::IMaterial::Ptr tree_material(const velk::color& c, float roughness, bool double_sided, bool wind, float transmission);
 
 /// How a generated tree grows. Lengths are in world units.
 struct TreeShape

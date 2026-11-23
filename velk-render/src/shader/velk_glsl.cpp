@@ -268,6 +268,66 @@ vec4 velk_texture(uint id, vec2 uv)
 R"(
 struct VelkVertex3D { vec3 position; vec3 normal; vec2 uv; vec4 tangent; };
 #define VELK_VERTEX3D_WORDS 12u
+
+// A stand-in for small pieces (a quad build_mesh_lod made) has its vertices' normals authored
+// shorter than unit length, from 0.5 for pieces facing every way to 0.98 for pieces in one
+// plane (kLodStandInShortest and kLodStandInLongest): their flatness, 0 to 1. Below 0 for any
+// other surface: one whose normals are of unit length, or have none.
+float velk_stand_in_flatness(float normal_length)
+{
+    if (normal_length >= 0.99 || normal_length < 0.25) return -1.0;
+    return clamp((normal_length - 0.5) / 0.48, 0.0, 1.0);
+}
+
+// A pixel's stand-in flatness as the G-buffer's material keeps it (its fourth channel): 0 for a
+// surface as drawn, else from 1/255 for flatness 1 up to 1 for flatness 0.
+float velk_stand_in_pack(float flatness)
+{
+    return flatness < 0.0 ? 0.0 : (1.0 + 254.0 * (1.0 - clamp(flatness, 0.0, 1.0))) / 255.0;
+}
+
+float velk_stand_in_unpack(float packed)
+{
+    float steps = floor(packed * 255.0 + 0.5);
+    return steps < 0.5 ? -1.0 : 1.0 - (steps - 1.0) / 254.0;
+}
+
+// How much light from `L` a rough ball reflects toward `V`, both unit and away from it, over the
+// part of it seen: 2/3 lit from behind the viewer, none lit from straight behind it. A fit, within
+// 0.001, of (2 / (3 pi)) (sin a + (pi - a) cos a) for the angle a between them.
+float velk_ball_response(vec3 L, vec3 V)
+{
+    float x = clamp(dot(L, V), -1.0, 1.0);
+    float s = x * x;
+    return 0.21220659 + x / 3.0 + s * (0.10012674 + 0.021 * s);
+}
+
+// The diffuse light a surface facing `n` takes from `L`, seen along `V`: N.L, or for a stand-in
+// (`stand_in` its flatness, velk_stand_in_flatness) a rough ball's, toward its face's, turned to
+// the viewer, as it is flatter.
+float velk_diffuse_response(vec3 n, vec3 L, vec3 V, float stand_in)
+{
+    if (stand_in < 0.0) return max(dot(n, L), 0.0);
+    vec3 face = dot(n, V) < 0.0 ? -n : n;
+    return mix(velk_ball_response(L, V), max(dot(face, L), 0.0), stand_in);
+}
+
+// A view's quad's surface word (VELK_QUAD_NODE_SURFACE, MeshQuad::surface): what it stands for,
+// its flatness in bits 0-15 and its mean roughness squared in bits 16-23.
+float velk_surface_flatness(uint surface)
+{
+    return float(surface & 0xFFFFu) / 65535.0;
+}
+
+float velk_surface_roughness(uint surface)
+{
+    return sqrt(float((surface >> 16u) & 0xFFu) / 255.0);
+}
+
+uint velk_surface_pack(float flatness, float alpha)
+{
+    return uint(clamp(flatness, 0.0, 1.0) * 65535.0 + 0.5) | (uint(clamp(alpha, 0.0, 1.0) * 255.0 + 0.5) << 16u);
+}
 )"
 // Vertex-shader helper: fetch the current gl_VertexIndex from the mesh-word
 // arena at the draw's vertex base. velk_vertex3d is a macro, not a function,
@@ -397,6 +457,7 @@ struct VelkDrawData {
 // Rays read the draw's opacity in its material's record: the factor's word and the texture id's
 // word, a byte each at these shifts (kDrawFlagOpacity).
 #define VELK_DRAW_OPACITY 8u
+#define VELK_DRAW_DOUBLE_SIDED 16u
 #define VELK_DRAW_OPACITY_FACTOR_SHIFT 8u
 #define VELK_DRAW_OPACITY_TEXTURE_SHIFT 16u
 

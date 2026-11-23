@@ -5621,10 +5621,13 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
                     const uint32_t* f = r + kLightReadPixels + k * kLightReadWords + 70u;
                     float through = 0.f;
                     float n_dot_l = 0.f;
+                    float lit[3] = {};
                     std::memcpy(&through, f + 1, sizeof(through));
                     std::memcpy(&n_dot_l, f + 2, sizeof(n_dot_l));
-                    VELK_LOG(I, "light read %u,%u first light %d: through %.3f, N.L %.3f; ids %08x", packed & 0xFFFFu, packed >> 16u,
-                             f[0] == kLightNone ? -1 : static_cast<int>(f[0]), through, n_dot_l, f[3]);
+                    std::memcpy(lit, f + 4, sizeof(lit));
+                    VELK_LOG(I, "light read %u,%u first light %d: through %.3f, N.L %.3f; ids %08x; highlights %.3f %.3f %.3f",
+                             packed & 0xFFFFu, packed >> 16u, f[0] == kLightNone ? -1 : static_cast<int>(f[0]), through, n_dot_l, f[3],
+                             lit[0], lit[1], lit[2]);
                 }
                 // What it reads of its triangle's pieces (velk_light_explain): the first light's
                 // shade (0 lit to 15 blocked, - for none) and traces of each point, weights in 255ths.

@@ -548,6 +548,21 @@ void simplify_group(LodVertices& v, const vector<uint32_t>& merged, bool whole, 
         if (!normalize(normal)) {
             std::memcpy(normal, n, sizeof(normal));
         }
+        // How much of the pieces faces along it, either way: the mean of |cos| to it is 1 for
+        // pieces all in one plane and a half for pieces facing every way. Carried as the length
+        // of its vertices' normal, which marks it as standing for them (kLodStandInShortest).
+        if (has_normals && area > 0.f) {
+            float along_normal = 0.f;
+            for (size_t i = first; i < last; ++i) {
+                const float* s = info[order[i].second].shading;
+                along_normal += std::abs(s[0] * normal[0] + s[1] * normal[1] + s[2] * normal[2]);
+            }
+            const float flatness = std::min(std::max(2.f * along_normal / area - 1.f, 0.f), 1.f);
+            const float length = kLodStandInShortest + (kLodStandInLongest - kLodStandInShortest) * flatness;
+            for (float& x : normal) {
+                x *= length;
+            }
+        }
         const uint32_t source = info[order[first].second].first_vertex;
         const auto first_new = static_cast<uint32_t>(v.positions.size() / 3);
         const float signs[4][2] = {{-1.f, -1.f}, {1.f, -1.f}, {1.f, 1.f}, {-1.f, 1.f}};
@@ -1385,12 +1400,24 @@ MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, const flo
         normals.resize(vertex_count * 3);
         for (size_t v = 0; v < vertex_count; ++v) {
             std::memcpy(normals.data() + v * 3, vertices + v * stride + normal_offset, sizeof(float) * 3);
+            // Of unit length, as only a quad standing for small pieces has a shorter one
+            // (kLodStandInShortest); none stays none.
+            float* n = normals.data() + v * 3;
+            const float length = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+            if (length > 0.f) {
+                for (int k = 0; k < 3; ++k) n[k] /= length;
+            }
         }
     }
     // Quads take their attributes from the vertices they stand for.
     if (vertices) {
         lod_vertices.bytes.resize(vertex_count * stride);
         std::memcpy(lod_vertices.bytes.data(), vertices, vertex_count * stride);
+        if (has_normals) {
+            for (size_t v = 0; v < vertex_count; ++v) {
+                std::memcpy(lod_vertices.bytes.data() + v * stride + normal_offset, normals.data() + v * 3, sizeof(float) * 3);
+            }
+        }
     }
 
     // Index lists of all clusters so far, parallel to lod.clusters.

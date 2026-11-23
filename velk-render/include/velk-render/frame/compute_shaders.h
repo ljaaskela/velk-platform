@@ -53,9 +53,25 @@ struct RayHit {
     // not kept by velk_hit_words.
     uint record;
     uint triangle;
+    // A stand-in's flatness (velk_stand_in_flatness) where it is one, a view's quad or a quad of
+    // a level of detail standing for small pieces; below 0 for a surface as drawn. Only set by
+    // trace_closest_hit.
+    float stand_in;
+    // The normal of the plane of what was hit, as drawn (its triangle's, whatever its winding),
+    // in world space, for which side a ray meets. Only set by trace_closest_hit.
+    vec3 plane;
 };
 
 #define VELK_NO_CORNERS 0xFFFFFFFFu
+
+// The normal a hit is shaded with: its own, or on a surface seen from both sides
+// (VELK_DRAW_DOUBLE_SIDED) turned to the side of its plane that a ray along `dir` meets, as the
+// resolve turns a pixel's.
+vec3 velk_hit_shading_normal(RayHit hit, vec3 dir)
+{
+    if (hit.draw == 0xFFFFFFFFu || (velk_draw_data.data[hit.draw].flags & VELK_DRAW_DOUBLE_SIDED) == 0u) return hit.normal;
+    return dot(hit.normal, hit.plane) * dot(-dir, hit.plane) < 0.0 ? -hit.normal : hit.normal;
+}
 
 // What a hit was, as 7 words for a pass after the trace (velk_hit_context): its draw, its
 // instance, its cluster and its corners, then the corners' weights, or for an analytic shape
@@ -83,6 +99,8 @@ RayHit velk_hit_from_words(uvec4 a, uvec3 b)
     hit.weights = a.w == VELK_NO_CORNERS ? vec2(0.0) : unpackUnorm2x16(b.z);
     hit.record = VELK_NO_RECORD;
     hit.triangle = VELK_NO_CORNERS;
+    hit.stand_in = -1.0;
+    hit.plane = vec3(0.0);
     return hit;
 }
 
@@ -344,6 +362,9 @@ void main()
     vec3 rel = vec3(0.0);
     float lod_error = 0.0;
     float tri_size = 0.0;
+    // A stand-in's flatness (velk_stand_in_flatness): a quad of a view's quads, or a quad standing
+    // for small pieces; below 0 for a surface as drawn.
+    float stand_in = -1.0;
     // The draw and instance, which a neighbour must share to count.
     uvec2 surface = uvec2(0xFFFFFFFFu);
     if (drawn) {
@@ -396,6 +417,23 @@ void main()
         e = velk_eval_material(d.material_id, ctx);
         N = resolve_shading_normal(e, ctx);
         smooth_normal = ctx.normal;
+        // Seen from both sides: the side it shows is the one toward the camera, of its plane as
+        // drawn (whatever its winding), and its normal turns to that side.
+        if ((d.flags & VELK_DRAW_DOUBLE_SIDED) != 0u) {
+            vec3 plane = cross(e1, e2);
+            if (dot(N, plane) * dot(-rel, plane) < 0.0) {
+                N = -N;
+                smooth_normal = -smooth_normal;
+            }
+        }
+        // A quad of a view's quads by its node's surface, else by its normals' length, which only a
+        // level of detail's data (a cluster's) keeps for it.
+        if ((d.flags & VELK_DRAW_QUADS) != 0u) {
+            stand_in = velk_surface_flatness(inst.params.y);
+            e.roughness = velk_surface_roughness(inst.params.y);
+        } else if (cluster != VELK_NO_CLUSTER) {
+            stand_in = velk_stand_in_flatness(dot(b, vec3(v0.normal_length, v1.normal_length, v2.normal_length)));
+        }
 
         mat3 world_axes = mat3(inst.world_matrix);
         lod_error = velk_cluster_error(cluster, max(max(length(world_axes[0]), length(world_axes[1])), length(world_axes[2])));
@@ -434,8 +472,8 @@ void main()
     imageStore(gStorageImagesF16[nonuniformEXT(RESOLVE_NORMAL)], coord, vec4(N, lod_error));
     imageStore(gStorageImagesF32[nonuniformEXT(RESOLVE_POSITION)], coord, vec4(rel, tri_size));
     imageStore(gStorageImages[nonuniformEXT(RESOLVE_MATERIAL)], coord,
-               vec4(e.metallic, roughness, float(e.lighting_mode) / 255.0, 0.0));
-    imageStore(gStorageImagesF16[nonuniformEXT(RESOLVE_EMISSIVE)], coord, vec4(e.emissive, 0.0));
+               vec4(e.metallic, roughness, float(e.lighting_mode) / 255.0, velk_stand_in_pack(stand_in)));
+    imageStore(gStorageImagesF16[nonuniformEXT(RESOLVE_EMISSIVE)], coord, vec4(e.emissive, clamp(e.transmission, 0.0, 1.0)));
 }
 )";
 
@@ -1185,9 +1223,13 @@ vec3 fresnel_schlick_roughness(float cos_theta, vec3 F0, float roughness)
 #define VELK_SURFACE_LIGHTS_GLSL R"(
 // At `world_pos` (from the camera) facing `N`, seen along `V`: through what the points of light
 // keep when `points` (the lights `point_lights` and what of each gets through), else every light
-// unshadowed. Area lights in closed form.
+// unshadowed. Area lights in closed form. A stand-in for what it is too small to draw
+// (`stand_in` its flatness, velk_stand_in_flatness; below 0 for a surface as drawn) takes diffuse
+// light as a rough ball would, toward its face's as it is flatter, that face turned to the viewer.
+// A thin sheet passing `transmission` of its diffuse light takes that share from behind it, the
+// rest from in front.
 void velk_surface_lights(bool points, uint point_lights[VELK_LIGHT_SLOTS], float point_through[VELK_LIGHT_SLOTS],
-                         vec3 world_pos, vec3 N, vec3 V, vec3 F0, float roughness,
+                         vec3 world_pos, vec3 N, vec3 V, vec3 F0, float roughness, float stand_in, float transmission,
                          out vec3 direct, out vec3 highlights, out vec3 area_irr, out vec3 area_spec)
 {
     direct = vec3(0.0);
@@ -1197,6 +1239,8 @@ void velk_surface_lights(bool points, uint point_lights[VELK_LIGHT_SLOTS], float
     float NdotV = max(dot(N, V), 0.0);
     float a = roughness * roughness;
     uint light_count = points ? VELK_LIGHT_SLOTS : pc.light_count;
+    // A stand-in's face, turned to the viewer.
+    vec3 face = dot(N, V) < 0.0 ? -N : N;
     for (uint k = 0u; k < light_count; ++k) {
         if (points && point_lights[k] == VELK_LIGHT_NONE) continue;
         uint i = points ? point_lights[k] : k;
@@ -1206,11 +1250,11 @@ void velk_surface_lights(bool points, uint point_lights[VELK_LIGHT_SLOTS], float
         if (light.flags.x == 3u) {
             vec2 es = velk_area_irradiance(light, world_pos, N, V, roughness);
             vec3 radiance = light.color_intensity.rgb * light.color_intensity.a * through;
-            if (es.x > 0.0) {
-                // pi converts clamped-cosine units to the same scale as a
-                // delta light's N.L, so authored intensities stay comparable.
-                area_irr += radiance * es.x * 3.14159265;
-            }
+            // pi converts clamped-cosine units to the same scale as a delta light's N.L, so
+            // authored intensities stay comparable.
+            float irradiance = max(es.x, 0.0) * (1.0 - transmission);
+            if (transmission > 0.0) irradiance += max(velk_area_irradiance(light, world_pos, -N, V, roughness).x, 0.0) * transmission;
+            if (irradiance > 0.0) area_irr += radiance * irradiance * 3.14159265;
             if (es.y > 0.0 && pc.ltc_magnitude_id != 0u) {
                 // Split-sum: the fitted pair is (lobe energy, Fresnel
                 // weight), applied the same way the env specular applies
@@ -1240,8 +1284,12 @@ void velk_surface_lights(bool points, uint point_lights[VELK_LIGHT_SLOTS], float
             }
         }
         float NdotL = max(dot(N, L), 0.0);
-        if (NdotL <= 0.0 || atten <= 0.0) continue;
+        float diffuse = stand_in >= 0.0 ? mix(velk_ball_response(L, V), max(dot(face, L), 0.0), stand_in)
+                                        : mix(NdotL, max(-dot(N, L), 0.0), transmission);
+        if (diffuse <= 0.0 || atten <= 0.0) continue;
         vec3 radiance = light.color_intensity.rgb * light.color_intensity.a * atten;
+        direct += diffuse * radiance * through;
+        if (NdotL <= 0.0) continue;
 
         vec3 H = normalize(L + V);
         float NdotH = max(dot(N, H), 0.0);
@@ -1249,7 +1297,6 @@ void velk_surface_lights(bool points, uint point_lights[VELK_LIGHT_SLOTS], float
         float D = ggx_d(NdotH, a);
         float G = smith_g(NdotV, NdotL, roughness);
         vec3 F = fresnel_schlick(VdotH, F0);
-        direct += NdotL * radiance * through;
         highlights += (D * G) * F / max(4.0 * NdotV * NdotL, 1e-6) * NdotL * radiance * through;
     }
 }
@@ -1602,7 +1649,7 @@ void main()
         vec3 highlights;
         vec3 area_irr;
         vec3 area_spec;
-        velk_surface_lights(points, point_lights, point_through, v_rel_pos, N, V, F0, roughness, direct, highlights,
+        velk_surface_lights(points, point_lights, point_through, v_rel_pos, N, V, F0, roughness, -1.0, 0.0, direct, highlights,
                             area_irr, area_spec);
 
         float env_max_lod = float(textureQueryLevels(velk_textures[nonuniformEXT(pc.env_texture_id)])) - 1.0;
@@ -1701,12 +1748,19 @@ void main()
     }
 
     // Added to the lit colour, before tonemapping, so that bloom can pick up bright emitters.
-    vec3 emissive = velk_texture(pc.emissive_tex_id, uv).rgb;
+    vec4 emissive_and_transmission = velk_texture(pc.emissive_tex_id, uv);
+    vec3 emissive = emissive_and_transmission.rgb;
+    // Of its diffuse light, the share a thin sheet passes to its other side (MaterialEval::transmission).
+    float transmission = emissive_and_transmission.a;
 
     // LightingMode encoded in mat.b (0 = Unlit, 1 = Standard, ...).
     uint lighting_mode = uint(mat.b * 255.0 + 0.5);
     float metallic = clamp(mat.r, 0.0, 1.0);
     float roughness = clamp(mat.g, 0.04, 1.0);
+    // A stand-in for what is too small to draw (velk_stand_in_flatness) reflects as roughly as
+    // what it stands for faces every way: not as a smooth face seen edge on.
+    float stand_in = velk_stand_in_unpack(mat.a);
+    if (stand_in >= 0.0) roughness = mix(1.0, roughness, stand_in);
 
     vec3 color = albedo.rgb;
     if (lighting_mode != 0u) {
@@ -1733,8 +1787,8 @@ void main()
         vec3 highlights;
         vec3 area_irr;
         vec3 area_spec;
-        velk_surface_lights(points, point_lights, point_through, world_pos, N, V, F0, roughness, direct, highlights,
-                            area_irr, area_spec);
+        velk_surface_lights(points, point_lights, point_through, world_pos, N, V, F0, roughness, stand_in, transmission, direct,
+                            highlights, area_irr, area_spec);
 
         // Env lighting: single-sample approximation. Diffuse reads along N with a deep LOD
         // so it reads roughly the irradiance average; specular reads the mirror reflection
@@ -1778,6 +1832,17 @@ void main()
             }
         }
 
+        // A thin sheet passing light through: that share of its diffuse light from its other side.
+        if (transmission > 0.0) {
+            vec3 back;
+            vec3 back_specular;
+            float back_match;
+            if (!velk_probe_indirect(coord, world_pos, -N, reflect(-V, -N), back, back_specular, back_match)) {
+                back = env_miss_color_lod(-N, env_max_lod);
+            }
+            indirect = mix(indirect, back, transmission);
+        }
+
         color = albedo.rgb * (1.0 - metallic) * (direct + indirect + area_irr) + highlights + F_env * env_specular
               + area_spec;
 
@@ -1809,6 +1874,7 @@ void main()
                 velk_light_cell_words.data[at + VELK_LIGHT_READ_FIRST_LIGHT + 1u] = floatBitsToUint(points ? point_through[0] : -1.0);
                 velk_light_cell_words.data[at + VELK_LIGHT_READ_FIRST_LIGHT + 2u] = floatBitsToUint(n_dot_l);
                 velk_light_cell_words.data[at + VELK_LIGHT_READ_FIRST_LIGHT + 3u] = velk_pixel_ids(pc.spare4, pc.spare2, coord).x;
+                for (uint c = 0u; c < 3u; ++c) velk_light_cell_words.data[at + VELK_LIGHT_READ_HIGHLIGHTS + c] = floatBitsToUint(highlights[c]);
             }
         }
     }
@@ -2074,8 +2140,10 @@ void velk_light_sample(Light light, vec3 pos, out vec3 L, out float atten)
 }
 
 // What the last shaded surface passes on of the light arriving from around it. Zero for
-// materials that do not go through velk_pbr_shade.
+// materials that do not go through velk_pbr_shade. And of that, the share it passes through
+// from its other side (MaterialEval::transmission).
 vec3 velk_hit_diffuse = vec3(0.0);
+float velk_hit_transmission = 0.0;
 
 BrdfSample velk_pbr_shade(MaterialEval eval, EvalContext ctx)
 {
@@ -2085,6 +2153,7 @@ BrdfSample velk_pbr_shade(MaterialEval eval, EvalContext ctx)
     float roughness = clamp(eval.roughness, 0.04, 1.0);
     vec3 base = eval.color.rgb;
     float ao = clamp(eval.occlusion, 0.0, 1.0);
+    float transmission = clamp(eval.transmission, 0.0, 1.0);
 
     // KHR_materials_specular: dielectric F0 tinted by specular_color_factor
     // and weighted by specular_factor. Metals continue to use base as F0.
@@ -2111,20 +2180,24 @@ BrdfSample velk_pbr_shade(MaterialEval eval, EvalContext ctx)
         vec3 L;
         float atten;
         velk_light_sample(light, ctx.rel_pos, L, atten);
-        float NdotL = max(dot(N, L), 0.0);
-        if (NdotL <= 0.0 || atten <= 0.0) continue;
-        float shadow = velk_eval_shadow(light.flags.y, li, ctx.rel_pos, N);
+        // A thin sheet passing `transmission` of its diffuse light takes that share from
+        // behind it, its shadow ray leaving the side the light is on.
+        float facing = dot(N, L);
+        float lobe = facing > 0.0 ? (1.0 - transmission) * facing : transmission * -facing;
+        if (lobe <= 0.0 || atten <= 0.0) continue;
+        float shadow = velk_eval_shadow(light.flags.y, li, ctx.rel_pos, facing > 0.0 ? N : -N);
         vec3 radiance = light.color_intensity.rgb * light.color_intensity.a * atten * shadow;
-        direct += base * (1.0 - metallic) * NdotL * radiance * li_weight;
+        direct += base * (1.0 - metallic) * lobe * radiance * li_weight;
     }
 
     // Diffuse term: crude "irradiance at the normal" via a single env
     // sample, modulated by AO. Upgrade to preconvolved irradiance or
     // stochastic cosine sampling when visibly needed.
-    vec3 env_at_normal = env_miss_color(N);
+    vec3 env_at_normal = transmission > 0.0 ? mix(env_miss_color(N), env_miss_color(-N), transmission) : env_miss_color(N);
     vec3 diffuse = base * (1.0 - metallic) * env_at_normal * ao;
     vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
     velk_hit_diffuse = kD * base * (1.0 - metallic) * ao;
+    velk_hit_transmission = transmission;
 
     // Specular: sample a GGX half-vector, reflect V around it. Main's
     // iterative loop evaluates the reflected ray and multiplies by F.
@@ -2165,7 +2238,7 @@ vec3 trace_bounce(Ray ray, vec3 throughput)
             return acc;
         }
         uint material;
-        EvalContext ctx = velk_hit_context(hit, ray.dir, ray.origin + hit.t * ray.dir, hit.normal, material);
+        EvalContext ctx = velk_hit_context(hit, ray.dir, ray.origin + hit.t * ray.dir, velk_hit_shading_normal(hit, ray.dir), material);
         BrdfSample bs = velk_resolve_fill(material, ctx);
 
         float a = clamp(bs.emission.a, 0.0, 1.0);
@@ -2201,7 +2274,7 @@ vec3 trace_primary(Ray ray)
             return accum + throughput * env_miss_color(ray.dir);
         }
         uint material;
-        EvalContext ctx = velk_hit_context(hit, ray.dir, ray.origin + hit.t * ray.dir, hit.normal, material);
+        EvalContext ctx = velk_hit_context(hit, ray.dir, ray.origin + hit.t * ray.dir, velk_hit_shading_normal(hit, ray.dir), material);
         BrdfSample bs = velk_resolve_fill(material, ctx);
 
         vec3 rgb = bs.emission.rgb;
@@ -2349,10 +2422,12 @@ vec3 reference_path(Ray ray, out vec3 first)
             break;
         }
         uint material;
-        EvalContext ctx = velk_hit_context(hit, ray.dir, ray.origin + hit.t * ray.dir, hit.normal, material);
+        vec3 shading = velk_hit_shading_normal(hit, ray.dir);
+        EvalContext ctx = velk_hit_context(hit, ray.dir, ray.origin + hit.t * ray.dir, shading, material);
 
-        reference_pick_light(ctx.rel_pos, hit.normal);
+        reference_pick_light(ctx.rel_pos, shading);
         velk_hit_diffuse = vec3(0.0);
+        velk_hit_transmission = 0.0;
         BrdfSample bs = velk_resolve_fill(material, ctx);
 
         // Partly transparent: either the ray goes straight through, or the surface counts in full.
@@ -2375,6 +2450,8 @@ vec3 reference_path(Ray ray, out vec3 first)
             if (dot(ray.dir, n) <= 0.0) break;
         } else {
             carried *= velk_hit_diffuse / (1.0 - specular_share);
+            // Through a thin sheet as often as it passes light through: to its other side.
+            if (rng_next_float() < velk_hit_transmission) n = -n;
             ray.dir = reference_cosine(n);
         }
         ray.origin = ctx.rel_pos + n * 0.01;
@@ -2618,6 +2695,7 @@ struct VelkSurfaceVertex {
     vec4 tangent;
     vec4 color;
     uint shape_param;
+    float normal_length;  // of its normal as authored, before the vertex function (velk_stand_in_flatness)
 };
 
 VelkSurfaceVertex velk_surface_vertex(VelkDrawData d, uint cluster, ElementInstance inst, GlobalData g, uint index)
@@ -2625,6 +2703,7 @@ VelkSurfaceVertex velk_surface_vertex(VelkDrawData d, uint cluster, ElementInsta
     VelkVertex3D v = velk_unpack_vertex3d(velk_cluster_vertex_word(d, cluster) + index * VELK_VERTEX3D_WORDS);
     VelkVaryings s = velk_material_varyings(d.material_id, v, inst, g);
     VelkSurfaceVertex r;
+    r.normal_length = length(v.normal);
     r.rel = s.rel_pos;
     r.normal = s.world_normal;
     r.uv = s.local_uv;
@@ -2696,6 +2775,9 @@ EvalContext velk_hit_context(RayHit hit, vec3 ray_dir, vec3 rel, vec3 normal, ou
             VelkSurfaceVertex v1 = velk_surface_vertex(d, hit.cluster, inst, g, hit.corners.y);
             VelkSurfaceVertex v2 = velk_surface_vertex(d, hit.cluster, inst, g, hit.corners.z);
             ctx = velk_surface_context(d, g, v0, v1, v2, vec3(1.0 - hit.weights.x - hit.weights.y, hit.weights), rel);
+            // Its corners' normal, on the side `normal` says it is seen from
+            // (velk_hit_shading_normal).
+            if (dot(ctx.normal, normal) < 0.0) ctx.normal = -ctx.normal;
         }
     }
     ctx.ray_dir = ray_dir;

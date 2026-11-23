@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <velk-render/api/material/material.h>
 #include <velk-render/interface/intf_batch.h>
 #include <velk-render/frustum.h>
 #include <velk-render/interface/intf_buffer.h>
@@ -233,6 +234,10 @@ inline bool write_draw_data(const IBatch& batch, IGpuResourceManager& resources,
     // shader adds to reach velk_materials.data[material_base]. Materials
     // with no draw data (record size 0) get base 0.
     auto material_ptr = batch.material();
+    if (auto two_sided = interface_pointer_cast<IMaterial>(material_ptr)) {
+        Material options(two_sided);
+        if (options.has_options() && options.options().get_double_sided()) header.flags |= kDrawFlagDoubleSided;
+    }
     if (snippets && resolve_ctx && material_ptr) {
         const auto ref = snippets->resolve_material(material_ptr.get(), *resolve_ctx);
         header.material_id = ref.mat_id;

@@ -424,6 +424,19 @@ float StandardMaterial::get_average_metallic() const
     return metallic < 0.f ? 0.f : metallic > 1.f ? 1.f : metallic;
 }
 
+float StandardMaterial::get_average_roughness() const
+{
+    // Last wins, as in write_draw_data. Fully rough as glTF's default.
+    float roughness = 1.f;
+    for (const auto& prop : properties_) {
+        if (!prop || property_class_id(prop) != ClassId::MetallicRoughnessProperty) continue;
+        roughness = 1.f;
+        if (auto r = read_state<IMetallicRoughnessProperty>(prop)) roughness = r->roughness_factor;
+        if (ISurface* tex = property_texture(prop)) roughness *= tex->get_average_color().g;
+    }
+    return roughness < 0.f ? 0.f : roughness > 1.f ? 1.f : roughness;
+}
+
 color StandardMaterial::get_average_emission() const
 {
     color emission = color::black();

@@ -75,10 +75,11 @@ namespace velk {
     X(cp, gp, U, U, 3)                          /* its two half axes, three floats each; its normal is their cross product */ \
     X(cp, gp, V, V, 6)                                                                         \
     X(cp, gp, Color, COLOR, 9)                  /* RGBA8, red in the low byte */               \
-    X(cp, gp, Radius, RADIUS, 10)               /* of a sphere at its centre around it and every quad under it, negative for an empty node */ \
-    X(cp, gp, Light, LIGHT, 11)                 /* the light of the members under it, one value or kLightNone */ \
-    X(cp, gp, Radiance, RADIANCE, 12)           /* the indirect light they get, RGB9E5 or kLightNone: see light_pool.h */ \
-    X(cp, gp, Words, WORDS, 13)
+    X(cp, gp, Surface, SURFACE, 10)             /* what it stands for (velk_surface_flatness): its flatness in bits 0-15, its mean roughness squared in 16-23 */ \
+    X(cp, gp, Radius, RADIUS, 11)               /* of a sphere at its centre around it and every quad under it, negative for an empty node */ \
+    X(cp, gp, Light, LIGHT, 12)                 /* the light of the members under it, one value or kLightNone */ \
+    X(cp, gp, Radiance, RADIANCE, 13)           /* the indirect light they get, RGB9E5 or kLightNone: see light_pool.h */ \
+    X(cp, gp, Words, WORDS, 14)
 
 /// A view's quad list (kQuadList, VELK_QUAD_LIST), in the culling arena: the quad draw's
 /// indirect arguments and count, then the word of each quad drawn, and after the list's capacity

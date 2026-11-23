@@ -100,7 +100,8 @@ VELK_INSTANCES(ElementInstance)
 
 // The instance of the unit quad that the quad at word `quad` of the culling arena is
 // (VELK_QUAD_NODE): its 0 to 1 corners across the quad's two half axes, centred on its
-// centre, facing along their cross product, in its colour, of no object.
+// centre, facing along their cross product, in its colour, of no object, its surface word
+// (VELK_QUAD_NODE_SURFACE) in params.y.
 ElementInstance velk_quad_instance(uint quad)
 {
     vec3 c = vec3(uintBitsToFloat(velk_culling.data[quad + VELK_QUAD_NODE_CENTER]),
@@ -119,7 +120,7 @@ ElementInstance velk_quad_instance(uint quad)
     inst.offset = vec4(0.0);
     inst.size = vec4(1.0, 1.0, 1.0, 0.0);
     inst.color = unpackUnorm4x8(velk_culling.data[quad + VELK_QUAD_NODE_COLOR]);
-    inst.params = uvec4(0u, 0u, 0u, 0xFFFFFFFFu);
+    inst.params = uvec4(0u, velk_culling.data[quad + VELK_QUAD_NODE_SURFACE], 0u, 0xFFFFFFFFu);
     return inst;
 }
 
@@ -210,6 +211,7 @@ struct MaterialEval {
     vec3 specular_color_factor;   // KHR_materials_specular: dielectric F0 tint
     float specular_factor;        // KHR_materials_specular: Fresnel weight
     uint lighting_mode;           // VELK_LIGHTING_*
+    float transmission;           // 0..1: of its diffuse light, the share a thin sheet (a leaf) passes to its other side
 };
 
 // Returns a MaterialEval prefilled with spec-correct defaults. Materials
@@ -226,6 +228,7 @@ MaterialEval velk_default_material_eval() {
     e.specular_color_factor = vec3(1.0);
     e.specular_factor = 1.0;
     e.lighting_mode = VELK_LIGHTING_UNLIT;
+    e.transmission = 0.0;
     return e;
 }
 )";

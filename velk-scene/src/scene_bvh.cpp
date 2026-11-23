@@ -412,6 +412,7 @@ MeshQuad SceneBvh::member_quad(const InstanceGroup& group, uint32_t slot) const
         std::memcpy(leaf.u, wu, sizeof(wu));
         std::memcpy(leaf.v, wv, sizeof(wv));
         leaf.color = local.color;
+        leaf.surface = local.surface;
     }
     return leaf;
 }

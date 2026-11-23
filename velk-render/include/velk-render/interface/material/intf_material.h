@@ -51,6 +51,10 @@ public:
     /// a mirror does, so light bouncing off it diffusely takes 1 less this of it.
     virtual float get_average_metallic() const = 0;
 
+    /// Roughly how rough its surface is, 0 to 1 (perceptual, as glTF's roughness): for when it
+    /// covers less than a pixel and something stands in for it.
+    virtual float get_average_roughness() const = 0;
+
     /// Roughly what light its surface gives off, in linear colour, for the same uses.
     virtual color get_average_emission() const = 0;
 

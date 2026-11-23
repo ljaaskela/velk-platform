@@ -1203,7 +1203,9 @@ int main(int argc, char* argv[])
     uint32_t forest_extra_slot = 0xFFFFFFFFu;
     if (nature && element_count > 0) {
         velk::instance().type_registry().register_type<TreeMaterial>();
-        const auto foliage = [&](const velk::color& c) { return velk_samples::tree_material(c, 0.75f, true, !no_wind); };
+        const auto foliage = [&](const velk::color& c) {
+            return velk_samples::tree_material(c, 0.75f, true, !no_wind, velk_samples::kLeafTransmission);
+        };
         const velk_samples::NatureTrees trees = velk_samples::build_nature_trees(*render_context, !no_wind, leaf_density);
         const velk::IMesh::Ptr oak_mesh = trees.oak;
         const velk::IMesh::Ptr birch_mesh = trees.birch;

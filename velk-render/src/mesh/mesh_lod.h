@@ -174,6 +174,13 @@ inline constexpr uint32_t kLodNoGroup = 0xFFFFFFFFu;
 /// For build_mesh_lod: a vertex has no such attribute.
 inline constexpr uint32_t kLodNoAttribute = 0xFFFFFFFFu;
 
+/// A quad standing for small pieces (build_mesh_lod) has vertex normals this long for pieces
+/// facing every way, up to kLodStandInLongest for pieces all in one plane: how flat they are,
+/// which lights it (velk_stand_in_flatness in velk_glsl.cpp mirrors these). Other vertex normals
+/// are of unit length.
+inline constexpr float kLodStandInShortest = 0.5f;
+inline constexpr float kLodStandInLongest = 0.98f;
+
 /// The words of @p cluster's patch data, when it has patches.
 inline uint32_t lod_patch_words(const MeshLodCluster& cluster)
 {

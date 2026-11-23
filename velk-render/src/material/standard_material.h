@@ -47,6 +47,7 @@ public:
     color get_average_albedo() const override;
     /// Its metallic factor times its metallic-roughness texture's mean blue.
     float get_average_metallic() const override;
+    float get_average_roughness() const override;
     /// Its emissive factor and strength times its emissive texture's mean.
     color get_average_emission() const override;
     bool is_lit() const override { return true; }

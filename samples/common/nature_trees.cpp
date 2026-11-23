@@ -9,12 +9,13 @@
 
 namespace velk_samples {
 
-velk::IMaterial::Ptr tree_material(const velk::color& c, float roughness, bool double_sided, bool wind)
+velk::IMaterial::Ptr tree_material(const velk::color& c, float roughness, bool double_sided, bool wind, float transmission)
 {
     auto material = velk::instance().create<ITreeMaterial>(TreeMaterial::static_class_id());
     material->albedo().set_value(c);
     material->roughness().set_value(roughness);
     material->wind().set_value(wind);
+    material->transmission().set_value(transmission);
     velk::Material options(interface_pointer_cast<velk::IObject>(material));
     options.options().set_double_sided(double_sided);
     return interface_pointer_cast<velk::IMaterial>(material);
@@ -198,8 +199,8 @@ velk::IMeshPrimitive::Ptr TreeGrower::make_primitive(velk::IRenderContext& ctx, 
 
 NatureTrees build_nature_trees(velk::IRenderContext& ctx, bool wind, float leaf_density)
 {
-    const auto foliage = [&](const velk::color& c) { return tree_material(c, 0.75f, true, wind); };
-    const auto bark = [&](const velk::color& c) { return tree_material(c, 0.9f, false, wind); };
+    const auto foliage = [&](const velk::color& c) { return tree_material(c, 0.75f, true, wind, kLeafTransmission); };
+    const auto bark = [&](const velk::color& c) { return tree_material(c, 0.9f, false, wind, 0.f); };
     //                   seed trunk radius lvl kids first spread ratio radius rise  taper  leaves leaf sizes
     TreeShape oak_shape{ 11u, 22.f, 2.4f,  3,  5,   0.5f, 0.85f, 0.62f, 0.62f, 0.35f, false, 26,  3.0f, 2.2f};
     TreeShape birch_shape{23u, 34.f, 1.3f, 3,  4,   0.4f, 0.55f, 0.58f, 0.60f, -0.15f, false, 22, 2.2f, 1.6f};

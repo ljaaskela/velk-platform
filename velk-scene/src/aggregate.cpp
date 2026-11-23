@@ -3,6 +3,7 @@
 #include <velk/api/state.h>
 #include <velk/api/velk.h>
 
+#include <velk-render/blas.h>
 #include <velk-render/interface/material/intf_material.h>
 
 #include <algorithm>
@@ -58,7 +59,29 @@ MeshQuad bounds_quad(const float lo[3], const float hi[3], uint32_t color)
     out.u[a] = 0.5f * (hi[a] - lo[a]);
     out.v[b] = 0.5f * (hi[b] - lo[b]);
     out.color = color;
+    // From its box alone: flat when its thinnest side is at most a tenth of the next, a volume
+    // from half on.
+    const float thin_size = hi[thin] - lo[thin];
+    const float next_size = std::min(hi[a] - lo[a], hi[b] - lo[b]);
+    const float ratio = next_size > 0.f ? thin_size / next_size : 1.f;
+    out.surface = pack_quad_surface(1.f - (ratio - 0.1f) / 0.4f, 1.f);
     return out;
+}
+
+uint32_t pack_quad_surface(float flatness, float roughness)
+{
+    const auto unit = [](float v, float steps) { return static_cast<uint32_t>(std::min(std::max(v, 0.f), 1.f) * steps + 0.5f); };
+    return unit(flatness, 65535.f) | (unit(roughness * roughness, 255.f) << 16);
+}
+
+float quad_flatness(uint32_t surface)
+{
+    return static_cast<float>(surface & 0xFFFFu) / 65535.f;
+}
+
+float quad_alpha(uint32_t surface)
+{
+    return static_cast<float>((surface >> 16) & 0xFFu) / 255.f;
 }
 
 namespace {
@@ -70,6 +93,7 @@ struct TreeQuad
     float u[3] = {0.f, 0.f, 0.f};
     float v[3] = {0.f, 0.f, 0.f};
     uint32_t color = 0;
+    uint32_t surface = 0;
     float radius = -1.f;
 };
 
@@ -123,6 +147,13 @@ TreeQuad merge_tree_quads(const TreeQuad& a, const TreeQuad& b)
         n[1] = 1.f;
         n[2] = 0.f;
     }
+    // Each one's flatness by its area and by how far its normal is along the merged one; its
+    // roughness squared by area.
+    const float flatness = quarter > 0.f
+        ? (quad_flatness(a.surface) * std::abs(dot3(na, n)) + quad_flatness(b.surface) * std::abs(dot3(nb, n))) / quarter
+        : 0.5f * (quad_flatness(a.surface) + quad_flatness(b.surface));
+    const float alpha = quad_alpha(b.surface) + (quad_alpha(a.surface) - quad_alpha(b.surface)) * wa;
+    q.surface = pack_quad_surface(flatness, std::sqrt(alpha));
     const float d = dot3(big.u, n);
     float along[3] = {big.u[0] - d * n[0], big.u[1] - d * n[1], big.u[2] - d * n[2]};
     if (dot3(along, along) <= 1e-12f * dot3(big.u, big.u)) {
@@ -176,6 +207,7 @@ vector<MeshQuad> merge_pairs(const vector<MeshQuad>& quads)
         std::memcpy(q.u, m.u, sizeof(q.u));
         std::memcpy(q.v, m.v, sizeof(q.v));
         q.color = m.color;
+        q.surface = m.surface;
         q.radius = m.color == 0u ? -1.f : 0.f;
         return q;
     };
@@ -190,6 +222,7 @@ vector<MeshQuad> merge_pairs(const vector<MeshQuad>& quads)
         std::memcpy(up[i].u, q.u, sizeof(q.u));
         std::memcpy(up[i].v, q.v, sizeof(q.v));
         up[i].color = q.color;
+        up[i].surface = q.surface;
     }
     return up;
 }
@@ -206,6 +239,36 @@ bool mesh_quad(const IMesh& mesh, MeshQuad& out)
         return false;
     }
     out = bounds_quad(min, max, mesh_color(mesh));
+    // How much of its surface faces along the quad's normal, either way: the mean of |cos| to it
+    // is 1 for a slab and a half for surface facing every way evenly.
+    float normal[3];
+    cross3(out.u, out.v, normal);
+    const float normal_length = length3(normal);
+    // And its materials' roughness, squared and by the surface each covers.
+    float area = 0.f;
+    float along = 0.f;
+    float rough_area = 0.f;
+    float alpha = 0.f;
+    for (const auto& primitive : mesh.get_primitives()) {
+        float roughness = 1.f;
+        if (auto state = read_state<IMeshPrimitive>(primitive.get()); state && state->material) {
+            if (auto material = state->material.template get<IMaterial>()) {
+                roughness = material->get_average_roughness();
+            }
+        }
+        const float primitive_area = primitive->get_surface_area();
+        rough_area += primitive_area;
+        alpha += roughness * roughness * primitive_area;
+        const float* by_direction = primitive->get_direction_area();
+        if (!by_direction || normal_length <= 0.f) continue;
+        for (int d = 0; d < kSurfaceDirectionCount; ++d) {
+            area += by_direction[d];
+            along += by_direction[d] * std::abs(dot3(kSurfaceDirections[d], normal)) / normal_length;
+        }
+    }
+    const float flatness = area > 0.f ? 2.f * along / area - 1.f : quad_flatness(out.surface);
+    const float roughness = rough_area > 0.f ? std::sqrt(alpha / rough_area) : 1.f;
+    out.surface = pack_quad_surface(flatness, roughness);
     return true;
 }
 
@@ -234,13 +297,14 @@ layout(push_constant) uniform PC {
 const uint kNone = 0xFFFFFFFFu;
 const uint kNodeWords = VELK_QUAD_NODE_WORDS;
 const uint kJobWords = 8u;
-const uint kMeshQuadWords = 10u;
+const uint kMeshQuadWords = 11u;
 
 struct Quad {
     vec3 c;
     vec3 u;
     vec3 v;
     vec4 color;
+    uint surface;  // velk_surface_flatness
     float radius;  // negative for none
 };
 
@@ -264,6 +328,7 @@ Quad load_node(uint w)
     q.u = load3(w + VELK_QUAD_NODE_U);
     q.v = load3(w + VELK_QUAD_NODE_V);
     q.color = unpackUnorm4x8(build_words.data[w + VELK_QUAD_NODE_COLOR]);
+    q.surface = build_words.data[w + VELK_QUAD_NODE_SURFACE];
     q.radius = uintBitsToFloat(build_words.data[w + VELK_QUAD_NODE_RADIUS]);
     return q;
 }
@@ -274,6 +339,7 @@ void store_node(uint w, Quad q)
     store3(w + VELK_QUAD_NODE_U, q.u);
     store3(w + VELK_QUAD_NODE_V, q.v);
     build_words.data[w + VELK_QUAD_NODE_COLOR] = packUnorm4x8(q.color);
+    build_words.data[w + VELK_QUAD_NODE_SURFACE] = q.surface;
     build_words.data[w + VELK_QUAD_NODE_RADIUS] = floatBitsToUint(q.radius);
     // Its light, none until a pixel under it is lit (light_claim_src).
     build_words.data[w + VELK_QUAD_NODE_LIGHT] = kNone;
@@ -287,6 +353,7 @@ Quad no_quad()
     q.u = vec3(0.0);
     q.v = vec3(0.0);
     q.color = vec4(0.0);
+    q.surface = 0u;
     q.radius = -1.0;
     return q;
 }
@@ -300,6 +367,7 @@ Quad leaf(mat4 world, uint mesh_word)
     q.v = mat3(world) * load3(mesh_word + VELK_QUAD_NODE_V);
     uint color = build_words.data[mesh_word + VELK_QUAD_NODE_COLOR];
     q.color = unpackUnorm4x8(color);
+    q.surface = build_words.data[mesh_word + VELK_QUAD_NODE_SURFACE];
     q.radius = color == 0u ? -1.0 : length(q.u) + length(q.v);
     return q;
 }
@@ -329,6 +397,14 @@ Quad merge(Quad a, Quad b)
         n = cross(big.u, big.v);
     }
     n = dot(n, n) > 0.0 ? normalize(n) : vec3(0.0, 1.0, 0.0);
+    // Each one's flatness by its area and by how far its normal is along the merged one; its
+    // roughness squared by area.
+    float fa = velk_surface_flatness(a.surface);
+    float fb = velk_surface_flatness(b.surface);
+    float flatness = quarter > 0.0 ? (fa * abs(dot(na, n)) + fb * abs(dot(nb, n))) / quarter : 0.5 * (fa + fb);
+    float alpha_a = float((a.surface >> 16u) & 0xFFu) / 255.0;
+    float alpha_b = float((b.surface >> 16u) & 0xFFu) / 255.0;
+    q.surface = velk_surface_pack(flatness, mix(alpha_b, alpha_a, wa));
     vec3 along = big.u - dot(big.u, n) * n;
     if (dot(along, along) <= 1e-12 * dot(big.u, big.u)) {
         along = abs(n.x) < 0.9 ? cross(n, vec3(1.0, 0.0, 0.0)) : cross(n, vec3(0.0, 1.0, 0.0));

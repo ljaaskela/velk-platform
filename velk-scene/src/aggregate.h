@@ -20,13 +20,24 @@ struct MeshQuad
     float u[3] = {};  ///< Half axis along the longest side.
     float v[3] = {};  ///< Half axis along the other; the normal is u cross v.
     uint32_t color = 0;  ///< RGBA8, red in the low byte. 0 for a mesh with no quad.
+    /// What it stands for (pack_quad_surface): how much of that surface faces along its normal,
+    /// either way, from 0 to 1 (about 1 for a wall or a slab, about 0 for a rock or a tree's crown,
+    /// which it is then lit as), and that surface's mean roughness.
+    uint32_t surface = 0;
 };
+
+/// MeshQuad::surface: @p flatness in bits 0-15, @p roughness squared (both 0 to 1) in bits 16-23.
+uint32_t pack_quad_surface(float flatness, float roughness);
+/// Its flatness and its roughness squared.
+float quad_flatness(uint32_t surface);
+float quad_alpha(uint32_t surface);
 /// Words of a MeshQuad in the GPU table of a visual's meshes.
-inline constexpr uint32_t kMeshQuadWords = 10;
+inline constexpr uint32_t kMeshQuadWords = 11;
 static_assert(sizeof(MeshQuad) == kMeshQuadWords * sizeof(uint32_t), "Mirrors quad_tree_build_src");
 static_assert(offsetof(MeshQuad, center) == kQuadNodeCenter * sizeof(uint32_t) && offsetof(MeshQuad, u) == kQuadNodeU * sizeof(uint32_t)
                   && offsetof(MeshQuad, v) == kQuadNodeV * sizeof(uint32_t)
-                  && offsetof(MeshQuad, color) == kQuadNodeColor * sizeof(uint32_t),
+                  && offsetof(MeshQuad, color) == kQuadNodeColor * sizeof(uint32_t)
+                  && offsetof(MeshQuad, surface) == kQuadNodeSurface * sizeof(uint32_t),
               "Mirrors VELK_QUAD_NODE");
 
 /// @p mesh's quad: from its bounds, coloured by its primitives' materials' average albedo, by
