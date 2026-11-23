@@ -316,7 +316,8 @@ inline constexpr uint32_t kLightPoolAheadEvery = 60;
                                                     added rays to it, that cast rays alone, and settled cells a \
                                                     change woke: four words */                                       \
     X(LastFreePages, LAST_FREE_PAGES, 189)       /* pages the last frame left on the stack, for the pieces' keep */  \
-    X(HeaderEnd, HEADER_END, 190)
+    X(DemandFrames, DEMAND_FRAMES, 190)          /* frames in a row, up to 3, that asked for pages not there */      \
+    X(HeaderEnd, HEADER_END, 191)
 
 #define VELK_LIGHT_POOL_CPP_WORD(cpp, glsl, word) inline constexpr uint32_t kLightPool##cpp = word;
 VELK_LIGHT_POOL_HEADER(VELK_LIGHT_POOL_CPP_WORD)
@@ -5428,11 +5429,17 @@ bool velk_pieces_marked(uint pool, uint page)
 // the more room it has, so that turning back to what went out of view finds its pieces and their
 // light. It shortens a step at a time as the pool fills, so that a burst of new pieces while the
 // camera turns does not let every piece out of view go at once. The room is what the last frame
-// left free: this runs before the sweep refills the stack.
+// left free: this runs before the sweep refills the stack. A pool that cannot grow and was asked
+// for pages it did not have keeps them half as long for each such frame in a row, down to an
+// eighth, so that the pieces read longest ago make room for those in view.
 uint velk_pieces_keep_frames(uint pool)
 {
     uint free_pages = light_words.data[pool + VELK_POOL_LAST_FREE_PAGES];
     uint pages = light_words.data[pool + VELK_POOL_PAGES];
+    uint demand = light_words.data[pool + VELK_POOL_DEMAND_FRAMES];
+    // The free stack has room for the most pages the pool may have: all of them are there.
+    bool at_most = pages == light_words.data[pool + VELK_POOL_MARKS_WORD] - light_words.data[pool + VELK_POOL_STACK_WORD];
+    if (at_most && demand > 0u) return VELK_PIECE_KEEP_FRAMES >> min(demand, 3u);
     if (free_pages * 2u > pages) return 32u * VELK_PIECE_KEEP_FRAMES;
     if (free_pages * 4u > pages) return 8u * VELK_PIECE_KEEP_FRAMES;
     if (free_pages * 8u > pages) return 4u * VELK_PIECE_KEEP_FRAMES;
@@ -5631,6 +5638,8 @@ void main()
             // Kept for the pool's growth, which looks only now and then.
             light_words.data[pool + VELK_POOL_MOST_PAGES_WANTED] = max(light_words.data[pool + VELK_POOL_MOST_PAGES_WANTED],
                                                                        light_words.data[pool + VELK_POOL_PAGES_WANTED]);
+            light_words.data[pool + VELK_POOL_DEMAND_FRAMES] = light_words.data[pool + VELK_POOL_PAGES_WANTED] > 0u
+                ? min(light_words.data[pool + VELK_POOL_DEMAND_FRAMES] + 1u, 3u) : 0u;
             light_words.data[pool + VELK_POOL_PAGES_WANTED] = 0u;
             light_words.data[pool + VELK_POOL_RECORDS_PAGED] = 0u;
             light_words.data[pool + VELK_POOL_RECORDS_ONE_VALUE] = 0u;
