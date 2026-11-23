@@ -5613,10 +5613,15 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
                 char read_level[96];
                 level(7u, vertices, sizeof(vertices));
                 level(14u, read_level, sizeof(read_level));
+                // Listed and changed frames as their distance back from the pool's frame, - for none.
+                const auto back = [&](uint32_t frame) {
+                    return frame == kLightNone ? -1 : static_cast<int>(int64_t(e[27]) - int64_t(frame & 0x0FFFFFFFu));
+                };
                 VELK_LOG(I, "light read %u,%u frame %u: record %08x triangle %u of %u, coarse %08x, root %08x, reads %08x depth %u "
-                            "cell %u tri %u px; vertices %s; level %s",
+                            "cell %u tri %u px; vertices %s listed -%d -%d -%d changed -%d; level %s listed -%d -%d -%d changed -%d",
                          packed & 0xFFFFu, packed >> 16u, flags >> 8u, e[0], e[1], e[2], e[3], e[4], e[5], e[6] & 255u,
-                         (e[6] >> 8u) & 255u, e[6] >> 16u, vertices, read_level);
+                         (e[6] >> 8u) & 255u, e[6] >> 16u, vertices, back(e[21]), back(e[22]), back(e[23]), back(e[28]), read_level,
+                         back(e[24]), back(e[25]), back(e[26]), back(e[29]));
             }
         }
         // What it holds, now and then, from the last frame's complete counts.

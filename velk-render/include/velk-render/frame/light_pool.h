@@ -208,7 +208,7 @@ inline constexpr uint32_t kLightMaxSegments = 64;
 /// Pixels VELK_LIGHT_READ can name for the lighting to write its terms at (VELK_POOL_READ_TERMS),
 /// and the words of each one's terms (VELK_LIGHT_READ_WORDS).
 inline constexpr uint32_t kLightReadPixels = 4;
-inline constexpr uint32_t kLightReadWords = 48;
+inline constexpr uint32_t kLightReadWords = 54;
 inline constexpr uint32_t kLightPoolAheadFrames = 40;
 inline constexpr uint32_t kLightPoolAheadEvery = 60;
 
@@ -326,7 +326,7 @@ inline constexpr uint32_t kLightPoolAheadEvery = 60;
                                                     kLightReadPixels words */                                        \
     X(ReadTerms, READ_TERMS, 195)                /* the lighting's terms at them, kLightReadWords each \
                                                     (VELK_LIGHT_READ_*) */                                           \
-    X(HeaderEnd, HEADER_END, 387)
+    X(HeaderEnd, HEADER_END, 411)
 
 #define VELK_LIGHT_POOL_CPP_WORD(cpp, glsl, word) inline constexpr uint32_t kLightPool##cpp = word;
 VELK_LIGHT_POOL_HEADER(VELK_LIGHT_POOL_CPP_WORD)
@@ -455,15 +455,21 @@ bool velk_light_inherits(uint value)
 // light and the colour before tonemapping, three words each; then its metallic, whether its points
 // of light were traced and probes covered it (bits 0 and 1) with the frame that wrote them (the
 // bits from 8 on, its present counter), and how well the probes matched.
-#define VELK_LIGHT_READ_WORDS 48u
+#define VELK_LIGHT_READ_WORDS 54u
 // Then what it reads of its triangle's pieces (velk_light_explain), from word 24: its record's
 // light word, its triangle, its record's triangles in pieces, its record's coarse light, its
 // triangle's root word, the level it reads (a page, or VELK_PIECE_VERTICES), that level's depth
 // with its coarse cell (velk_way_cell) from bit 8 and its triangle's size on screen in pixels from
 // bit 16; then for its vertex points and for the level it reads, the three points around it: their
-// light words, their traces and their weights in 255ths, a byte each.
+// light words, their traces and their weights in 255ths, a byte each; then the frame each of those
+// six points was last listed (VELK_PIECE_FRAME_BITS), vertex points first, the pool's frame, and
+// the frame something last changed their light, the vertex points' (VELK_PAGE_CHANGED) then the
+// level's (velk_piece_changed_word).
 #define VELK_LIGHT_READ_EXPLAIN 24u
-#define VELK_LIGHT_EXPLAIN_WORDS 21u
+#define VELK_LIGHT_EXPLAIN_WORDS 30u
+#define VELK_LIGHT_EXPLAIN_LISTED 21u
+#define VELK_LIGHT_EXPLAIN_FRAME 27u
+#define VELK_LIGHT_EXPLAIN_CHANGED 28u
 #define VELK_LIGHT_EXPLAIN_RECORD 0u
 #define VELK_LIGHT_EXPLAIN_TRIANGLE 1u
 #define VELK_LIGHT_EXPLAIN_PIECED 2u
@@ -1765,9 +1771,14 @@ void velk_light_explain(uint pool, uvec2 ids, vec3 b, vec3 at, float tri_size, o
             e[base + 3u + k] = velk_light_point_traces(pool, first, page == VELK_PIECE_VERTICES ? VELK_LIGHT_NONE : page,
                                                        VELK_LIGHT_WORDS.data[words[k] + 1u]);
             weights |= uint(clamp(w[k], 0.0, 1.0) * 255.0 + 0.5) << (8u * k);
+            uint state = VELK_LIGHT_WORDS.data[words[k] + 1u];
+            e[VELK_LIGHT_EXPLAIN_LISTED + level * 3u + k] = state == VELK_LIGHT_NONE ? VELK_LIGHT_NONE : state & VELK_PIECE_FRAME_BITS;
         }
         e[base + 6u] = weights;
+        e[VELK_LIGHT_EXPLAIN_CHANGED + level] = page == VELK_PIECE_VERTICES ? VELK_LIGHT_WORDS.data[first + VELK_PAGE_CHANGED]
+                                                                             : VELK_LIGHT_WORDS.data[velk_piece_changed_word(pool, page)];
     }
+    e[VELK_LIGHT_EXPLAIN_FRAME] = VELK_LIGHT_WORDS.data[pool + VELK_POOL_FRAME] & VELK_PIECE_FRAME_BITS;
 }
 )"
 
