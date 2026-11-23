@@ -208,7 +208,7 @@ inline constexpr uint32_t kLightMaxSegments = 64;
 /// Pixels VELK_LIGHT_READ can name for the lighting to write its terms at (VELK_POOL_READ_TERMS),
 /// and the words of each one's terms (VELK_LIGHT_READ_WORDS).
 inline constexpr uint32_t kLightReadPixels = 4;
-inline constexpr uint32_t kLightReadWords = 54;
+inline constexpr uint32_t kLightReadWords = 69;
 inline constexpr uint32_t kLightPoolAheadFrames = 40;
 inline constexpr uint32_t kLightPoolAheadEvery = 60;
 
@@ -326,7 +326,7 @@ inline constexpr uint32_t kLightPoolAheadEvery = 60;
                                                     kLightReadPixels words */                                        \
     X(ReadTerms, READ_TERMS, 195)                /* the lighting's terms at them, kLightReadWords each \
                                                     (VELK_LIGHT_READ_*) */                                           \
-    X(HeaderEnd, HEADER_END, 411)
+    X(HeaderEnd, HEADER_END, 471)
 
 #define VELK_LIGHT_POOL_CPP_WORD(cpp, glsl, word) inline constexpr uint32_t kLightPool##cpp = word;
 VELK_LIGHT_POOL_HEADER(VELK_LIGHT_POOL_CPP_WORD)
@@ -455,7 +455,7 @@ bool velk_light_inherits(uint value)
 // light and the colour before tonemapping, three words each; then its metallic, whether its points
 // of light were traced and probes covered it (bits 0 and 1) with the frame that wrote them (the
 // bits from 8 on, its present counter), and how well the probes matched.
-#define VELK_LIGHT_READ_WORDS 54u
+#define VELK_LIGHT_READ_WORDS 69u
 // Then what it reads of its triangle's pieces (velk_light_explain), from word 24: its record's
 // light word, its triangle, its record's triangles in pieces, its record's coarse light, its
 // triangle's root word, the level it reads (a page, or VELK_PIECE_VERTICES), that level's depth
@@ -465,8 +465,13 @@ bool velk_light_inherits(uint value)
 // six points was last listed (VELK_PIECE_FRAME_BITS), vertex points first, the pool's frame, and
 // the frame something last changed their light, the vertex points' (VELK_PAGE_CHANGED) then the
 // level's (velk_piece_changed_word).
+// Then, floats as their bits: its triangle's three corners in the world, the pixel's place in the
+// world and the way its first light shines.
 #define VELK_LIGHT_READ_EXPLAIN 24u
-#define VELK_LIGHT_EXPLAIN_WORDS 30u
+#define VELK_LIGHT_EXPLAIN_WORDS 45u
+#define VELK_LIGHT_EXPLAIN_CORNERS 30u
+#define VELK_LIGHT_EXPLAIN_AT 39u
+#define VELK_LIGHT_EXPLAIN_LIGHT 42u
 #define VELK_LIGHT_EXPLAIN_LISTED 21u
 #define VELK_LIGHT_EXPLAIN_FRAME 27u
 #define VELK_LIGHT_EXPLAIN_CHANGED 28u
@@ -1779,6 +1784,21 @@ void velk_light_explain(uint pool, uvec2 ids, vec3 b, vec3 at, float tri_size, o
                                                                              : VELK_LIGHT_WORDS.data[velk_piece_changed_word(pool, page)];
     }
     e[VELK_LIGHT_EXPLAIN_FRAME] = VELK_LIGHT_WORDS.data[pool + VELK_POOL_FRAME] & VELK_PIECE_FRAME_BITS;
+    // Its corners and the pixel in the world, and the way its first light shines.
+    ElementInstance inst = velk_instances.data[d.instances_base + velk_ids_slot(d, ids)];
+    for (uint k = 0u; k < 3u; ++k) {
+        uint v = velk_cluster_vertex_word(d, cluster) + corners[k] * VELK_VERTEX3D_WORDS;
+        vec3 local = vec3(uintBitsToFloat(velk_mesh_words.data[v]), uintBitsToFloat(velk_mesh_words.data[v + 1u]),
+                          uintBitsToFloat(velk_mesh_words.data[v + 2u]));
+        vec3 p = velk_rel_position(inst.world_matrix, inst.offset.xyz + local * inst.size.xyz, g) + g.cam_pos.xyz;
+        for (uint c = 0u; c < 3u; ++c) e[VELK_LIGHT_EXPLAIN_CORNERS + 3u * k + c] = floatBitsToUint(p[c]);
+    }
+    for (uint c = 0u; c < 3u; ++c) e[VELK_LIGHT_EXPLAIN_AT + c] = floatBitsToUint(at[c] + g.cam_pos[c]);
+    uint slot = VELK_LIGHT_WORDS.data[first + VELK_PAGE_SLOTS];
+    if (slot != VELK_LIGHT_NONE) {
+        vec3 dir = velk_light_at(pc.lights_base + slot).direction.xyz;
+        for (uint c = 0u; c < 3u; ++c) e[VELK_LIGHT_EXPLAIN_LIGHT + c] = floatBitsToUint(dir[c]);
+    }
 }
 )"
 

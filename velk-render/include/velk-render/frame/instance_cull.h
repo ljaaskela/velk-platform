@@ -5622,6 +5622,12 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
                          packed & 0xFFFFu, packed >> 16u, flags >> 8u, e[0], e[1], e[2], e[3], e[4], e[5], e[6] & 255u,
                          (e[6] >> 8u) & 255u, e[6] >> 16u, vertices, back(e[21]), back(e[22]), back(e[23]), back(e[28]), read_level,
                          back(e[24]), back(e[25]), back(e[26]), back(e[29]));
+                float place[15];
+                std::memcpy(place, e + 30, sizeof(place));
+                VELK_LOG(I, "light read %u,%u frame %u places: corners %.3f %.3f %.3f | %.3f %.3f %.3f | %.3f %.3f %.3f, at %.3f "
+                            "%.3f %.3f, light %.4f %.4f %.4f",
+                         packed & 0xFFFFu, packed >> 16u, flags >> 8u, place[0], place[1], place[2], place[3], place[4], place[5],
+                         place[6], place[7], place[8], place[9], place[10], place[11], place[12], place[13], place[14]);
             }
         }
         // What it holds, now and then, from the last frame's complete counts.
