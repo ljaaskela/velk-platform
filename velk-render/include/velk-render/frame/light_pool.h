@@ -4328,7 +4328,8 @@ void velk_light_list_way(uint first, uvec3 corners, uint triangle, vec3 b, float
     // Exact only by points a change made stale: the trace this frame may find them differing, and
     // the lighting then reads the level under them, so that level's points are listed too where it
     // is there already.
-    bool stale_exact = cell == 1u && velk_way_cell(pool, first, corners, way, true) == 0u;
+    bool stale_exact = cell == 1u && deepest != way.coarse && deepest != VELK_PIECE_VERTICES
+                    && velk_way_cell(pool, first, corners, way, true) == 0u;
     if (cell < 2u) velk_way_stop_at_coarse(way);
     bool on_piece = way.piece != VELK_PIECE_VERTICES;
     uint piece_first = on_piece ? velk_light_page(pool, way.piece) : 0u;
