@@ -271,6 +271,9 @@ int main(int argc, char* argv[])
     // the camera at frame F and what the scene moves at frame M, saved as _glideF_mM.
     velk::vector<long> glide_at;
     velk::vector<long> glide_movers_at;
+    // verify with glide_save=A-B: a glide view's frames A to B saved as they are, every one.
+    long glide_save_from = -1;
+    long glide_save_to = -1;
     for (int i = 1; i < argc; ++i) {
         const char* arg = argv[i];
         if (std::strcmp(arg, "verify") == 0) {
@@ -287,6 +290,10 @@ int main(int argc, char* argv[])
             only_views = arg + 6;
         } else if (std::strncmp(arg, "settle=", 7) == 0) {
             settle_frames = std::max(1l, std::atol(arg + 7));
+        } else if (std::strncmp(arg, "glide_save=", 11) == 0) {
+            char* end = nullptr;
+            glide_save_from = std::strtol(arg + 11, &end, 10);
+            glide_save_to = end && *end == '-' ? std::strtol(end + 1, nullptr, 10) : glide_save_from;
         } else if (std::strncmp(arg, "glide_at=", 9) == 0) {
             for (const char* at = arg + 9; at && *at;) {
                 char* end = nullptr;
@@ -640,6 +647,13 @@ int main(int argc, char* argv[])
                         inspect::place_glide_movers(built, view, f);
                         if (!frame()) return 1;
                         glide_ms.push_back(frame_ms(*backend));
+                        if (f >= glide_save_from && f <= glide_save_to) {
+                            inspect::Image saved;
+                            if (!grab(saved)) return 1;
+                            char saved_suffix[32];
+                            std::snprintf(saved_suffix, sizeof(saved_suffix), "_f%ld.png", f);
+                            inspect::save_png(*writer, saved, run_path(spec, view, saved_suffix));
+                        }
                         if (next > kGlideSamples || f != glide_frame(view, next)) continue;
                         ++next;
                         VELK_LOG(I, "inspect: %s judged at frame %ld", name, f);
