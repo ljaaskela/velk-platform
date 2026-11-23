@@ -2,7 +2,7 @@
 // each with a few fixed views, for looking at the renderer's structures and for checking its
 // images against references.
 //
-// velk_ui_inspect [scene=NAME] [view=NAME] [level=N] [at=X,Y,Z,YAW,PITCH] [path[=FRAME]] [capture=N [then=VIEW]]
+// velk_ui_inspect [scene=NAME] [view=NAME] [level=N] [at=X,Y,Z,YAW,PITCH] [path[=FRAME]] [capture=N [then=VIEW,...]]
 // velk_ui_inspect verify [scene=NAMES] [skip=NAMES] [views=NAMES] [settle=N]
 // velk_ui_inspect reference [scene=NAMES] [skip=NAMES] [views=NAMES] [frames=N]
 // velk_ui_inspect trend [scene=NAMES]
@@ -78,6 +78,8 @@
 #include <velk-ui/plugins/image/plugin.h>
 #include <velk-ui/plugins/text/api/font.h>
 #include <velk-ui/plugins/text/api/text_visual.h>
+
+#include "../common/nature_trees.h"
 
 #ifndef INSPECT_REFERENCE_DIR
 #define INSPECT_REFERENCE_DIR "reference_images/verify"
@@ -266,6 +268,7 @@ int main(int argc, char* argv[])
     long reference_frames = 128;
     long capture_frame = 0;
     size_t then_view = kViewCount;
+    velk::vector<size_t> then_views;
     // reference with glide_at=F,F,...: a glide view's references at those frames of its motion
     // instead of the judged ones, for comparing a run's frame with poses around it. F:M places
     // the camera at frame F and what the scene moves at frame M, saved as _glideF_mM.
@@ -328,12 +331,22 @@ int main(int argc, char* argv[])
                 VELK_LOG(E, "inspect: unknown view '%s'", arg + 5);
             }
         } else if (std::strncmp(arg, "then=", 5) == 0) {
-            for (size_t v = 0; v < kViewCount; ++v) {
-                if (std::strcmp(arg + 5, kViews[v].key) == 0) then_view = v;
+            // A view, or with capture= a list of them, comma separated.
+            for (const char* at = arg + 5; *at;) {
+                const char* end = std::strchr(at, ',');
+                const size_t length = end ? static_cast<size_t>(end - at) : std::strlen(at);
+                size_t found = kViewCount;
+                for (size_t v = 0; v < kViewCount; ++v) {
+                    if (std::strlen(kViews[v].key) == length && std::strncmp(at, kViews[v].key, length) == 0) found = v;
+                }
+                if (found == kViewCount) {
+                    VELK_LOG(E, "inspect: unknown view '%.*s'", static_cast<int>(length), at);
+                } else {
+                    then_views.push_back(found);
+                }
+                at = end ? end + 1 : at + length;
             }
-            if (then_view == kViewCount) {
-                VELK_LOG(E, "inspect: unknown view '%s'", arg + 5);
-            }
+            if (!then_views.empty()) then_view = then_views[0];
         } else if (std::strncmp(arg, "at=", 3) == 0) {
             has_place = std::sscanf(arg + 3, "%f,%f,%f,%f,%f", &place[0], &place[1], &place[2], &place[3], &place[4]) == 5;
             if (!has_place) {
@@ -384,6 +397,8 @@ int main(int argc, char* argv[])
     wc.color_format = velk::SurfaceColorFormat::RGBA16F;
 
     auto app = velk::create_app(config);
+    // Nature's trees' material, for the trees scene: once, as registering again resets its objects.
+    velk::instance().type_registry().register_type<velk_samples::TreeMaterial>();
     auto window = app.create_window(wc);
     if (!window) {
         VELK_LOG(E, "inspect: failed to create window");
@@ -1432,17 +1447,22 @@ int main(int argc, char* argv[])
                 VELK_LOG(E, "inspect: could not save frame %ld", frame);
             }
         };
+        // capture=N: frame N, then with then= each of its views two frames after the last.
         if (capture_frame > 0 && frame == capture_frame) {
             save_frame("capture");
-            if (then_view == kViewCount) break;
-            show_view(then_view);
+            if (then_views.empty()) break;
+            show_view(then_views[0]);
             held_pose = true;
         }
-        if (capture_frame > 0 && then_view != kViewCount && frame == capture_frame + 2) {
-            char name[64];
-            std::snprintf(name, sizeof(name), "capture_%s", kViews[then_view].key);
-            save_frame(name);
-            break;
+        if (capture_frame > 0 && frame > capture_frame && (frame - capture_frame) % 2 == 0) {
+            const auto k = static_cast<size_t>((frame - capture_frame) / 2 - 1);
+            if (k < then_views.size()) {
+                char name[64];
+                std::snprintf(name, sizeof(name), "capture_%s", kViews[then_views[k]].key);
+                save_frame(name);
+                if (k + 1 == then_views.size()) break;
+                show_view(then_views[k + 1]);
+            }
         }
     }
     return 0;

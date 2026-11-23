@@ -23,6 +23,8 @@
 #include <velk-ui/plugins/image/api/environment.h>
 #include <velk-ui/plugins/text/api/text_visual.h>
 
+#include "../common/nature_trees.h"
+
 namespace inspect {
 
 namespace {
@@ -696,6 +698,31 @@ void build_forest(SceneBuilder& b)
 
 /// A light of the street's look switch: a point light of @p size at @p position, or with
 /// @p sun a sun from @p position as its rotation, at @p day's intensity until the switch sets it.
+/// Nature's trees (velk_ui_scale's nature): its three species in the wind, as many and as far
+/// apart as nature has them, 500 by 500 sixty units apart, on flat ground ahead of the camera
+/// from its near edge to thirty thousand units away.
+void build_trees(SceneBuilder& b)
+{
+    set_sky(b, "trees", 0.2f, 0.25f, 0.33f);
+    add_sun(b, {50.f, 30.f, 0.f}, 0.8f);
+    add_mesh(b, build_ground(raw(b), 64000.f, 256, standard(0.25f, 0.3f, 0.15f)), {});
+    const velk_samples::NatureTrees trees = velk_samples::build_nature_trees(raw(b), true);
+    const velk::IMesh::Ptr species[] = {trees.oak, trees.birch, trees.pine};
+    velk::vector<velk::InstanceTransform> transforms[3];
+    for (long i = 0; i < 500 * 500; ++i) {
+        const float x = -15000.f + (static_cast<float>(i % 500) + 0.8f * jitter(i, 3.1f)) * 60.f;
+        const float z = -(static_cast<float>(i / 500) + 0.8f * jitter(i, 5.9f)) * 60.f;
+        const float s = 0.75f + (jitter(i, 8.3f) + 0.5f) * 0.6f;
+        const float turn = (jitter(i, 9.7f) + 0.5f) * 2.f * kPi;
+        const float c = std::cos(turn) * s;
+        const float n = std::sin(turn) * s;
+        const auto k = static_cast<size_t>(std::min((jitter(i, 4.4f) + 0.5f) * 3.f, 2.f));
+        // Sunk a little into the ground, as nature plants them.
+        transforms[k].push_back(velk::InstanceTransform{{{c, 0.f, n, x}, {0.f, s, 0.f, 1.5f}, {-n, 0.f, c, z}}});
+    }
+    for (size_t k = 0; k < 3; ++k) add_instances(b, species[k], transforms[k]);
+}
+
 velk::Light add_look_light(SceneBuilder& b, const velk::vec3& position, bool sun, float size, float day, float night)
 {
     auto light = sun ? velk::trait::render::create_directional_light(velk::color{1.f, 0.96f, 0.88f, 1.f}, day)
@@ -870,6 +897,9 @@ const velk::vector<SceneSpec>& scenes()
         {"text", "a line of text standing on a plane under a sun: glyph shadows",
          {{"front", {{0.f, -110.f, 300.f}, 0.f, -15.f}}, {"low", {{200.f, -50.f, 200.f}, 40.f, -8.f}}},
          build_text},
+        {"trees", "nature's trees in the wind, a forest from near to far: far trees as specks of the wrong colour (#49)",
+         {{"near", {{0.f, -25.f, 60.f}, 0.f, -3.f}}, {"far", {{0.f, -1500.f, 1500.f}, 0.f, -10.f}}},
+         build_trees, nullptr, false},
         {"forest", "instanced tree sized solids and pebbles",
          {{"near", {{0.f, -60.f, 250.f}, 0.f, -8.f}}, {"far", {{0.f, -260.f, 500.f}, 0.f, -20.f}}},
          build_forest},

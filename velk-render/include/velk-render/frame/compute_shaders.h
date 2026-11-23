@@ -1802,6 +1802,13 @@ void main()
                 for (uint e = 0u; e < VELK_LIGHT_EXPLAIN_WORDS; ++e) {
                     velk_light_cell_words.data[at + VELK_LIGHT_READ_EXPLAIN + e] = explain[e];
                 }
+                uint first_light = points ? point_lights[0] : VELK_LIGHT_NONE;
+                float n_dot_l = 0.0;
+                if (first_light != VELK_LIGHT_NONE) n_dot_l = dot(N, -normalize(velk_light_at(pc.lights_base + first_light).direction.xyz));
+                velk_light_cell_words.data[at + VELK_LIGHT_READ_FIRST_LIGHT] = first_light;
+                velk_light_cell_words.data[at + VELK_LIGHT_READ_FIRST_LIGHT + 1u] = floatBitsToUint(points ? point_through[0] : -1.0);
+                velk_light_cell_words.data[at + VELK_LIGHT_READ_FIRST_LIGHT + 2u] = floatBitsToUint(n_dot_l);
+                velk_light_cell_words.data[at + VELK_LIGHT_READ_FIRST_LIGHT + 3u] = velk_pixel_ids(pc.spare4, pc.spare2, coord).x;
             }
         }
     }
