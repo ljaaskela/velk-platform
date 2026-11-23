@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <utility>
 
 namespace velk {
@@ -204,6 +205,10 @@ inline constexpr uint32_t kLightMaxSegments = 64;
 /// The pool grows a quarter ahead of a frame asking when it stayed under a sixteenth free this
 /// many frames, at most once every kLightPoolAheadEvery: past a full keep of the sweep's shortest
 /// (VELK_PIECE_KEEP_FRAMES), so that pieces out of view were let go of first.
+/// Pixels VELK_LIGHT_READ can name for the lighting to write its terms at (VELK_POOL_READ_TERMS),
+/// and the words of each one's terms (VELK_LIGHT_READ_WORDS).
+inline constexpr uint32_t kLightReadPixels = 4;
+inline constexpr uint32_t kLightReadWords = 24;
 inline constexpr uint32_t kLightPoolAheadFrames = 40;
 inline constexpr uint32_t kLightPoolAheadEvery = 60;
 
@@ -317,7 +322,11 @@ inline constexpr uint32_t kLightPoolAheadEvery = 60;
                                                     change woke: four words */                                       \
     X(LastFreePages, LAST_FREE_PAGES, 189)       /* pages the last frame left on the stack, for the pieces' keep */  \
     X(DemandFrames, DEMAND_FRAMES, 190)          /* frames in a row, up to 3, that asked for pages not there */      \
-    X(HeaderEnd, HEADER_END, 191)
+    X(ReadPixels, READ_PIXELS, 191)              /* VELK_LIGHT_READ's pixels, x | y << 16, kLightNone for none: \
+                                                    kLightReadPixels words */                                        \
+    X(ReadTerms, READ_TERMS, 195)                /* the lighting's terms at them, kLightReadWords each \
+                                                    (VELK_LIGHT_READ_*) */                                           \
+    X(HeaderEnd, HEADER_END, 291)
 
 #define VELK_LIGHT_POOL_CPP_WORD(cpp, glsl, word) inline constexpr uint32_t kLightPool##cpp = word;
 VELK_LIGHT_POOL_HEADER(VELK_LIGHT_POOL_CPP_WORD)
@@ -327,6 +336,9 @@ VELK_LIGHT_POOL_HEADER(VELK_LIGHT_POOL_CPP_WORD)
 #define VELK_LIGHT_POOL_HEADER_GLSL VELK_LIGHT_POOL_HEADER(VELK_LIGHT_POOL_GLSL_WORD)
 inline constexpr uint32_t kLightPoolHeaderWords = kLightPoolHeaderEnd;
 static_assert(kLightPoolTraces == kLightPoolSegmentWords + kLightMaxSegments, "the segments' words end where the trace's begin");
+static_assert(kLightPoolReadTerms == kLightPoolReadPixels + kLightReadPixels
+                  && kLightPoolHeaderEnd == kLightPoolReadTerms + kLightReadPixels * kLightReadWords,
+              "the read pixels' words, then their terms, end the header");
 /// Records the search list takes a frame; more wait for the next.
 inline constexpr uint32_t kLightSearchCapacity = 1024;  ///< Mirrors VELK_LIGHT_SEARCH_CAPACITY.
 inline constexpr uint32_t kLightSearchWords = kSearchEntryWords;
@@ -437,6 +449,21 @@ bool velk_light_inherits(uint value)
 #define VELK_LIGHT_TRUSTED_TRACES 8.0
 // kLightPixels.
 #define VELK_LIGHT_PIXELS 4.0
+// A read pixel's terms (VELK_POOL_READ_TERMS), floats as their bits: its albedo, direct light,
+// indirect light, the environment's diffuse light, specular light in all, area lights' diffuse
+// light and the colour before tonemapping, three words each; then its metallic, whether its points
+// of light were traced and probes covered it (bits 0 and 1), and how well the probes matched.
+#define VELK_LIGHT_READ_WORDS 24u
+#define VELK_LIGHT_READ_ALBEDO 0u
+#define VELK_LIGHT_READ_DIRECT 3u
+#define VELK_LIGHT_READ_INDIRECT 6u
+#define VELK_LIGHT_READ_ENV 9u
+#define VELK_LIGHT_READ_SPECULAR 12u
+#define VELK_LIGHT_READ_AREA 15u
+#define VELK_LIGHT_READ_COLOR 18u
+#define VELK_LIGHT_READ_METALLIC 21u
+#define VELK_LIGHT_READ_FLAGS 22u
+#define VELK_LIGHT_READ_MATCH 23u
 
 // An RGB9E5 colour (rgb9e5 in gpu_data.h).
 vec3 velk_rgb9e5(uint w)
@@ -5743,6 +5770,22 @@ inline bool ensure_light_pool(LightPool& pool, IGpuArena& arena, uint64_t device
     initial[kLightPoolWarmupPointsWord] = base + static_cast<uint32_t>(points_word + point_list_words);
     initial[kLightPoolCoarsePointsWord] = base + static_cast<uint32_t>(points_word + 2u * point_list_words);
     initial[kLightPoolFinePointsWord] = base + static_cast<uint32_t>(points_word + 3u * point_list_words);
+    // A development aid: VELK_LIGHT_READ=x,y;x,y;... names up to kLightReadPixels pixels whose
+    // lighting terms the lighting writes and the log prints.
+    for (uint32_t k = 0; k < kLightReadPixels; ++k) initial[kLightPoolReadPixels + k] = kLightNone;
+    if (const char* read = std::getenv("VELK_LIGHT_READ")) {
+        uint32_t k = 0;
+        for (const char* at = read; at && *at && k < kLightReadPixels;) {
+            char* end = nullptr;
+            const unsigned long x = std::strtoul(at, &end, 10);
+            if (end && *end == ',') {
+                const unsigned long y = std::strtoul(end + 1, &end, 10);
+                if (x < 65536u && y < 65536u) initial[kLightPoolReadPixels + k++] = uint32_t(x) | (uint32_t(y) << 16u);
+            }
+            at = std::strchr(at, ';');
+            if (at) ++at;
+        }
+    }
     // The header, then the marks and the piece bits, all clear.
     arena.write_at(pool.header.offset(), initial.data(), kLightPoolHeaderWords * sizeof(uint32_t));
     arena.write_at(pool.header.offset() + (uint64_t(kLightPoolHeaderWords) + max_pages) * sizeof(uint32_t),

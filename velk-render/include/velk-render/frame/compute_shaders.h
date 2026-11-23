@@ -1776,6 +1776,23 @@ void main()
 
         color = albedo.rgb * (1.0 - metallic) * (direct + indirect + area_irr) + highlights + F_env * env_specular
               + area_spec;
+
+        // At VELK_LIGHT_READ's pixels, its terms for the log (VELK_POOL_READ_TERMS).
+        if (pc.spare3 != VELK_LIGHT_NONE && velk_light_cell_words.data[pc.spare3 + VELK_POOL_READ_PIXELS] != VELK_LIGHT_NONE) {
+            uint here = uint(coord.x) | (uint(coord.y) << 16u);
+            for (uint k = 0u; k < 4u; ++k) {
+                if (velk_light_cell_words.data[pc.spare3 + VELK_POOL_READ_PIXELS + k] != here) continue;
+                uint at = pc.spare3 + VELK_POOL_READ_TERMS + k * VELK_LIGHT_READ_WORDS;
+                vec3 terms[7] = vec3[7](albedo.rgb, direct, indirect, env_diffuse, highlights + F_env * env_specular + area_spec,
+                                        area_irr, color);
+                for (uint t = 0u; t < 7u; ++t) {
+                    for (uint c = 0u; c < 3u; ++c) velk_light_cell_words.data[at + t * 3u + c] = floatBitsToUint(terms[t][c]);
+                }
+                velk_light_cell_words.data[at + VELK_LIGHT_READ_METALLIC] = floatBitsToUint(metallic);
+                velk_light_cell_words.data[at + VELK_LIGHT_READ_FLAGS] = (points ? 1u : 0u) | (probed ? 2u : 0u);
+                velk_light_cell_words.data[at + VELK_LIGHT_READ_MATCH] = floatBitsToUint(match);
+            }
+        }
     }
 
     imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord, vec4(color + emissive, albedo.a));
