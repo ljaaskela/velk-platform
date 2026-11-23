@@ -984,6 +984,21 @@ int main(int argc, char* argv[])
                     velk::string ours = run_path(spec, view, suffix);
                     ours.append(".png");
                     inspect::save_png(*writer, image, ours);
+                    // With then=VIEW: that debug view too, two frames later, the camera held.
+                    if (then_view != kViewCount) {
+                        main_camera.camera.set_debug_view(kViews[then_view].view);
+                        for (int held = 0; held < 2; ++held) {
+                            if (!frame()) return 1;
+                        }
+                        inspect::Image debug_image;
+                        if (!grab(debug_image)) return 1;
+                        velk::string debug_path = run_path(spec, view, suffix);
+                        debug_path.append("_");
+                        debug_path.append(kViews[then_view].key);
+                        debug_path.append(".png");
+                        inspect::save_png(*writer, debug_image, debug_path);
+                        main_camera.camera.set_debug_view(kViews[start_view].view);
+                    }
                     inspect::Image step_reference;
                     if (!inspect::load_reference(ref, step_reference)) {
                         have_references = false;
