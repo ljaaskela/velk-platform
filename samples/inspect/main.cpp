@@ -3,11 +3,12 @@
 // images against references.
 //
 // velk_ui_inspect [scene=NAME] [view=NAME] [level=N] [at=X,Y,Z,YAW,PITCH] [path[=FRAME]] [capture=N [then=VIEW]]
-// velk_ui_inspect verify [scene=NAMES] [skip=NAMES] [settle=N]
-// velk_ui_inspect reference [scene=NAMES] [skip=NAMES] [frames=N]
+// velk_ui_inspect verify [scene=NAMES] [skip=NAMES] [views=NAMES] [settle=N]
+// velk_ui_inspect reference [scene=NAMES] [skip=NAMES] [views=NAMES] [frames=N]
 // velk_ui_inspect trend [scene=NAMES]
 //
-// NAMES is a comma separated list of scenes: scene= runs only those, skip= leaves those out.
+// NAMES is a comma separated list of scenes: scene= runs only those, skip= leaves those out;
+// views= runs only the views of those names.
 //
 // Interactive (the default): one scene (scene=, the field by default) at its first view under
 // free control, with an overview from above drawing what the main camera draws. Right drag
@@ -28,7 +29,9 @@
 // time and memory. In a scene that moves things, five frames of the movement are each judged
 // against their own reference. A view with a motion then moves, a step a frame, each step
 // against its own reference, stays away as long as the view says, and comes back to be compared
-// with how it looked before, after a while away also its first frames back. Writes, overwriting the
+// with how it looked before, after a while away also its first frames back. A view with a smooth
+// camera motion (glide) settles at its start, then moves a small step every frame, what the scene
+// moves moving with it, kGlideSamples of its frames each against their own reference. Writes, overwriting the
 // last run, the images, their difference maps and a report to build/verify; then exits. GPU
 // times are checked against the median of the view's last runs on committed code in the
 // history (reference_images/verify/timings.tsv), and a run of every scene adds its times to
@@ -189,6 +192,14 @@ constexpr long kSettleFrom = 10;             ///< Frame changes count from here 
 constexpr long kBackFrames = 60;             ///< Frames back at a view after its motion, before it is compared.
 constexpr size_t kBaselineRuns = 5;          ///< Runs on committed code a view's times are measured against.
 constexpr int kDuringSamples = 5;            ///< Frames of a scene's movement judged against references.
+constexpr int kGlideSamples = 4;             ///< Frames of a smooth camera motion judged against references.
+
+/// The frame of @p view's smooth motion where sample @p k (1 to kGlideSamples) is judged, evenly
+/// spaced, neither its start nor its end.
+long glide_frame(const inspect::ViewSpec& view, int k)
+{
+    return static_cast<long>(view.glide_frames) * k / (kGlideSamples + 1);
+}
 
 /// The frame of a scene's movement where sample @p k (1 to kDuringSamples) is judged, evenly
 /// spaced, neither its start nor its end.
@@ -244,6 +255,7 @@ int main(int argc, char* argv[])
     Mode mode = Mode::Interactive;
     const char* only_scene = nullptr;
     const char* skip_scenes = nullptr;
+    const char* only_views = nullptr;
     size_t start_view = 0;
     bool has_place = false;
     float place[5] = {};
@@ -266,6 +278,8 @@ int main(int argc, char* argv[])
             only_scene = arg + 6;
         } else if (std::strncmp(arg, "skip=", 5) == 0) {
             skip_scenes = arg + 5;
+        } else if (std::strncmp(arg, "views=", 6) == 0) {
+            only_views = arg + 6;
         } else if (std::strncmp(arg, "settle=", 7) == 0) {
             settle_frames = std::max(1l, std::atol(arg + 7));
         } else if (std::strncmp(arg, "frames=", 7) == 0) {
@@ -391,7 +405,10 @@ int main(int argc, char* argv[])
             || listed(skip_scenes, specs[s].name)) {
             continue;
         }
-        for (size_t v = 0; v < specs[s].views.size(); ++v) jobs.push_back({s, v});
+        for (size_t v = 0; v < specs[s].views.size(); ++v) {
+            if (only_views && !listed(only_views, specs[s].views[v].name)) continue;
+            jobs.push_back({s, v});
+        }
     }
     const inspect::SceneSpec* interactive_spec = jobs.empty() ? inspect::find_scene("field") : &specs[jobs[0].scene];
 
@@ -560,6 +577,99 @@ int main(int argc, char* argv[])
                 place_camera(main_camera, view.place);
                 char name[64];
                 std::snprintf(name, sizeof(name), "%s/%s", spec.name, view.name);
+
+                // A smooth camera motion: references at the frames a run judges, the camera and
+                // what the scene moves where that frame has them.
+                if (mode == Mode::Reference && view.glide_frames > 0) {
+                    for (int k = 1; k <= kGlideSamples; ++k) {
+                        const long at = glide_frame(view, k);
+                        place_camera(main_camera, inspect::glide_place(view, at));
+                        for (long f = 0; f < reference_frames; ++f) {
+                            inspect::place_glide_movers(built, view, at);
+                            if (!frame()) return 1;
+                        }
+                        inspect::Image image;
+                        if (!grab(image)) return 1;
+                        char suffix[32];
+                        std::snprintf(suffix, sizeof(suffix), "_glide%ld", at);
+                        velk::string ref = reference_path(spec, view, suffix);
+                        velk::string png = ref;
+                        ref.append(".ref");
+                        png.append(".png");
+                        const bool saved = inspect::save_reference(inspect::downscale(image, kCompareScale), ref)
+                                        && inspect::save_png(*writer, image, png);
+                        VELK_LOG(I, "reference: %s%s %s", name, suffix, saved ? "saved" : "FAILED");
+                    }
+                    continue;
+                }
+                // A run of it: settled at its start, then the motion, a frame a step, its judged
+                // frames against their references; the worst of them, and its GPU time.
+                if (view.glide_frames > 0) {
+                    for (long f = 0; f < kSettleFrom + settle_frames; ++f) {
+                        inspect::place_glide_movers(built, view, 0);
+                        if (!frame()) return 1;
+                    }
+                    inspect::Difference worst{};
+                    long worst_at = 0;
+                    int judged = 0;
+                    bool have_references = true;
+                    velk::vector<double> glide_ms;
+                    int next = 1;
+                    for (long f = 1; f <= view.glide_frames; ++f) {
+                        place_camera(main_camera, inspect::glide_place(view, f));
+                        inspect::place_glide_movers(built, view, f);
+                        if (!frame()) return 1;
+                        glide_ms.push_back(frame_ms(*backend));
+                        if (next > kGlideSamples || f != glide_frame(view, next)) continue;
+                        ++next;
+                        inspect::Image image;
+                        if (!grab(image)) return 1;
+                        char suffix[32];
+                        std::snprintf(suffix, sizeof(suffix), "_glide%ld", f);
+                        velk::string ours = run_path(spec, view, suffix);
+                        ours.append(".png");
+                        inspect::save_png(*writer, image, ours);
+                        velk::string ref = reference_path(spec, view, suffix);
+                        ref.append(".ref");
+                        inspect::Image glide_reference;
+                        if (!inspect::load_reference(ref, glide_reference)) {
+                            have_references = false;
+                            continue;
+                        }
+                        const inspect::Image small = inspect::downscale(image, kCompareScale);
+                        const inspect::Difference d = inspect::compare(small, glide_reference, tile);
+                        velk::string diff = run_path(spec, view, suffix);
+                        diff.append("_diff.png");
+                        inspect::save_png(*writer, inspect::difference_map(small, glide_reference), diff);
+                        worst.mean = std::max(worst.mean, d.mean);
+                        worst.p95 = std::max(worst.p95, d.p95);
+                        if (d.worst_tile > worst.worst_tile || judged == 0) {
+                            worst.worst_tile = d.worst_tile;
+                            worst.tile_x = d.tile_x;
+                            worst.tile_y = d.tile_y;
+                            worst_at = f;
+                        }
+                        ++judged;
+                    }
+                    double median_ms = 0.0;
+                    double max_ms = 0.0;
+                    char ms_text[32];
+                    moving_text(glide_ms, median_ms, max_ms, ms_text, sizeof(ms_text));
+                    if (!have_references || judged == 0) {
+                        std::snprintf(buf, sizeof(buf), "%-24s  no reference for every judged frame", name);
+                        line(buf);
+                        ++failed;
+                    } else {
+                        char verdict[160];
+                        verdict_of(worst, "", verdict, sizeof(verdict));
+                        std::snprintf(buf, sizeof(buf), "%-24s %7.4f %7.4f %7.4f  worst at frame %ld of %d, %d judged, ms %s  %s",
+                                      name, static_cast<double>(worst.mean), static_cast<double>(worst.p95),
+                                      static_cast<double>(worst.worst_tile), worst_at, view.glide_frames, judged, ms_text, verdict);
+                        line(buf);
+                        count(verdict);
+                    }
+                    continue;
+                }
 
                 if (mode == Mode::Reference) {
                     // The view, then each step of its motion, each accumulated on its own.

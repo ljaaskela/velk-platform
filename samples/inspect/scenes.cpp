@@ -830,10 +830,12 @@ const velk::vector<SceneSpec>& scenes()
          {{"front", {{0.f, -90.f, 330.f}, 0.f, -8.f}}, {"angle", {{240.f, -80.f, 230.f}, 40.f, -8.f}}},
          build_mirror},
         {"thin", "a fence of thin boards and a canopy of small leaves: detail near the light's spacing",
-         {{"front", {{0.f, -100.f, 320.f}, 0.f, -15.f}}, {"above", {{150.f, -320.f, 250.f}, 30.f, -45.f}}},
+         {{"front", {{0.f, -100.f, 320.f}, 0.f, -15.f}}, {"above", {{150.f, -320.f, 250.f}, 30.f, -45.f}},
+          {"glide", {{0.f, -100.f, 320.f}, 0.f, -15.f}, {{183.f, -100.f, 262.f}, 35.f, -15.f}, 0, false, nullptr, 0, 180}},
          build_thin},
         {"moving", "a box moving across, then standing still: light follows and settles",
-         {{"front", {{0.f, -120.f, 320.f}, 0.f, -15.f}}},
+         {{"front", {{0.f, -120.f, 320.f}, 0.f, -15.f}},
+          {"glide", {{0.f, -120.f, 320.f}, 0.f, -15.f}, {{-160.f, -120.f, 277.f}, -30.f, -15.f}, 0, false, nullptr, 0, 180}},
          build_moving},
         {"moving_lights", "the moving box, lit by a red and a blue point light moving past each other: light following both",
          {{"front", {{0.f, -120.f, 320.f}, 0.f, -15.f}}},
@@ -906,6 +908,25 @@ Place motion_place(const ViewSpec& view, int k)
     p.yaw = view.place.yaw + (view.move_to.yaw - view.place.yaw) * t;
     p.pitch = view.place.pitch + (view.move_to.pitch - view.place.pitch) * t;
     return p;
+}
+
+Place glide_place(const ViewSpec& view, long frame)
+{
+    if (view.glide_frames <= 0 || frame <= 0) {
+        return view.place;
+    }
+    const float t = std::min(static_cast<float>(frame) / static_cast<float>(view.glide_frames), 1.f);
+    const float s = t * t * (3.f - 2.f * t);
+    Place p;
+    p.at = view.place.at + (view.move_to.at - view.place.at) * s;
+    p.yaw = view.place.yaw + (view.move_to.yaw - view.place.yaw) * s;
+    p.pitch = view.place.pitch + (view.move_to.pitch - view.place.pitch) * s;
+    return p;
+}
+
+void place_glide_movers(BuiltScene& built, const ViewSpec& view, long frame)
+{
+    place_movers(built, view.glide_frames > 0 ? built.frames * frame / view.glide_frames : built.frames);
 }
 
 velk::vec3 forward_of(float yaw_degrees, float pitch_degrees)

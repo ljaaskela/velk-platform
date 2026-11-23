@@ -37,10 +37,17 @@ struct ViewSpec
     /// view is also judged at the kSettleFrom-th frame back, before it settles again: what is seen
     /// on turning back to what was out of view that long.
     int away_frames = 0;
+    /// A smooth camera motion in place of the steps: `glide_frames` frames from `place` to
+    /// `move_to`, eased in and out, a small step every frame, as an application moves its camera;
+    /// what the scene moves moves over the same frames. 0 for none.
+    int glide_frames = 0;
 };
 
 /// Where the camera is at step @p k of @p view's motion, 0 its start.
 Place motion_place(const ViewSpec& view, int k);
+
+/// Where the camera is at frame @p frame of @p view's smooth motion, 0 its start.
+Place glide_place(const ViewSpec& view, long frame);
 
 /// Something a scene moves: its transform, from `from` to `to`.
 struct Mover
@@ -75,6 +82,10 @@ struct BuiltScene
 
 /// Places each of @p built's movers where it is at frame @p frame: on its way, then at its end.
 void place_movers(BuiltScene& built, long frame);
+
+/// Places @p built's movers where they are at frame @p frame of @p view's smooth motion: their
+/// movement spread over its frames.
+void place_glide_movers(BuiltScene& built, const ViewSpec& view, long frame);
 
 /// Sets @p built's look switch lights to night or day, when they are not that already.
 void set_look(BuiltScene& built, bool night);
