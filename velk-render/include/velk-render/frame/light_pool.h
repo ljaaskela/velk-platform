@@ -4324,6 +4324,11 @@ void velk_light_list_way(uint first, uvec3 corners, uint triangle, vec3 b, float
     // are traced while it moves; the lighting judges it again with what is traced.
     uint cell = velk_way_cell(pool, first, corners, way, false);
     uint deepest = way.piece;
+    vec3 deepest_at = way.at;
+    // Exact only by points a change made stale: the trace this frame may find them differing, and
+    // the lighting then reads the level under them, so that level's points are listed too where it
+    // is there already.
+    bool stale_exact = cell == 1u && velk_way_cell(pool, first, corners, way, true) == 0u;
     if (cell < 2u) velk_way_stop_at_coarse(way);
     bool on_piece = way.piece != VELK_PIECE_VERTICES;
     uint piece_first = on_piece ? velk_light_page(pool, way.piece) : 0u;
@@ -4357,6 +4362,18 @@ void velk_light_list_way(uint first, uvec3 corners, uint triangle, vec3 b, float
     if (way.piece != way.coarse) {
         for (uint k = 0u; k < 3u; ++k) {
             if (w[k] > 0.0) velk_light_list_piece_point(pool, way.piece, (words[k] - piece_first) / 2u, first, instance, frame, false);
+        }
+    }
+    if (stale_exact && deepest != way.piece && deepest != VELK_PIECE_VERTICES) {
+        uint deepest_first = velk_light_page(pool, deepest);
+        velk_light_piece_read(deepest_first, now);
+        uint under_words[3];
+        vec3 under_w;
+        velk_way_around(pool, first, corners, deepest, deepest_at, under_words, under_w);
+        for (uint k = 0u; k < 3u; ++k) {
+            if (under_w[k] > 0.0) {
+                velk_light_list_piece_point(pool, deepest, (under_words[k] - deepest_first) / 2u, first, instance, frame, false);
+            }
         }
     }
 
