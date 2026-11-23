@@ -1028,7 +1028,7 @@ void log_patch_stats(const MeshLod& lod, const vector<float>& positions, const v
     struct Totals
     {
         uint64_t triangles = 0, slivers = 0, patched = 0, slivers_patched = 0, roots_after = 0, poor = 0, poor_triangles = 0;
-        uint64_t patches = 0, two_triangle = 0, patched_half = 0, slivers_patched_half = 0;
+        uint64_t patches = 0, two_triangle = 0, patched_half = 0, slivers_patched_half = 0, two_narrow4 = 0, two_narrow16 = 0;
     } t;
     const auto pos = [&](uint32_t id, int k) { return positions[size_t(id) * 3 + k]; };
     for (const MeshLodCluster& cluster : lod.clusters) {
@@ -1125,37 +1125,63 @@ void log_patch_stats(const MeshLod& lod, const vector<float>& positions, const v
             const float ul = std::sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
             for (float& c : u) c /= ul;
             const float w[3] = {n0[1] * u[2] - n0[2] * u[1], n0[2] * u[0] - n0[0] * u[2], n0[0] * u[1] - n0[1] * u[0]};
-            double sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0, sum_area = 0;
-            size_t corners = 0;
+            // Its corners in its plane, each welded corner once, and their outline (monotone chain).
+            double sum_area = 0;
+            struct P2
+            {
+                double x, y;
+                uint32_t id;
+            };
+            vector<P2> pts;
             for (uint32_t tri : queue) {
                 sum_area += area[tri];
                 for (int v = 0; v < 3; ++v) {
                     const uint32_t vid = ids[tri * 3 + v];
-                    const double x = u[0] * pos(vid, 0) + u[1] * pos(vid, 1) + u[2] * pos(vid, 2);
-                    const double y = w[0] * pos(vid, 0) + w[1] * pos(vid, 1) + w[2] * pos(vid, 2);
-                    sx += x; sy += y; sxx += x * x; syy += y * y; sxy += x * y;
-                    ++corners;
+                    pts.push_back({u[0] * pos(vid, 0) + u[1] * pos(vid, 1) + u[2] * pos(vid, 2),
+                                   w[0] * pos(vid, 0) + w[1] * pos(vid, 1) + w[2] * pos(vid, 2), remap[vid]});
                 }
             }
-            const double mx = sx / corners, my = sy / corners;
-            const double cxx = sxx / corners - mx * mx, cyy = syy / corners - my * my, cxy = sxy / corners - mx * my;
-            const double angle = 0.5 * std::atan2(2.0 * cxy, cxx - cyy);
-            const double ax = std::cos(angle), ay = std::sin(angle);
-            double lo0 = DBL_MAX, hi0 = -DBL_MAX, lo1 = DBL_MAX, hi1 = -DBL_MAX;
-            for (uint32_t tri : queue) {
-                for (int v = 0; v < 3; ++v) {
-                    const uint32_t vid = ids[tri * 3 + v];
-                    const double x = u[0] * pos(vid, 0) + u[1] * pos(vid, 1) + u[2] * pos(vid, 2);
-                    const double y = w[0] * pos(vid, 0) + w[1] * pos(vid, 1) + w[2] * pos(vid, 2);
-                    const double p0 = x * ax + y * ay, p1 = -x * ay + y * ax;
+            std::sort(pts.begin(), pts.end(), [](const P2& a, const P2& b) { return a.id < b.id; });
+            pts.erase(std::unique(pts.begin(), pts.end(), [](const P2& a, const P2& b) { return a.id == b.id; }), pts.end());
+            std::sort(pts.begin(), pts.end(), [](const P2& a, const P2& b) { return a.x < b.x || (a.x == b.x && a.y < b.y); });
+            vector<P2> hull;
+            const auto turn = [](const P2& o, const P2& a, const P2& b) { return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x); };
+            for (int pass = 0; pass < 2; ++pass) {
+                const size_t start = hull.size();
+                for (size_t i = 0; i < pts.size(); ++i) {
+                    const P2& p = pass == 0 ? pts[i] : pts[pts.size() - 1 - i];
+                    while (hull.size() >= start + 2 && turn(hull[hull.size() - 2], hull.back(), p) <= 0) hull.pop_back();
+                    hull.push_back(p);
+                }
+                hull.pop_back();
+            }
+            // The smallest rectangle around it has a side along one of the outline's edges.
+            double best = DBL_MAX, l0 = 0, l1 = 0;
+            for (size_t e = 0; e < hull.size(); ++e) {
+                const P2& a = hull[e];
+                const P2& b = hull[(e + 1) % hull.size()];
+                const double len = std::sqrt((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y));
+                if (len <= 0) continue;
+                const double ax = (b.x - a.x) / len, ay = (b.y - a.y) / len;
+                double lo0 = DBL_MAX, hi0 = -DBL_MAX, lo1 = DBL_MAX, hi1 = -DBL_MAX;
+                for (const P2& p : hull) {
+                    const double p0 = p.x * ax + p.y * ay, p1 = -p.x * ay + p.y * ax;
                     lo0 = std::min(lo0, p0); hi0 = std::max(hi0, p0); lo1 = std::min(lo1, p1); hi1 = std::max(hi1, p1);
                 }
+                if ((hi0 - lo0) * (hi1 - lo1) < best) {
+                    best = (hi0 - lo0) * (hi1 - lo1);
+                    l0 = hi0 - lo0;
+                    l1 = hi1 - lo1;
+                }
             }
-            const double l0 = hi0 - lo0, l1 = hi1 - lo1;
             const double longer = std::max(l0, l1), shorter = std::max(std::min(l0, l1), 1e-9);
             const double fill = sum_area / std::max(l0 * l1, 1e-12);
             t.patches += 1;
-            if (queue.size() == 2) t.two_triangle += 1;
+            if (queue.size() == 2) {
+                t.two_triangle += 1;
+                if (longer > 4.0 * shorter) t.two_narrow4 += 1;
+                if (longer > 16.0 * shorter) t.two_narrow16 += 1;
+            }
             if (fill >= 0.5) {
                 t.patched_half += queue.size();
                 for (uint32_t tri : queue) t.slivers_patched_half += sliver[tri];
@@ -1166,7 +1192,7 @@ void log_patch_stats(const MeshLod& lod, const vector<float>& positions, const v
                 for (uint32_t tri : queue) patch_of[tri] = -2;  // stays per triangle
                 continue;
             }
-            t.roots_after += longer > 2.0 * shorter ? static_cast<uint64_t>(std::ceil(longer / shorter)) : 1u;
+            t.roots_after += 1u;
             for (uint32_t tri : queue) {
                 t.patched += 1;
                 t.slivers_patched += sliver[tri];
@@ -1176,10 +1202,11 @@ void log_patch_stats(const MeshLod& lod, const vector<float>& positions, const v
     t.roots_after += t.triangles - t.patched;
     // The same as numbers alone, for summing over meshes: triangles, long thin, patched at a fill
     // of 0.8 and of 0.5, the long thin of each, roots after, patches, two-triangle patches, poor.
-    VELK_LOG(I, "patch numbers: %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu", (unsigned long long)t.triangles,
+    VELK_LOG(I, "patch numbers: %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu", (unsigned long long)t.triangles,
              (unsigned long long)t.slivers, (unsigned long long)t.patched, (unsigned long long)t.patched_half,
              (unsigned long long)t.slivers_patched, (unsigned long long)t.slivers_patched_half, (unsigned long long)t.roots_after,
-             (unsigned long long)t.patches, (unsigned long long)t.two_triangle, (unsigned long long)t.poor);
+             (unsigned long long)t.patches, (unsigned long long)t.two_triangle, (unsigned long long)t.poor,
+             (unsigned long long)t.two_narrow4, (unsigned long long)t.two_narrow16);
     VELK_LOG(I, "patch stats: %llu triangles, %llu long thin; %llu in well filled patches (%llu of the long thin); roots %llu "
                 "-> %llu; %llu patches (%llu of two triangles), %llu filling their bounds poorly (%llu triangles)",
              (unsigned long long)t.triangles, (unsigned long long)t.slivers, (unsigned long long)t.patched,
