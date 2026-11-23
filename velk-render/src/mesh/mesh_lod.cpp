@@ -1016,51 +1016,52 @@ void build_rays(MeshLod& lod, const LodVertices& v, bool rays)
 
 namespace {
 
-// A development aid (VELK_PATCH_STATS): how many of a mesh's triangles flat patches would hold.
-// In each cluster, neighbouring triangles within 2 degrees of a seed's plane and within a
-// thousandth of the cluster's radius of it form a patch; a patch fills its bounds well when its
-// area is at least 0.8 of the rectangle along its main axis, and one more than twice as long as
-// wide counts as that many square tiles. Logs triangles, long thin ones (an edge over four times
-// the height to it), those in well filled patches, roots per triangle against roots per patch
-// tile, and patches that fill their bounds poorly.
-void log_patch_stats(const MeshLod& lod, const vector<float>& positions, const vector<uint32_t>& remap)
+/// Neighbouring triangles of a cluster in one plane, which share one light root.
+struct FoundPatch
 {
-    struct Totals
-    {
-        uint64_t triangles = 0, slivers = 0, patched = 0, slivers_patched = 0, roots_after = 0, poor = 0, poor_triangles = 0;
-        uint64_t patches = 0, two_triangle = 0, patched_half = 0, slivers_patched_half = 0, two_narrow4 = 0, two_narrow16 = 0;
-    } t;
+    vector<uint32_t> triangles;  ///< The cluster's, by index.
+    double area = 0;
+    /// The smallest rectangle around its outline, in the mesh's space: a corner, the unit
+    /// directions of its sides from there, the longer first, and their lengths. along x across
+    /// is the patch's normal.
+    float corner[3] = {};
+    float along[3] = {};
+    float across[3] = {};
+    float length = 0.f;
+    float width = 0.f;
+};
+
+/// The patches of two triangles or more in @p cluster: neighbouring triangles (sharing a welded
+/// edge) within 2 degrees of a seed's plane and within a thousandth of the cluster's radius of
+/// it, the largest triangles seeding first.
+void find_patches(const MeshLod& lod, const MeshLodCluster& cluster, const vector<float>& positions,
+                  const vector<uint32_t>& remap, vector<FoundPatch>& out)
+{
+    out.clear();
+    const uint32_t n = cluster.triangle_count;
+    if (n == 0) return;
+    const uint32_t* ids = lod.indices.data() + cluster.index_word;
     const auto pos = [&](uint32_t id, int k) { return positions[size_t(id) * 3 + k]; };
-    for (const MeshLodCluster& cluster : lod.clusters) {
-        const uint32_t n = cluster.triangle_count;
-        if (n == 0) continue;
-        const uint32_t* ids = lod.indices.data() + cluster.index_word;
-        vector<float> normal(size_t(n) * 3, 0.f);
-        vector<float> area(n, 0.f);
-        vector<uint8_t> sliver(n, 0);
-        for (uint32_t i = 0; i < n; ++i) {
-            float e[3][3];
-            float len[3];
-            for (int k = 0; k < 3; ++k) {
-                for (int c = 0; c < 3; ++c) e[k][c] = pos(ids[i * 3 + (k + 1) % 3], c) - pos(ids[i * 3 + k], c);
-                len[k] = std::sqrt(e[k][0] * e[k][0] + e[k][1] * e[k][1] + e[k][2] * e[k][2]);
-            }
-            const float cx = e[0][1] * e[2][2] - e[0][2] * e[2][1];
-            const float cy = e[0][2] * e[2][0] - e[0][0] * e[2][2];
-            const float cz = e[0][0] * e[2][1] - e[0][1] * e[2][0];
-            const float twice = std::sqrt(cx * cx + cy * cy + cz * cz);
-            area[i] = 0.5f * twice;
-            if (twice > 0.f) {
-                normal[i * 3] = -cx / twice;
-                normal[i * 3 + 1] = -cy / twice;
-                normal[i * 3 + 2] = -cz / twice;
-            }
-            const float longest = std::max(std::max(len[0], len[1]), len[2]);
-            const float height = longest > 0.f ? twice / longest : 0.f;
-            sliver[i] = height > 0.f && longest > 4.f * height ? 1 : 0;
-            t.triangles += 1;
-            t.slivers += sliver[i];
+    vector<float> normal(size_t(n) * 3, 0.f);
+    vector<float> area(n, 0.f);
+    for (uint32_t i = 0; i < n; ++i) {
+        float e[2][3];
+        for (int c = 0; c < 3; ++c) {
+            e[0][c] = pos(ids[i * 3 + 1], c) - pos(ids[i * 3], c);
+            e[1][c] = pos(ids[i * 3 + 2], c) - pos(ids[i * 3], c);
         }
+        const float cx = e[0][1] * e[1][2] - e[0][2] * e[1][1];
+        const float cy = e[0][2] * e[1][0] - e[0][0] * e[1][2];
+        const float cz = e[0][0] * e[1][1] - e[0][1] * e[1][0];
+        const float twice = std::sqrt(cx * cx + cy * cy + cz * cz);
+        area[i] = 0.5f * twice;
+        if (twice > 0.f) {
+            normal[i * 3] = cx / twice;
+            normal[i * 3 + 1] = cy / twice;
+            normal[i * 3 + 2] = cz / twice;
+        }
+    }
+    {
         // Edges by the welded ids of their ends, sorted, so that neighbours are found by search.
         struct Edge
         {
@@ -1156,26 +1157,152 @@ void log_patch_stats(const MeshLod& lod, const vector<float>& positions, const v
                 hull.pop_back();
             }
             // The smallest rectangle around it has a side along one of the outline's edges.
-            double best = DBL_MAX, l0 = 0, l1 = 0;
+            // In the plane's (u, w) coordinates: the rectangle's sides along a and b = a turned a
+            // quarter, from lo to hi along each.
+            double best = DBL_MAX, l0 = 0, l1 = 0, ax = 1, ay = 0, lo0 = 0, hi0 = 0, lo1 = 0;
             for (size_t e = 0; e < hull.size(); ++e) {
                 const P2& a = hull[e];
                 const P2& b = hull[(e + 1) % hull.size()];
                 const double len = std::sqrt((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y));
                 if (len <= 0) continue;
-                const double ax = (b.x - a.x) / len, ay = (b.y - a.y) / len;
-                double lo0 = DBL_MAX, hi0 = -DBL_MAX, lo1 = DBL_MAX, hi1 = -DBL_MAX;
+                const double ex = (b.x - a.x) / len, ey = (b.y - a.y) / len;
+                double elo0 = DBL_MAX, ehi0 = -DBL_MAX, elo1 = DBL_MAX, ehi1 = -DBL_MAX;
                 for (const P2& p : hull) {
-                    const double p0 = p.x * ax + p.y * ay, p1 = -p.x * ay + p.y * ax;
-                    lo0 = std::min(lo0, p0); hi0 = std::max(hi0, p0); lo1 = std::min(lo1, p1); hi1 = std::max(hi1, p1);
+                    const double p0 = p.x * ex + p.y * ey, p1 = -p.x * ey + p.y * ex;
+                    elo0 = std::min(elo0, p0); ehi0 = std::max(ehi0, p0); elo1 = std::min(elo1, p1); ehi1 = std::max(ehi1, p1);
                 }
-                if ((hi0 - lo0) * (hi1 - lo1) < best) {
-                    best = (hi0 - lo0) * (hi1 - lo1);
-                    l0 = hi0 - lo0;
-                    l1 = hi1 - lo1;
+                if ((ehi0 - elo0) * (ehi1 - elo1) < best) {
+                    best = (ehi0 - elo0) * (ehi1 - elo1);
+                    l0 = ehi0 - elo0;
+                    l1 = ehi1 - elo1;
+                    ax = ex;
+                    ay = ey;
+                    lo0 = elo0;
+                    hi0 = ehi0;
+                    lo1 = elo1;
                 }
             }
-            const double longer = std::max(l0, l1), shorter = std::max(std::min(l0, l1), 1e-9);
-            const double fill = sum_area / std::max(l0 * l1, 1e-12);
+            if (best == DBL_MAX) continue;
+            // The longer side first, turning the other a quarter back so that their cross
+            // product stays the normal.
+            double along2[2], across2[2], corner2[2];
+            FoundPatch& found = out.emplace_back();
+            if (l0 >= l1) {
+                along2[0] = ax; along2[1] = ay;
+                across2[0] = -ay; across2[1] = ax;
+                corner2[0] = lo0 * ax - lo1 * ay;
+                corner2[1] = lo0 * ay + lo1 * ax;
+                found.length = float(l0);
+                found.width = float(l1);
+            } else {
+                along2[0] = -ay; along2[1] = ax;
+                across2[0] = -ax; across2[1] = -ay;
+                corner2[0] = hi0 * ax - lo1 * ay;
+                corner2[1] = hi0 * ay + lo1 * ax;
+                found.length = float(l1);
+                found.width = float(l0);
+            }
+            for (int c = 0; c < 3; ++c) {
+                found.corner[c] = float(corner2[0] * u[c] + corner2[1] * w[c] + d0 * n0[c]);
+                found.along[c] = float(along2[0] * u[c] + along2[1] * w[c]);
+                found.across[c] = float(across2[0] * u[c] + across2[1] * w[c]);
+            }
+            found.triangles = queue;
+            found.area = sum_area;
+        }
+    }
+}
+
+/// Gives each cluster of @p lod with patches (find_patches) its patch data (VELK_LOD_PATCH) in
+/// MeshLod::patch_words: the patches are the first light roots, in order, and each triangle in
+/// none has one of its own after them. A patch's square is over its rectangle's longer side,
+/// centred across the shorter.
+void build_patches(MeshLod& lod, const vector<float>& positions, const vector<uint32_t>& remap)
+{
+    vector<FoundPatch> found;
+    vector<uint32_t> slot;
+    for (MeshLodCluster& cluster : lod.clusters) {
+        const uint32_t n = cluster.triangle_count;
+        if (n == 0 || n > 256u) continue;
+        find_patches(lod, cluster, positions, remap, found);
+        if (found.empty()) continue;
+        const auto patches = static_cast<uint32_t>(found.size());
+        constexpr uint32_t kNone = 0xFFFFFFFFu;
+        slot.assign(size_t(n), kNone);
+        for (uint32_t p = 0; p < patches; ++p) {
+            for (uint32_t tri : found[p].triangles) slot[tri] = p;
+        }
+        const auto word = static_cast<uint32_t>(lod.patch_words.size());
+        lod.patch_words.resize(size_t(word) + kLodPatchBases + size_t(patches) * kLodPatchBasisWords, 0u);
+        uint32_t* data = lod.patch_words.data() + word;
+        uint32_t roots = patches;
+        for (uint32_t tri = 0; tri < n; ++tri) {
+            if (slot[tri] == kNone) {
+                const uint32_t k = roots - patches;
+                data[kLodPatchTriangles + k / 4u] |= tri << (8u * (k % 4u));
+                slot[tri] = roots++;
+            }
+            data[kLodPatchSlots + tri / 4u] |= slot[tri] << (8u * (tri % 4u));
+        }
+        for (uint32_t p = 0; p < patches; ++p) {
+            const FoundPatch& f = found[p];
+            float* basis = reinterpret_cast<float*>(data + kLodPatchBases + p * kLodPatchBasisWords);
+            const float side = f.length;
+            const float shift = 0.5f * (f.length - f.width);
+            for (int c = 0; c < 3; ++c) {
+                basis[kLodPatchBasisOrigin + c] = f.corner[c] - shift * f.across[c];
+                basis[kLodPatchBasisU + c] = f.along[c];
+                basis[kLodPatchBasisV + c] = f.across[c];
+            }
+            basis[kLodPatchBasisSide] = side;
+        }
+        cluster.patch_word = word;
+        cluster.patch_counts = patches | (roots << 16u);
+    }
+}
+
+// A development aid (VELK_PATCH_STATS): how many of a mesh's triangles flat patches would hold
+// (find_patches). A patch fills its bounds well when its area is at least 0.8 of the smallest
+// rectangle around it. Logs triangles, long thin ones (an edge over four times the height to
+// it), those in well filled patches, roots per triangle against roots per patch, and patches
+// that fill their bounds poorly.
+void log_patch_stats(const MeshLod& lod, const vector<float>& positions, const vector<uint32_t>& remap)
+{
+    struct Totals
+    {
+        uint64_t triangles = 0, slivers = 0, patched = 0, slivers_patched = 0, roots_after = 0, poor = 0, poor_triangles = 0;
+        uint64_t patches = 0, two_triangle = 0, patched_half = 0, slivers_patched_half = 0, two_narrow4 = 0, two_narrow16 = 0;
+    } t;
+    const auto pos = [&](uint32_t id, int k) { return positions[size_t(id) * 3 + k]; };
+    vector<FoundPatch> found;
+    vector<uint8_t> sliver;
+    for (const MeshLodCluster& cluster : lod.clusters) {
+        const uint32_t n = cluster.triangle_count;
+        if (n == 0) continue;
+        const uint32_t* ids = lod.indices.data() + cluster.index_word;
+        sliver.assign(n, 0);
+        for (uint32_t i = 0; i < n; ++i) {
+            float e[3][3];
+            float len[3];
+            for (int k = 0; k < 3; ++k) {
+                for (int c = 0; c < 3; ++c) e[k][c] = pos(ids[i * 3 + (k + 1) % 3], c) - pos(ids[i * 3 + k], c);
+                len[k] = std::sqrt(e[k][0] * e[k][0] + e[k][1] * e[k][1] + e[k][2] * e[k][2]);
+            }
+            const float cx = e[0][1] * e[2][2] - e[0][2] * e[2][1];
+            const float cy = e[0][2] * e[2][0] - e[0][0] * e[2][2];
+            const float cz = e[0][0] * e[2][1] - e[0][1] * e[2][0];
+            const float twice = std::sqrt(cx * cx + cy * cy + cz * cz);
+            const float longest = std::max(std::max(len[0], len[1]), len[2]);
+            const float height = longest > 0.f ? twice / longest : 0.f;
+            sliver[i] = height > 0.f && longest > 4.f * height ? 1 : 0;
+            t.triangles += 1;
+            t.slivers += sliver[i];
+        }
+        find_patches(lod, cluster, positions, remap, found);
+        for (const FoundPatch& patch : found) {
+            const vector<uint32_t>& queue = patch.triangles;
+            const double longer = patch.length, shorter = std::max(double(patch.width), 1e-9);
+            const double fill = patch.area / std::max(double(patch.length) * patch.width, 1e-12);
             t.patches += 1;
             if (queue.size() == 2) {
                 t.two_triangle += 1;
@@ -1189,7 +1316,6 @@ void log_patch_stats(const MeshLod& lod, const vector<float>& positions, const v
             if (fill < 0.8) {
                 t.poor += 1;
                 t.poor_triangles += queue.size();
-                for (uint32_t tri : queue) patch_of[tri] = -2;  // stays per triangle
                 continue;
             }
             t.roots_after += 1u;
@@ -1425,6 +1551,7 @@ MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, const flo
     }
     LodTreeBuilder{lod}.build();
     if (!deforming && std::getenv("VELK_PATCH_STATS")) log_patch_stats(lod, positions, remap);
+    if (!deforming && std::getenv("VELK_FLAT_PATCHES")) build_patches(lod, positions, remap);
     if (vertices && !deforming) {
         own_vertices(lod, lod_vertices, lod_vertices.bytes.empty() ? vertices : lod_vertices.bytes.data(), uv1, colors);
     }

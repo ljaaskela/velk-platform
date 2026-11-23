@@ -174,6 +174,7 @@ static_assert(2u * kLightPiecePoints == kLightPieceChildren, "a piece's points e
 static_assert(kLightPieceRead + 1u == kLightPageWords, "a piece is one page");
 /// The deepest a piece may be, its root at 0; its place in its triangle holds 13 bits each way.
 inline constexpr uint32_t kLightPieceDeepest = 12;
+static_assert(kLightPieceDeepest <= 12u, "a flat patch's piece holds its cell's i in 12 bits (VELK_PIECE_PLACE_PATCH)");
 /// A piece's READ word has this once a pixel asked for its children in the frame it holds.
 inline constexpr uint32_t kLightPieceAsked = 0x10000000u;
 /// A level of a triangle's light is split, wherever its light is, as long as the next level's
@@ -681,6 +682,59 @@ uint velk_light_root_word(uint pool, uint first, uint t)
     return velk_light_word(pool, first, VELK_PAGE_ROOTS + t);
 }
 
+// Flat patches (VELK_LOD_PATCH): a pieced record's root words are by light root slot. A cluster's
+// patches are its first slots, and each triangle in none has one of its own after them; without
+// patches a triangle's slot is its own index.
+
+// The patches and the light roots of the cluster at word `cluster` of its table: 0 for none.
+uint velk_patch_counts(uint cluster)
+{
+    return VELK_LIGHT_WORDS.data[cluster + VELK_LOD_CLUSTER_PATCH_COUNTS];
+}
+
+// Byte `k` of the cluster's patch data from its word `at` on.
+uint velk_patch_byte(uint cluster, uint at, uint k)
+{
+    uint word = VELK_LIGHT_WORDS.data[cluster + VELK_LOD_CLUSTER_PATCHES] + at + k / 4u;
+    return (velk_mesh_words.data[word] >> (8u * (k % 4u))) & 255u;
+}
+
+// The light root slot of triangle `t` of the cluster.
+uint velk_patch_slot(uint cluster, uint t)
+{
+    return velk_patch_counts(cluster) == 0u ? t : velk_patch_byte(cluster, VELK_LOD_PATCH_SLOTS, t);
+}
+
+// Whether light root slot `slot` of the cluster is a patch.
+bool velk_patch_is(uint cluster, uint slot)
+{
+    return slot < (velk_patch_counts(cluster) & 0xFFFFu);
+}
+
+// The triangle of light root slot `slot` of the cluster; VELK_LIGHT_NONE for a patch's.
+uint velk_patch_triangle(uint cluster, uint slot)
+{
+    uint patches = velk_patch_counts(cluster) & 0xFFFFu;
+    if (patches == 0u) return slot;
+    return slot < patches ? VELK_LIGHT_NONE : velk_patch_byte(cluster, VELK_LOD_PATCH_TRIANGLES, slot - patches);
+}
+
+// The basis of patch `slot` of the cluster, in its mesh's space: its square is origin + u x + v y
+// for x and y from 0 to `side`.
+void velk_patch_basis(uint cluster, uint slot, out vec3 origin, out vec3 u, out vec3 v, out float side)
+{
+    uint w = VELK_LIGHT_WORDS.data[cluster + VELK_LOD_CLUSTER_PATCHES] + VELK_LOD_PATCH_BASES + slot * VELK_LOD_PATCH_BASIS_WORDS;
+    vec3 f[3];
+    for (uint k = 0u; k < 3u; ++k) {
+        f[k] = vec3(uintBitsToFloat(velk_mesh_words.data[w + 3u * k]), uintBitsToFloat(velk_mesh_words.data[w + 3u * k + 1u]),
+                    uintBitsToFloat(velk_mesh_words.data[w + 3u * k + 2u]));
+    }
+    origin = f[0];
+    u = f[1];
+    v = f[2];
+    side = uintBitsToFloat(velk_mesh_words.data[w + VELK_LOD_PATCH_BASIS_SIDE]);
+}
+
 // Whether page `page` is a piece, as the pool's piece bits say.
 bool velk_light_is_piece(uint pool, uint page)
 {
@@ -754,7 +808,26 @@ uvec2 velk_piece_place(uint q)
 // where light differed rather than to bring the levels to the light spacing, which alone may be
 // joined back into its parent (light_pieces_src). A root, at depth 0, is at (0, 0) and keeps its
 // grid's level in bits 0 to 2 instead (velk_piece_root_place).
+//
+// A piece of a flat patch (VELK_PIECE_PLACE_PATCH, bit 12) is a square cell of its patch's square
+// instead: at depth `depth` the square is 2^depth cells along each side, the cell at (i, j), i in
+// bits 0 to 11, its grid VELK_PATCH_LEVEL steps along each side, its points row by row in j
+// (velk_patch_point). Its children are its quarters, at (2i + (k & 1), 2j + (k >> 1)) for child k.
 #define VELK_PIECE_PLACE_EDGE 0x80000000u
+#define VELK_PIECE_PLACE_PATCH 0x1000u
+#define VELK_PATCH_LEVEL 4u
+#define VELK_PATCH_POINTS 25u
+
+bool velk_piece_is_patch(uint place)
+{
+    return (place & VELK_PIECE_PLACE_PATCH) != 0u;
+}
+
+// Point (a, b) of a patch piece's grid.
+uint velk_patch_point(uint a, uint b)
+{
+    return b * (VELK_PATCH_LEVEL + 1u) + a;
+}
 uint velk_piece_place_word(uint depth, uint i, uint j, bool turned)
 {
     return (i & 8191u) | ((j & 8191u) << 13u) | (turned ? (1u << 26u) : 0u) | (depth << 27u);
@@ -774,13 +847,37 @@ uint velk_piece_depth(uint place)
 // The level of the grid of the piece at `place`: its own for a root, VELK_PIECE_LEVEL below.
 uint velk_piece_level(uint place)
 {
+    if (velk_piece_is_patch(place)) return VELK_PATCH_LEVEL;
     return velk_piece_depth(place) == 0u ? clamp(place & 7u, 2u, VELK_PIECE_LEVEL) : VELK_PIECE_LEVEL;
 }
 
 // (i, j) of the piece at `place`; a root's is (0, 0).
 uvec2 velk_piece_ij(uint place)
 {
-    return velk_piece_depth(place) == 0u ? uvec2(0u, 0u) : uvec2(place & 8191u, (place >> 13u) & 8191u);
+    return velk_piece_depth(place) == 0u ? uvec2(0u, 0u) : uvec2(place & 4095u, (place >> 13u) & 8191u);
+}
+
+// The place of a patch's root.
+uint velk_patch_root_place()
+{
+    return VELK_PIECE_PLACE_PATCH;
+}
+
+// The place of child `k` of the patch piece at `place`: its quarter at (k & 1, k >> 1).
+uint velk_patch_child_place(uint place, uint k)
+{
+    uvec2 ij = velk_piece_ij(place);
+    return velk_piece_place_word(velk_piece_depth(place) + 1u, 2u * ij.x + (k & 1u), 2u * ij.y + (k >> 1u), false)
+         | VELK_PIECE_PLACE_PATCH;
+}
+
+// Where point (a, b) of the grid of the patch piece at `place` is in its patch's square, from 0 to
+// 1 along each side.
+vec2 velk_patch_at(uint place, uvec2 ab)
+{
+    uvec2 ij = velk_piece_ij(place);
+    float cells = exp2(float(velk_piece_depth(place)));
+    return (vec2(ij) + vec2(ab) / float(VELK_PATCH_LEVEL)) / cells;
 }
 
 // The corners of the piece at `place`, as steps of its depth (velk_piece_place_word).
@@ -859,10 +956,11 @@ uint velk_piece_point_of(uint place, ivec2 x)
 
 // How far apart on screen, in pixels, the points of a piece at `depth` are, in a triangle whose
 // longest edge is `tri_px` pixels long where the pixel is and whose root's grid is of level
-// `root_level`.
-float velk_piece_spacing(uint depth, uint root_level, float tri_px)
+// `root_level`; of a patch's piece (`patch`), in a patch whose side is `tri_px` pixels long.
+float velk_piece_spacing(bool is_patch, uint depth, uint root_level, float tri_px)
 {
-    return tri_px / (float(depth == 0u ? root_level : VELK_PIECE_LEVEL) * exp2(float(depth)));
+    uint n = is_patch ? VELK_PATCH_LEVEL : depth == 0u ? root_level : VELK_PIECE_LEVEL;
+    return tri_px / (float(n) * exp2(float(depth)));
 }
 
 // The level of a root's grid for a triangle whose longest edge is `tri_px` pixels long, its points
@@ -904,6 +1002,21 @@ uint velk_piece_step(inout vec3 l)
     return k;
 }
 
+// Which quarter of a patch's piece the place `l` in it ((x, y, 0), from 0 to 1 along each side)
+// is in, as velk_patch_child_place numbers them; `l` becomes the place in that quarter.
+uint velk_patch_step(inout vec3 l)
+{
+    uint k = (l.x >= 0.5 ? 1u : 0u) | (l.y >= 0.5 ? 2u : 0u);
+    l = vec3(clamp(2.0 * l.xy - vec2(float(k & 1u), float(k >> 1u)), 0.0, 1.0), 0.0);
+    return k;
+}
+
+// velk_piece_step, or velk_patch_step for a patch's pieces.
+uint velk_way_step(bool is_patch, inout vec3 l)
+{
+    return is_patch ? velk_patch_step(l) : velk_piece_step(l);
+}
+
 // A pixel's way down its triangle's levels of light (velk_piece_way): the triangle's vertex points
 // (VELK_PIECE_VERTICES), then its root piece and the pieces under it. The level it reads, the one
 // above that and its coarse level, each with the pixel's weights in it.
@@ -919,12 +1032,59 @@ struct VelkPieceWay {
     uint coarse_depth;    // times the light spacing apart, the vertex points when none is
     vec3 coarse_at;
     float coarse_spacing;
+    bool is_patch;        // its pieces are a flat patch's, `at` of them (x, y, 0) in their square
 };
+
+// Where a pixel or hit is among its record's light roots (velk_light_root_of).
+struct VelkLightRoot {
+    uint slot;    // its root word's, VELK_LIGHT_NONE when its record has no pieces for its triangle
+    bool is_patch; // the slot is a flat patch's
+    vec3 at;      // where it is in the root: its triangle's weights, or (x, y, 0) in its patch's square
+    float size;   // the root's size in world units: its triangle's longest edge, or its patch's side
+};
+
+// Where a pixel or hit at weights `b` of triangle `t` (corners `corners`, its longest edge
+// `tri_size` world units) of the record whose first page starts at `first` is among the record's
+// light roots. `to_world` takes a vector of the mesh's space to the world, for a patch's side.
+VelkLightRoot velk_light_root_of(uint first, uint t, uvec3 corners, vec3 b, float tri_size, mat3 to_world)
+{
+    VelkLightRoot r;
+    r.slot = VELK_LIGHT_NONE;
+    r.is_patch = false;
+    r.at = b;
+    r.size = tri_size;
+    uint pieced = velk_light_pieced(first);
+    if (pieced == 0u) return r;
+    uint cluster = VELK_LIGHT_WORDS.data[first + VELK_PAGE_CLUSTER];
+    if (t >= VELK_LIGHT_WORDS.data[cluster + VELK_LOD_CLUSTER_TRIANGLES]) return r;
+    uint slot = velk_patch_slot(cluster, t);
+    if (slot >= pieced) return r;
+    r.slot = slot;
+    if (!velk_patch_is(cluster, slot)) return r;
+    vec3 origin;
+    vec3 u;
+    vec3 v;
+    float side;
+    velk_patch_basis(cluster, slot, origin, u, v, side);
+    uint vertex_word = VELK_LIGHT_WORDS.data[cluster + VELK_LOD_CLUSTER_VERTEX];
+    vec3 local = vec3(0.0);
+    for (uint k = 0u; k < 3u; ++k) {
+        uint vw = vertex_word + corners[k] * VELK_VERTEX3D_WORDS;
+        local += b[k] * vec3(uintBitsToFloat(velk_mesh_words.data[vw]), uintBitsToFloat(velk_mesh_words.data[vw + 1u]),
+                             uintBitsToFloat(velk_mesh_words.data[vw + 2u]));
+    }
+    vec2 xy = vec2(dot(local - origin, u), dot(local - origin, v)) / max(side, 1e-12);
+    r.is_patch = true;
+    r.at = vec3(clamp(xy, 0.0, 1.0), 0.0);
+    r.size = side * max(length(to_world * u), length(to_world * v));
+    return r;
+}
 
 // The way down for a pixel at weights `b` of its triangle, whose longest edge is `tri_px` pixels
 // long there and whose root piece is `root` (none at or past the pool's pages), to points at most
-// `light_pixels` apart.
-VelkPieceWay velk_piece_way(uint pool, uint root, vec3 b, float tri_px, float light_pixels)
+// `light_pixels` apart. Under the triangle's vertex points the root is at `r` (velk_light_root_of),
+// `root_px` pixels across.
+VelkPieceWay velk_piece_way(uint pool, uint root, vec3 b, float tri_px, VelkLightRoot r, float root_px, float light_pixels)
 {
     uint pages = VELK_LIGHT_WORDS.data[pool + VELK_POOL_PAGES];
     VelkPieceWay w;
@@ -939,11 +1099,13 @@ VelkPieceWay velk_piece_way(uint pool, uint root, vec3 b, float tri_px, float li
     w.coarse_depth = 0u;
     w.coarse_at = b;
     w.coarse_spacing = tri_px;
+    w.is_patch = r.is_patch;
     if (root >= pages || tri_px <= light_pixels) return w;
     w.root_level = velk_piece_level(VELK_LIGHT_WORDS.data[velk_light_page(pool, root) + VELK_PIECE_PLACE]);
     w.parent = VELK_PIECE_VERTICES;
     w.piece = root;
-    w.spacing = velk_piece_spacing(0u, w.root_level, tri_px);
+    w.at = r.at;
+    w.spacing = velk_piece_spacing(w.is_patch, 0u, w.root_level, root_px);
     for (uint step = 0u; step <= VELK_PIECE_DEEPEST; ++step) {
         if (w.spacing >= VELK_LIGHT_COARSE_PIECES * light_pixels) {
             w.coarse = w.piece;
@@ -953,7 +1115,7 @@ VelkPieceWay velk_piece_way(uint pool, uint root, vec3 b, float tri_px, float li
         }
         if (w.spacing <= light_pixels || w.depth >= VELK_PIECE_DEEPEST) break;
         vec3 l = w.at;
-        uint k = velk_piece_step(l);
+        uint k = velk_way_step(w.is_patch, l);
         uint child = VELK_LIGHT_WORDS.data[velk_light_page(pool, w.piece) + VELK_PIECE_CHILDREN + k];
         if (child >= pages) break;
         w.parent = w.piece;
@@ -961,7 +1123,7 @@ VelkPieceWay velk_piece_way(uint pool, uint root, vec3 b, float tri_px, float li
         w.piece = child;
         w.at = l;
         ++w.depth;
-        w.spacing = velk_piece_spacing(w.depth, w.root_level, tri_px);
+        w.spacing = velk_piece_spacing(w.is_patch, w.depth, w.root_level, root_px);
     }
     return w;
 }
@@ -998,13 +1160,41 @@ void velk_light_around(uint n, vec3 w, out uvec2 places[3], out vec3 weights)
     }
 }
 
+// The grid places of the three points of light around place `l` ((x, y, 0), 0 to 1 along each
+// side) of a patch's piece, and their weights: each square of its grid is two triangles, split
+// along the diagonal from its (1, 0) corner to its (0, 1) corner, the same in its quarters.
+void velk_patch_around(vec3 l, out uvec2 places[3], out vec3 weights)
+{
+    float n = float(VELK_PATCH_LEVEL);
+    vec2 a = clamp(l.xy, 0.0, 1.0) * n;
+    uvec2 ij = min(uvec2(a), uvec2(VELK_PATCH_LEVEL - 1u));
+    vec2 f = clamp(a - vec2(ij), 0.0, 1.0);
+    if (f.x + f.y > 1.0) {
+        places[0] = ij + uvec2(1u, 1u);
+        places[1] = ij + uvec2(0u, 1u);
+        places[2] = ij + uvec2(1u, 0u);
+        weights = vec3(f.x + f.y - 1.0, 1.0 - f.x, 1.0 - f.y);
+    } else {
+        places[0] = ij;
+        places[1] = ij + uvec2(1u, 0u);
+        places[2] = ij + uvec2(0u, 1u);
+        weights = vec3(1.0 - f.x - f.y, f.x, f.y);
+    }
+}
+
 // The three points of the piece at page `page` around weights `l` of it, as words of the pool,
-// and their weights.
+// and their weights; for a patch's piece, around place `l` in it.
 void velk_piece_around(uint pool, uint page, vec3 l, out uint words[3], out vec3 weights)
 {
     uvec2 places[3];
     uint first = velk_light_page(pool, page);
-    velk_light_around(velk_piece_level(VELK_LIGHT_WORDS.data[first + VELK_PIECE_PLACE]), l, places, weights);
+    uint place = VELK_LIGHT_WORDS.data[first + VELK_PIECE_PLACE];
+    if (velk_piece_is_patch(place)) {
+        velk_patch_around(l, places, weights);
+        for (uint k = 0u; k < 3u; ++k) words[k] = first + 2u * velk_patch_point(places[k].x, places[k].y);
+        return;
+    }
+    velk_light_around(velk_piece_level(place), l, places, weights);
     for (uint k = 0u; k < 3u; ++k) words[k] = first + 2u * velk_piece_point(places[k].x, places[k].y);
 }
 
@@ -1077,15 +1267,20 @@ uint velk_way_cell(uint pool, uint first, uvec3 corners, VelkPieceWay way, bool 
     if (!same || shade != (shade & 0x11111111u) * 15u) return 2u;
     if (fresh || !stale || way.coarse == VELK_PIECE_VERTICES) return 1u;
     uint at = velk_light_page(pool, way.coarse);
-    uint n = velk_piece_level(VELK_LIGHT_WORDS.data[at + VELK_PIECE_PLACE]);
+    uint place = VELK_LIGHT_WORDS.data[at + VELK_PIECE_PLACE];
+    bool is_patch = velk_piece_is_patch(place);
+    uint n = velk_piece_level(place);
     uvec2 places[3];
-    velk_light_around(n, way.coarse_at, places, w);
+    if (is_patch) velk_patch_around(way.coarse_at, places, w);
+    else velk_light_around(n, way.coarse_at, places, w);
+    // A grid point's neighbours, in either grid's triangles.
     const ivec2 kAround[6] = ivec2[6](ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1), ivec2(1, -1), ivec2(-1, 1));
     for (uint k = 0u; k < 3u; ++k) {
         for (uint a = 0u; a < 6u; ++a) {
             ivec2 q = ivec2(places[k]) + kAround[a];
-            if (q.x < 0 || q.y < 0 || q.x + q.y > int(n)) continue;
-            uint s = VELK_LIGHT_WORDS.data[at + 2u * velk_piece_point(uint(q.x), uint(q.y))];
+            if (q.x < 0 || q.y < 0 || (is_patch ? max(q.x, q.y) > int(n) : q.x + q.y > int(n))) continue;
+            uint p = is_patch ? velk_patch_point(uint(q.x), uint(q.y)) : velk_piece_point(uint(q.x), uint(q.y));
+            uint s = VELK_LIGHT_WORDS.data[at + 2u * p];
             if (s != VELK_LIGHT_NONE && s != shade) return 2u;
         }
     }
@@ -1531,24 +1726,26 @@ bool velk_way_fresh(uint pool, uint first, uvec3 corners, uint page, vec3 l)
 // show through: its coarse level, then the one above it, then it. A hit, which has no size on
 // screen, reads the deepest level down its triangle's pieces whose points around it are all
 // traced and fresh (velk_way_fresh), over the record's coarse light; a hit whose triangle is not
-// known, its triangle's corners.
+// known, its triangle's corners. A triangle in a flat patch reads its patch's pieces instead of
+// its own (velk_light_root_of); `to_world` takes a vector of its mesh's space to the world.
 bool velk_light_add_points(uint pool, uint first, uint t, uvec3 corners, vec3 b, vec3 at, float px_per_world,
-                           float tri_size, inout uint lights[VELK_LIGHT_SLOTS], inout vec2 sums[VELK_LIGHT_SLOTS])
+                           float tri_size, mat3 to_world, inout uint lights[VELK_LIGHT_SLOTS], inout vec2 sums[VELK_LIGHT_SLOTS])
 {
     bool traced = false;
-    if (px_per_world <= 0.0 && t < velk_light_pieced(first)) {
+    VelkLightRoot r = velk_light_root_of(first, t, corners, b, tri_size, to_world);
+    if (px_per_world <= 0.0 && r.slot != VELK_LIGHT_NONE) {
         uint pages = VELK_LIGHT_WORDS.data[pool + VELK_POOL_PAGES];
         uint best = VELK_PIECE_VERTICES;
         vec3 best_at = b;
-        uint page = VELK_LIGHT_WORDS.data[velk_light_root_word(pool, first, t)];
-        vec3 l = b;
+        uint page = VELK_LIGHT_WORDS.data[velk_light_root_word(pool, first, r.slot)];
+        vec3 l = r.at;
         for (uint depth = 0u; depth <= VELK_PIECE_DEEPEST && page < pages; ++depth) {
             if (velk_way_fresh(pool, first, corners, page, l)) {
                 best = page;
                 best_at = l;
             }
             vec3 down = l;
-            uint k = velk_piece_step(down);
+            uint k = velk_way_step(r.is_patch, down);
             page = VELK_LIGHT_WORDS.data[velk_light_page(pool, page) + VELK_PIECE_CHILDREN + k];
             l = down;
         }
@@ -1564,10 +1761,10 @@ bool velk_light_add_points(uint pool, uint first, uint t, uvec3 corners, vec3 b,
         }
         return true;
     }
-    if (px_per_world > 0.0 && t < velk_light_pieced(first)) {
-        uint root = VELK_LIGHT_WORDS.data[velk_light_root_word(pool, first, t)];
+    if (px_per_world > 0.0 && r.slot != VELK_LIGHT_NONE) {
+        uint root = VELK_LIGHT_WORDS.data[velk_light_root_word(pool, first, r.slot)];
         float tri_px = tri_size * px_per_world;
-        VelkPieceWay way = velk_piece_way(pool, root, b, tri_px, VELK_LIGHT_PIXELS);
+        VelkPieceWay way = velk_piece_way(pool, root, b, tri_px, r, r.size * px_per_world, VELK_LIGHT_PIXELS);
         if (velk_way_cell(pool, first, corners, way, true) == 1u) velk_way_stop_at_coarse(way);
         uint coarse = VELK_LIGHT_WORDS.data[first + VELK_PAGE_COARSE];
         bool coarse_known = coarse >= VELK_LIGHT_ONE_VALUE && coarse < VELK_LIGHT_PENDING && (coarse & VELK_LIGHT_ONE_TRACED) != 0u;
@@ -1723,7 +1920,9 @@ bool velk_light_direct(uint pool, uvec2 ids, vec3 b, vec3 at, float tri_size, fl
             uvec3 corners = uvec3(velk_mesh_words.data[word], velk_mesh_words.data[word + 1u], velk_mesh_words.data[word + 2u]);
             mat4 vp = g.view_projection;
             float px_per_world = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * g.viewport.y * 0.5 / max(length(at), 1e-4);
-            if (!velk_light_add_points(pool, first, velk_ids_triangle(d, ids), corners, b, at, px_per_world, tri_size, lights, sums)) {
+            mat3 to_world = mat3(velk_sized_world(inst.world_matrix, inst.offset.xyz, inst.size.xyz));
+            if (!velk_light_add_points(pool, first, velk_ids_triangle(d, ids), corners, b, at, px_per_world, tri_size, to_world,
+                                       lights, sums)) {
                 return false;
             }
         }
@@ -1751,15 +1950,18 @@ void velk_light_explain(uint pool, uvec2 ids, vec3 b, vec3 at, float tri_size, o
     e[VELK_LIGHT_EXPLAIN_TRIANGLE] = t;
     e[VELK_LIGHT_EXPLAIN_PIECED] = velk_light_pieced(first);
     e[VELK_LIGHT_EXPLAIN_COARSE] = VELK_LIGHT_WORDS.data[first + VELK_PAGE_COARSE];
-    if (t >= velk_light_pieced(first)) return;
     uint word = d.index_base + velk_cluster_first_index(cluster) + t * 3u;
     uvec3 corners = uvec3(velk_mesh_words.data[word], velk_mesh_words.data[word + 1u], velk_mesh_words.data[word + 2u]);
+    ElementInstance inst = velk_instances.data[d.instances_base + velk_ids_slot(d, ids)];
+    VelkLightRoot r = velk_light_root_of(first, t, corners, b, tri_size,
+                                         mat3(velk_sized_world(inst.world_matrix, inst.offset.xyz, inst.size.xyz)));
+    if (r.slot == VELK_LIGHT_NONE) return;
     GlobalData g = velk_globals.data[d.globals_base];
     mat4 vp = g.view_projection;
     float px_per_world = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * g.viewport.y * 0.5 / max(length(at), 1e-4);
-    uint root = VELK_LIGHT_WORDS.data[velk_light_root_word(pool, first, t)];
+    uint root = VELK_LIGHT_WORDS.data[velk_light_root_word(pool, first, r.slot)];
     e[VELK_LIGHT_EXPLAIN_ROOT] = root;
-    VelkPieceWay way = velk_piece_way(pool, root, b, tri_size * px_per_world, VELK_LIGHT_PIXELS);
+    VelkPieceWay way = velk_piece_way(pool, root, b, tri_size * px_per_world, r, r.size * px_per_world, VELK_LIGHT_PIXELS);
     uint cell = velk_way_cell(pool, first, corners, way, true);
     e[VELK_LIGHT_EXPLAIN_DEEPEST] = way.piece == VELK_PIECE_VERTICES ? VELK_LIGHT_NONE : way.depth;
     if (cell == 1u) velk_way_stop_at_coarse(way);
@@ -1788,7 +1990,6 @@ void velk_light_explain(uint pool, uvec2 ids, vec3 b, vec3 at, float tri_size, o
     }
     e[VELK_LIGHT_EXPLAIN_FRAME] = VELK_LIGHT_WORDS.data[pool + VELK_POOL_FRAME] & VELK_PIECE_FRAME_BITS;
     // Its corners and the pixel in the world, and the way its first light shines.
-    ElementInstance inst = velk_instances.data[d.instances_base + velk_ids_slot(d, ids)];
     for (uint k = 0u; k < 3u; ++k) {
         uint v = velk_cluster_vertex_word(d, cluster) + corners[k] * VELK_VERTEX3D_WORDS;
         vec3 local = vec3(uintBitsToFloat(velk_mesh_words.data[v]), uintBitsToFloat(velk_mesh_words.data[v + 1u]),
@@ -1976,6 +2177,10 @@ struct VelkPointPlace
     vec3 step_a;
     vec3 step_b;
     vec2 start;
+    // A flat patch's point instead (`patch`): `b` is where it is in its mesh's space, `step_a`
+    // and `step_b` its grid's steps there, and `normal` the patch's.
+    bool is_patch;
+    vec3 normal;
 };
 
 // The place of `at` at its trace `trace`, relative to the camera, its normal, and how far off its
@@ -1993,6 +2198,13 @@ void velk_point_place(VelkPointPlace at, uint trace, out vec3 p, out vec3 n, out
                      uintBitsToFloat(velk_mesh_words.data[vw + 2u]));
         normal = vec3(uintBitsToFloat(velk_mesh_words.data[vw + 3u]), uintBitsToFloat(velk_mesh_words.data[vw + 4u]),
                       uintBitsToFloat(velk_mesh_words.data[vw + 5u]));
+    } else if (at.is_patch) {
+        local = at.b;
+        if (at.around && trace > 0u) {
+            vec2 r = fract(at.start + float(trace) * vec2(0.7548777, 0.5698403)) - 0.5;
+            local += r.x * at.step_a + r.y * at.step_b;
+        }
+        normal = at.normal;
     } else {
         vec3 b = at.b;
         if (at.around && trace > 0u) {
@@ -2143,9 +2355,9 @@ void velk_points_trace_point(uint pool, uint i, uint frame, uint counts[4], uint
     uint q = VELK_LIGHT_WORDS.data[w + VELK_POINT_ENTRY_POINT];
     uint instance = VELK_LIGHT_WORDS.data[w + VELK_POINT_ENTRY_INSTANCE];
     uint pages = VELK_LIGHT_WORDS.data[pool + VELK_POOL_PAGES];
-    // A piece's point: its page, and its record's first page and triangle from its owner word.
+    // A piece's point: its page, and its record's first page and light root slot from its owner word.
     uint piece = VELK_LIGHT_NONE;
-    uint piece_triangle = 0u;
+    uint piece_slot = 0u;
     bool around = (q & VELK_LIGHT_POINT_COARSE) != 0u;
     q &= ~VELK_LIGHT_POINT_COARSE;
     if ((q & VELK_LIGHT_POINT_PIECE) != 0u) {
@@ -2155,8 +2367,8 @@ void velk_points_trace_point(uint pool, uint i, uint frame, uint counts[4], uint
         uint owner = VELK_LIGHT_WORDS.data[velk_light_page(pool, piece) + VELK_PIECE_OWNER];
         if ((owner & 0xFFFFFFu) >= pages) return;
         first = velk_light_page(pool, owner & 0xFFFFFFu);
-        piece_triangle = owner >> 24u;
-        if (piece_triangle >= velk_light_pieced(first)) return;
+        piece_slot = owner >> 24u;
+        if (piece_slot >= velk_light_pieced(first)) return;
     }
     uint kind = VELK_LIGHT_WORDS.data[first + VELK_PAGE_KIND];
     if (kind == VELK_LIGHT_LINKED || (piece == VELK_LIGHT_NONE && q >= velk_light_own_points(first))) return;
@@ -2200,17 +2412,42 @@ void velk_points_trace_point(uint pool, uint i, uint frame, uint counts[4], uint
     at.instance = instance;
     at.vertex_word = vertex_word;
     at.first_index = first_index;
-    at.triangle = piece_triangle;
+    at.triangle = 0u;
     at.vertex = VELK_LIGHT_NONE;
     at.around = around;
     at.b = vec3(0.0);
     at.step_a = vec3(0.0);
     at.step_b = vec3(0.0);
     at.start = vec2(0.0);
+    at.is_patch = false;
+    at.normal = vec3(0.0);
     if (piece == VELK_LIGHT_NONE) {
         if (q >= vertices) return;
         at.vertex = q;
+    } else if (velk_patch_is(cluster, piece_slot)) {
+        // A patch's point: on its square, which may reach past its triangles.
+        uint place = VELK_LIGHT_WORDS.data[velk_light_page(pool, piece) + VELK_PIECE_PLACE];
+        if (!velk_piece_is_patch(place) || q >= (VELK_PATCH_LEVEL + 1u) * (VELK_PATCH_LEVEL + 1u)) return;
+        vec3 origin;
+        vec3 u;
+        vec3 v;
+        float side;
+        velk_patch_basis(cluster, piece_slot, origin, u, v, side);
+        uvec2 ab = uvec2(q % (VELK_PATCH_LEVEL + 1u), q / (VELK_PATCH_LEVEL + 1u));
+        vec2 xy = velk_patch_at(place, ab) * side;
+        at.is_patch = true;
+        at.b = origin + xy.x * u + xy.y * v;
+        at.normal = cross(u, v);
+        if (around) {
+            uint own = velk_points_hash(piece * 977u + q);
+            at.start = vec2(float(own & 0xFFFFu), float(own >> 16u)) / 65536.0;
+            float step = side / (float(VELK_PATCH_LEVEL) * exp2(float(velk_piece_depth(place))));
+            at.step_a = step * u;
+            at.step_b = step * v;
+        }
     } else {
+        at.triangle = velk_patch_triangle(cluster, piece_slot);
+        if (at.triangle >= VELK_LIGHT_WORDS.data[cluster + VELK_LOD_CLUSTER_TRIANGLES]) return;
         uint place = VELK_LIGHT_WORDS.data[velk_light_page(pool, piece) + VELK_PIECE_PLACE];
         uvec2 ab = velk_piece_place(q);
         if (ab.x + ab.y > velk_piece_level(place)) return;
@@ -2916,29 +3153,52 @@ void velk_change_pieces(uint pool, uint changes, uint page)
     uint now = g.present_counter & 0x0FFFFFFFu;
     if (VELK_LIGHT_WORDS.data[first + VELK_PAGE_TOUCHED] != now) return;
     uint instance = VELK_LIGHT_WORDS.data[first + VELK_PAGE_INSTANCE];
-    uint triangle = owner >> 24u;
-    if (instance == VELK_LIGHT_NONE || triangle >= velk_light_pieced(first)) return;
+    uint slot = owner >> 24u;
+    if (instance == VELK_LIGHT_NONE || slot >= velk_light_pieced(first)) return;
     ElementInstance inst = velk_instances.data[instance];
     uint cluster = VELK_LIGHT_WORDS.data[first + VELK_PAGE_CLUSTER];
-    uint vertex_word = VELK_LIGHT_WORDS.data[cluster + VELK_LOD_CLUSTER_VERTEX];
-    uint first_index = VELK_LIGHT_WORDS.data[first + VELK_PAGE_INDEX] + VELK_LIGHT_WORDS.data[cluster + VELK_LOD_CLUSTER_INDEX];
-    vec3 v[3];
-    for (uint k = 0u; k < 3u; ++k) {
-        uint vw = vertex_word + velk_mesh_words.data[first_index + triangle * 3u + k] * VELK_VERTEX3D_WORDS;
-        vec3 local = vec3(uintBitsToFloat(velk_mesh_words.data[vw]), uintBitsToFloat(velk_mesh_words.data[vw + 1u]),
-                          uintBitsToFloat(velk_mesh_words.data[vw + 2u]));
-        v[k] = velk_rel_position(inst.world_matrix, inst.offset.xyz + local * inst.size.xyz, g);
-    }
     uint place = VELK_LIGHT_WORDS.data[at + VELK_PIECE_PLACE];
     uint n = velk_piece_level(place);
-    vec3 b0 = velk_piece_weights(place, uvec2(0u, 0u));
-    vec3 b1 = velk_piece_weights(place, uvec2(n, 0u));
-    vec3 b2 = velk_piece_weights(place, uvec2(0u, n));
-    vec3 p0 = b0.x * v[0] + b0.y * v[1] + b0.z * v[2];
-    vec3 p1 = b1.x * v[0] + b1.y * v[1] + b1.z * v[2];
-    vec3 p2 = b2.x * v[0] + b2.y * v[1] + b2.z * v[2];
-    vec3 center = (p0 + p1 + p2) / 3.0;
-    float radius = max(max(length(p0 - center), length(p1 - center)), length(p2 - center)) * (1.0 + 0.5 / float(n));
+    vec3 center;
+    float radius;
+    if (velk_patch_is(cluster, slot)) {
+        // A patch's piece: its square cell.
+        vec3 origin;
+        vec3 u;
+        vec3 v;
+        float side;
+        velk_patch_basis(cluster, slot, origin, u, v, side);
+        // Both diagonals, as a scaled instance may stretch one more than the other, widened by
+        // what a coarse point's samples move past its edges.
+        vec2 lo = velk_patch_at(place, uvec2(0u, 0u)) * side;
+        vec2 hi = velk_patch_at(place, uvec2(n, n)) * side;
+        vec3 mid = origin + 0.5 * (lo.x + hi.x) * u + 0.5 * (lo.y + hi.y) * v;
+        center = velk_rel_position(inst.world_matrix, inst.offset.xyz + mid * inst.size.xyz, g);
+        mat3 to_world = mat3(inst.world_matrix);
+        vec3 a = to_world * ((hi.x - lo.x) * u * inst.size.xyz);
+        vec3 b = to_world * ((hi.y - lo.y) * v * inst.size.xyz);
+        radius = 0.5 * max(length(a + b), length(a - b)) * (1.0 + 1.0 / float(n));
+    } else {
+        uint triangle = velk_patch_triangle(cluster, slot);
+        if (triangle >= VELK_LIGHT_WORDS.data[cluster + VELK_LOD_CLUSTER_TRIANGLES]) return;
+        uint vertex_word = VELK_LIGHT_WORDS.data[cluster + VELK_LOD_CLUSTER_VERTEX];
+        uint first_index = VELK_LIGHT_WORDS.data[first + VELK_PAGE_INDEX] + VELK_LIGHT_WORDS.data[cluster + VELK_LOD_CLUSTER_INDEX];
+        vec3 v[3];
+        for (uint k = 0u; k < 3u; ++k) {
+            uint vw = vertex_word + velk_mesh_words.data[first_index + triangle * 3u + k] * VELK_VERTEX3D_WORDS;
+            vec3 local = vec3(uintBitsToFloat(velk_mesh_words.data[vw]), uintBitsToFloat(velk_mesh_words.data[vw + 1u]),
+                              uintBitsToFloat(velk_mesh_words.data[vw + 2u]));
+            v[k] = velk_rel_position(inst.world_matrix, inst.offset.xyz + local * inst.size.xyz, g);
+        }
+        vec3 b0 = velk_piece_weights(place, uvec2(0u, 0u));
+        vec3 b1 = velk_piece_weights(place, uvec2(n, 0u));
+        vec3 b2 = velk_piece_weights(place, uvec2(0u, n));
+        vec3 p0 = b0.x * v[0] + b0.y * v[1] + b0.z * v[2];
+        vec3 p1 = b1.x * v[0] + b1.y * v[1] + b1.z * v[2];
+        vec3 p2 = b2.x * v[0] + b2.y * v[1] + b2.z * v[2];
+        center = (p0 + p1 + p2) / 3.0;
+        radius = max(max(length(p0 - center), length(p1 - center)), length(p2 - center)) * (1.0 + 0.5 / float(n));
+    }
     uint slots[VELK_LIGHT_SLOTS];
     for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) slots[s] = VELK_LIGHT_WORDS.data[first + VELK_PAGE_SLOTS + s];
     uint hard;
@@ -3622,7 +3882,7 @@ vec3 velk_probe_direct(RayHit hit, uint word, vec3 center, vec3 at, vec3 n)
         // it are traced and fresh (velk_light_add_points). Else its triangle's corners.
         uint first = velk_light_page(pool, value);
         uint t = hit.triangle != VELK_NO_CORNERS ? hit.triangle : 0xFFFFFFFFu;
-        if (!velk_light_add_points(pool, first, t, hit.corners, b, at, 0.0, 0.0, lights, sums)) {
+        if (!velk_light_add_points(pool, first, t, hit.corners, b, at, 0.0, 0.0, mat3(1.0), lights, sums)) {
             return vec3(0.0);
         }
     }
@@ -4304,11 +4564,11 @@ bool velk_light_split(uint page, uint how)
 }
 
 // The deepest depth from `from` on whose pieces' points are at least VELK_LIGHT_COARSE_PIECES
-// times `light_pixels` apart, in a triangle whose longest edge is `tri_px` pixels long; `from`
-// itself when none deeper is.
-uint velk_piece_coarse_depth(float tri_px, float light_pixels, uint from)
+// times `light_pixels` apart, in a root `tri_px` pixels across whose pieces' grids are of level
+// `grid`; `from` itself when none deeper is.
+uint velk_piece_coarse_depth(float tri_px, uint grid, float light_pixels, uint from)
 {
-    float over = tri_px / (float(VELK_PIECE_LEVEL) * VELK_LIGHT_COARSE_PIECES * light_pixels);
+    float over = tri_px / (float(grid) * VELK_LIGHT_COARSE_PIECES * light_pixels);
     uint deepest = over >= 2.0 ? uint(min(floor(log2(over)), float(VELK_PIECE_DEEPEST))) : 0u;
     return max(from, deepest);
 }
@@ -4334,14 +4594,16 @@ void velk_light_piece_read(uint at, uint now)
 // deepest such level at once; below that, only where its points around the pixel are traced and
 // differ, or are not all fully lit or fully blocked for every light: where an edge or a penumbra
 // passes. Once a frame a piece; a root, once until it is made. `tri_px` is the triangle's
-// longest edge on screen where the pixel is.
-void velk_light_list_way(uint first, uvec3 corners, uint triangle, vec3 b, float tri_px, uint instance, uint frame)
+// longest edge on screen where the pixel is. Its root is `r` (velk_light_root_of), its triangle's
+// or its flat patch's, `root_px` pixels across.
+void velk_light_list_way(uint first, uvec3 corners, VelkLightRoot r, vec3 b, float tri_px, float root_px, uint instance,
+                         uint frame)
 {
     uint pool = pc.pool_word;
     uint pages = light_words.data[pool + VELK_POOL_PAGES];
-    uint root_word = velk_light_root_word(pool, first, triangle);
+    uint root_word = velk_light_root_word(pool, first, r.slot);
     uint root = light_words.data[root_word];
-    VelkPieceWay way = velk_piece_way(pool, root, b, tri_px, pc.light_pixels);
+    VelkPieceWay way = velk_piece_way(pool, root, b, tri_px, r, root_px, pc.light_pixels);
     // Where its coarse cell is exact, or not known yet, it goes no further down: judged by its
     // points' light even when a change made them stale, so that the finer points an edge needs
     // are traced while it moves; the lighting judges it again with what is traced.
@@ -4406,13 +4668,14 @@ void velk_light_list_way(uint first, uvec3 corners, uint triangle, vec3 b, float
     // Nothing under it yet: a piece without children, or the vertex points without a root.
     if (on_piece && (way.depth >= VELK_PIECE_DEEPEST || light_words.data[piece_first + VELK_PIECE_CHILDREN] < pages)) return;
     if (!on_piece && (root != VELK_LIGHT_NONE || tri_px <= 2.0 * pc.light_pixels)) return;
-    uint level = on_piece ? way.root_level : velk_piece_root_level(tri_px, pc.light_pixels);
+    uint level = on_piece ? way.root_level : r.is_patch ? VELK_PATCH_LEVEL : velk_piece_root_level(tri_px, pc.light_pixels);
     uint next = on_piece ? way.depth + 1u : 0u;
-    bool edge = velk_piece_spacing(next, level, tri_px) < VELK_LIGHT_COARSE_PIECES * pc.light_pixels;
+    bool edge = velk_piece_spacing(r.is_patch, next, level, root_px) < VELK_LIGHT_COARSE_PIECES * pc.light_pixels;
     uint depth = next;
     if (!edge) {
         uint last = on_piece ? way.depth + VELK_PIECE_LEVELS_AT_ONCE : VELK_PIECE_LEVELS_AT_ONCE;
-        depth = min(velk_piece_coarse_depth(tri_px, pc.light_pixels, next), min(last, VELK_PIECE_DEEPEST));
+        uint grid = r.is_patch ? VELK_PATCH_LEVEL : VELK_PIECE_LEVEL;
+        depth = min(velk_piece_coarse_depth(root_px, grid, pc.light_pixels, next), min(last, VELK_PIECE_DEEPEST));
     } else {
         uint s0 = light_words.data[words[0]];
         uint s1 = light_words.data[words[1]];
@@ -4423,16 +4686,16 @@ void velk_light_list_way(uint first, uvec3 corners, uint triangle, vec3 b, float
     }
     // The pixel's way down the levels made at once: which child it is in at each, 2 bits a level
     // (VELK_SPLIT_PATH_SHIFT), so that only the pieces along it are split further.
-    vec3 l = on_piece ? way.at : b;
+    vec3 l = on_piece ? way.at : r.at;
     uint path = 0u;
-    for (uint r = 0u; r + 1u < VELK_PIECE_LEVELS_AT_ONCE; ++r) path |= velk_piece_step(l) << (2u * r);
+    for (uint k = 0u; k + 1u < VELK_PIECE_LEVELS_AT_ONCE; ++k) path |= velk_way_step(r.is_patch, l) << (2u * k);
     path <<= VELK_SPLIT_PATH_SHIFT;
     if (edge) path |= VELK_LIGHT_SPLIT_EDGE;
     if (on_piece) {
         uint before = atomicOr(light_words.data[piece_first + VELK_PIECE_READ], VELK_PIECE_ASKED);
         if ((before & VELK_PIECE_ASKED) == 0u) velk_light_split(way.piece, (depth << 8u) | path);
     } else if (atomicCompSwap(light_words.data[root_word], VELK_LIGHT_NONE, VELK_LIGHT_PENDING) == VELK_LIGHT_NONE) {
-        if (!velk_light_split(light_words.data[first + VELK_PAGE_FIRST], VELK_LIGHT_SPLIT_ROOT | triangle | (depth << 8u) | (level << 16u) | path)) {
+        if (!velk_light_split(light_words.data[first + VELK_PAGE_FIRST], VELK_LIGHT_SPLIT_ROOT | r.slot | (depth << 8u) | (level << 16u) | path)) {
             light_words.data[root_word] = VELK_LIGHT_NONE;
         }
     }
@@ -4454,10 +4717,12 @@ void velk_light_list_pixel(uint first, VelkDrawData d, uvec2 ids, uint instance,
     vec3 b = velk_claim_weights();
     // In pieces: the pixel's way down its triangle's levels, from its vertex points.
     uint pool = pc.pool_word;
-    if (triangle < velk_light_pieced(first)) {
-        float tri_px = velk_claim_tri_px(g);
+    VelkLightRoot r = velk_light_root_of(first, triangle, corners, b, velk_claim_tri_size(), mat3(velk_claim_world(d, ids)));
+    if (r.slot != VELK_LIGHT_NONE) {
+        float px_per_world = velk_claim_px_per_world(g);
+        float tri_px = velk_claim_tri_size() * px_per_world;
         g_listed_by = tri_px < 8.0 ? VELK_LIGHT_LISTED_SMALL : tri_px < 64.0 ? VELK_LIGHT_LISTED_MID : VELK_LIGHT_LISTED_LARGE;
-        velk_light_list_way(first, corners, triangle, b, tri_px, instance, frame);
+        velk_light_list_way(first, corners, r, b, tri_px, r.size * px_per_world, instance, frame);
         return;
     }
     g_listed_by = VELK_LIGHT_LISTED_VERTICES;
@@ -4632,12 +4897,22 @@ uvec2 g_coord;  // the thread's pixel
 // G-buffer's positions, its distance and its triangle's longest edge.
 vec3 velk_claim_weights() { return velk_pixel_weights(pc.ids_word, pc.width, ivec2(g_coord)); }
 
-float velk_claim_tri_px(GlobalData g)
+// Its triangle's longest edge in world units, and the pixels a world unit is where it is.
+float velk_claim_tri_size()
+{
+    return texelFetch(velk_textures[nonuniformEXT(pc.position_id)], ivec2(g_coord), 0).w;
+}
+
+float velk_claim_px_per_world(GlobalData g)
 {
     vec4 position = texelFetch(velk_textures[nonuniformEXT(pc.position_id)], ivec2(g_coord), 0);
     mat4 vp = g.view_projection;
-    float px_per_world = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * g.viewport.y * 0.5 / max(length(position.xyz), 1e-4);
-    return position.w * px_per_world;
+    return length(vec3(vp[0][1], vp[1][1], vp[2][1])) * g.viewport.y * 0.5 / max(length(position.xyz), 1e-4);
+}
+
+float velk_claim_tri_px(GlobalData g)
+{
+    return velk_claim_tri_size() * velk_claim_px_per_world(g);
 }
 
 mat4 velk_claim_world(VelkDrawData d, uvec2 ids)
@@ -4740,11 +5015,20 @@ float g_longest;   // its triangle's longest edge, in world units
 )" VELK_FRAGMENT_TRIANGLE_GLSL R"(
 vec3 velk_claim_weights() { return g_weights; }
 
-float velk_claim_tri_px(GlobalData g)
+float velk_claim_tri_size()
+{
+    return g_longest;
+}
+
+float velk_claim_px_per_world(GlobalData g)
 {
     mat4 vp = g.view_projection;
-    float px_per_world = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * g.viewport.y * 0.5 / max(length(v_rel_pos), 1e-4);
-    return g_longest * px_per_world;
+    return length(vec3(vp[0][1], vp[1][1], vp[2][1])) * g.viewport.y * 0.5 / max(length(v_rel_pos), 1e-4);
+}
+
+float velk_claim_tri_px(GlobalData g)
+{
+    return velk_claim_tri_size() * velk_claim_px_per_world(g);
 }
 
 mat4 velk_claim_world(VelkDrawData d, uvec2 ids)
@@ -4941,6 +5225,7 @@ shared uint s_triangle;
 shared uint s_root_word;
 shared uint s_path;         // the asking pixel's way down (VELK_SPLIT_PATH_SHIFT), 2 bits a level
 shared uint s_edge;         // VELK_PIECE_PLACE_EDGE for pieces asked where light differs, else 0
+shared uint s_patch;        // not 0 for a flat patch's pieces; s_triangle is then its light root slot
 
 // Which child of the path's piece at level `level` (1 and on) the path goes on in: the one whose
 // four children make the next level.
@@ -4970,8 +5255,10 @@ uint velk_split_place(uint level, uint q)
 {
     if (level == 0u) return s_top_place;
     uint place = s_top_place;
-    for (uint r = 1u; r < level && r <= VELK_PIECE_LEVELS_AT_ONCE; ++r) place = velk_piece_child_place(place, velk_split_digit(r));
-    return velk_piece_child_place(place, q);
+    for (uint r = 1u; r < level && r <= VELK_PIECE_LEVELS_AT_ONCE; ++r) {
+        place = s_patch != 0u ? velk_patch_child_place(place, velk_split_digit(r)) : velk_piece_child_place(place, velk_split_digit(r));
+    }
+    return s_patch != 0u ? velk_patch_child_place(place, q) : velk_piece_child_place(place, q);
 }
 
 // Writes piece `q` at level `level` of the pieces being made, its points untraced but for a root's
@@ -5001,14 +5288,15 @@ void velk_split_write(uint level, uint q, uint frame)
         uvec2 ab = velk_piece_place(p);
         uint from_word = VELK_LIGHT_NONE;
         uint from_blocker = VELK_LIGHT_NONE;
-        if (level == 0u && s_from == 0u) {
-            // A root's corners are its triangle's vertices.
+        if (level == 0u && s_from == 0u && s_patch == 0u) {
+            // A root's corners are its triangle's vertices. A patch's root starts untraced.
             uint n = velk_piece_level(place);
             uint corner = ab == uvec2(0u, 0u) ? 0u : ab == uvec2(n, 0u) ? 1u : ab == uvec2(0u, n) ? 2u : 3u;
             uint index = light_words.data[s_record_first + VELK_PAGE_INDEX];
-            if (corner < 3u && index != VELK_LIGHT_NONE) {
-                uint cluster = light_words.data[s_record_first + VELK_PAGE_CLUSTER];
-                uint v = velk_mesh_words.data[index + light_words.data[cluster + VELK_LOD_CLUSTER_INDEX] + s_triangle * 3u + corner];
+            uint cluster = light_words.data[s_record_first + VELK_PAGE_CLUSTER];
+            uint triangle = velk_patch_triangle(cluster, s_triangle);
+            if (corner < 3u && index != VELK_LIGHT_NONE && triangle < light_words.data[cluster + VELK_LOD_CLUSTER_TRIANGLES]) {
+                uint v = velk_mesh_words.data[index + light_words.data[cluster + VELK_LOD_CLUSTER_INDEX] + triangle * 3u + corner];
                 if (v < light_words.data[s_record_first + VELK_PAGE_VERTICES]) {
                     from_word = velk_light_own_word(pool, s_record_first, v);
                     from_blocker = velk_light_blocker_word(pool, s_record_first, v);
@@ -5062,7 +5350,9 @@ void velk_split(uint index)
                         s_from = 0u;
                         s_to = min(depth, VELK_PIECE_LEVELS_AT_ONCE);
                         uint level = (how >> 16u) & 7u;
-                        s_top_place = velk_piece_root_place(level == 0u ? VELK_PIECE_LEVEL : level);
+                        s_patch = velk_patch_is(light_words.data[s_record_first + VELK_PAGE_CLUSTER], s_triangle) ? 1u : 0u;
+                        s_top_place = s_patch != 0u ? velk_patch_root_place()
+                                                    : velk_piece_root_place(level == 0u ? VELK_PIECE_LEVEL : level);
                     }
                 }
             } else if (velk_light_is_piece(pool, page)) {
@@ -5075,6 +5365,7 @@ void velk_split(uint index)
                     s_split = 2u;
                     s_top = page;
                     s_top_place = top_place;
+                    s_patch = velk_piece_is_patch(top_place) ? 1u : 0u;
                     s_record = owner & 0xFFFFFFu;
                     s_record_first = velk_light_page(pool, s_record);
                     s_triangle = owner >> 24u;
@@ -5273,8 +5564,10 @@ void main()
             // Coarse enough: its own points, a point a vertex, and with its draw's indices to find
             // its triangles' corners, a root word a triangle, its pieces made as pixels read them.
             // All threads make them untraced and without roots, below.
+            // A root word a light root slot: a flat patch's, or a triangle's in none.
             uint index_base = draw == 0xFFFFFFFFu ? VELK_LIGHT_NONE : velk_draw_data.data[draw].index_base;
-            uint triangles = min(light_words.data[cluster + VELK_LOD_CLUSTER_TRIANGLES], kMaxTriangles);
+            uint counts = velk_patch_counts(cluster);
+            uint triangles = min(counts != 0u ? counts >> 16u : light_words.data[cluster + VELK_LOD_CLUSTER_TRIANGLES], kMaxTriangles);
             uint table = index_base != VELK_LIGHT_NONE ? triangles : 0u;
             uint kind = table != 0u ? VELK_LIGHT_PIECED | triangles : VELK_LIGHT_OWN;
             uint laid;
@@ -5612,16 +5905,19 @@ bool velk_pieces_same(uint pool, uint at, uint pages)
 {
     uint shade = light_words.data[at];
     if (shade == VELK_LIGHT_NONE || shade != (shade & 0x11111111u) * 15u) return false;
-    uint level = velk_piece_level(light_words.data[at + VELK_PIECE_PLACE]);
-    for (uint q = 1u; q < VELK_PIECE_POINTS; ++q) {
+    uint place = light_words.data[at + VELK_PIECE_PLACE];
+    uint level = velk_piece_level(place);
+    bool is_patch = velk_piece_is_patch(place);
+    uint points = is_patch ? VELK_PATCH_POINTS : VELK_PIECE_POINTS;
+    for (uint q = 1u; q < points; ++q) {
         uvec2 ab = velk_piece_place(q);
-        if (ab.x + ab.y <= level && light_words.data[at + 2u * q] != shade) return false;
+        if ((is_patch || ab.x + ab.y <= level) && light_words.data[at + 2u * q] != shade) return false;
     }
     for (uint k = 0u; k < 4u; ++k) {
         uint child = light_words.data[at + VELK_PIECE_CHILDREN + k];
         if (child >= pages) return false;
         uint child_at = velk_light_page(pool, child);
-        for (uint q = 0u; q < VELK_PIECE_POINTS; ++q) {
+        for (uint q = 0u; q < points; ++q) {
             if (light_words.data[child_at + 2u * q] != shade) return false;
         }
     }

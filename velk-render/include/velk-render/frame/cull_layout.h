@@ -45,7 +45,28 @@ namespace velk {
     X(cp, gp, OwnMark, OWN_MARK, 23)            /* the word of its own group's mark */         \
     X(cp, gp, Color, COLOR, 24)                                                                \
     X(cp, gp, Changed, CHANGED, 25)             /* the frame its errors last changed, plus one; 0 for never */ \
+    X(cp, gp, Patches, PATCHES, 26)             /* the word of its flat patches' data (kLodPatch*), or none */ \
+    X(cp, gp, PatchCounts, PATCH_COUNTS, 27)    /* its patches in bits 0-15, its light roots in 16-31 */ \
     X(cp, gp, Words, WORDS, 28)
+
+/// A cluster's flat patches' data (kLodPatch, VELK_LOD_PATCH), in the mesh-word arena, where its
+/// LOD_CLUSTER_PATCHES word says: each triangle's light root slot, a byte each, four a word, the
+/// first triangle lowest; the triangle of each slot past the patches, likewise; then each patch's
+/// basis (kLodPatchBasis). Slots below the patch count are the patches, in order.
+#define VELK_LOD_PATCH(X, cp, gp)                                                                  \
+    X(cp, gp, Slots, SLOTS, 0)                  /* 64 words: a slot a triangle */              \
+    X(cp, gp, Triangles, TRIANGLES, 64)         /* 64 words: a triangle a slot past the patches */ \
+    X(cp, gp, Bases, BASES, 128)                /* kLodPatchBasisWords a patch */              \
+    X(cp, gp, Words, WORDS, 128)
+
+/// A flat patch's basis (kLodPatchBasis, VELK_LOD_PATCH_BASIS), in its cluster's space: its square
+/// is origin + u x + v y for x and y from 0 to side.
+#define VELK_LOD_PATCH_BASIS(X, cp, gp)                                                            \
+    X(cp, gp, Origin, ORIGIN, 0)                /* three floats */                             \
+    X(cp, gp, U, U, 3)                          /* unit, three floats */                       \
+    X(cp, gp, V, V, 6)                          /* unit, three floats; u x v is the patch's normal */ \
+    X(cp, gp, Side, SIDE, 9)                                                                   \
+    X(cp, gp, Words, WORDS, 10)
 
 /// A node of a partition's quad tree (kQuadNode, VELK_QUAD_NODE), in world space; also what an
 /// instance of a mesh is in it, in the mesh's space. See kQuadLeavesOnly in instance_cull.h.
@@ -394,6 +415,8 @@ namespace velk {
 
 VELK_BATCH_TABLE(VELK_LAYOUT_CPP_WORD, Table, TABLE)
 VELK_LOD_CLUSTER(VELK_LAYOUT_CPP_WORD, LodCluster, LOD_CLUSTER)
+VELK_LOD_PATCH(VELK_LAYOUT_CPP_WORD, LodPatch, LOD_PATCH)
+VELK_LOD_PATCH_BASIS(VELK_LAYOUT_CPP_WORD, LodPatchBasis, LOD_PATCH_BASIS)
 VELK_QUAD_NODE(VELK_LAYOUT_CPP_WORD, QuadNode, QUAD_NODE)
 VELK_QUAD_LIST(VELK_LAYOUT_CPP_WORD, QuadList, QUAD_LIST)
 VELK_PLAIN_ITEM(VELK_LAYOUT_CPP_WORD, PlainItem, PLAIN_ITEM)
@@ -430,6 +453,8 @@ VELK_RETEST(VELK_LAYOUT_CPP_WORD, Retest, RETEST)
 #define VELK_CULL_LAYOUT_GLSL                                                                      \
     VELK_BATCH_TABLE(VELK_LAYOUT_GLSL_WORD, Table, TABLE)                                          \
     VELK_LOD_CLUSTER(VELK_LAYOUT_GLSL_WORD, LodCluster, LOD_CLUSTER)                               \
+    VELK_LOD_PATCH(VELK_LAYOUT_GLSL_WORD, LodPatch, LOD_PATCH)                                     \
+    VELK_LOD_PATCH_BASIS(VELK_LAYOUT_GLSL_WORD, LodPatchBasis, LOD_PATCH_BASIS)                    \
     VELK_QUAD_NODE(VELK_LAYOUT_GLSL_WORD, QuadNode, QUAD_NODE)                                     \
     VELK_QUAD_LIST(VELK_LAYOUT_GLSL_WORD, QuadList, QUAD_LIST)                                     \
     VELK_PLAIN_ITEM(VELK_LAYOUT_GLSL_WORD, PlainItem, PLAIN_ITEM)                                  \

@@ -810,15 +810,19 @@ vec3 light_color(uvec2 ids, ivec2 coord)
     // yellow, green, cyan, blue, purple, pink, again from red; dark grey its triangle's vertex
     // points), darker toward its points' places so that its grid shows; magenta as far as the
     // points it reads are not traced yet, cyan as far as they are stale since a change.
-    if (triangle < velk_light_pieced(first)) {
+    // A flat patch's pieces the same, its triangles reading its patch's.
+    float tri_size = sqrt(max(max(d11, d22), dot(p[2] - p[1], p[2] - p[1])));
+    VelkLightRoot r = velk_light_root_of(first, triangle, corners, b, tri_size,
+                                         mat3(velk_sized_world(inst.world_matrix, inst.offset.xyz, inst.size.xyz)));
+    if (r.slot != VELK_LIGHT_NONE) {
         const vec3 kDepthColors[8] = vec3[8](
             vec3(1.0, 0.0, 0.0), vec3(1.0, 0.5, 0.0), vec3(1.0, 1.0, 0.0), vec3(0.0, 1.0, 0.0),
             vec3(0.0, 1.0, 1.0), vec3(0.0, 0.3, 1.0), vec3(0.6, 0.0, 1.0), vec3(1.0, 0.0, 0.7));
-        uint root = velk_culling.data[velk_light_root_word(pc.pool_word, first, triangle)];
+        uint root = velk_culling.data[velk_light_root_word(pc.pool_word, first, r.slot)];
         vec3 at = dir * (dot(normal, p[0]) / facing);
         float px_per_world = pixels_per_unit / max(length(at), 1e-4);
-        float tri_px = sqrt(max(max(d11, d22), dot(p[2] - p[1], p[2] - p[1]))) * px_per_world;
-        VelkPieceWay way = velk_piece_way(pc.pool_word, root, b, tri_px, pc.light_pixels);
+        float tri_px = tri_size * px_per_world;
+        VelkPieceWay way = velk_piece_way(pc.pool_word, root, b, tri_px, r, r.size * px_per_world, pc.light_pixels);
         if (velk_way_cell(pc.pool_word, first, corners, way, true) == 1u) velk_way_stop_at_coarse(way);
         uint words[3];
         vec3 w;
