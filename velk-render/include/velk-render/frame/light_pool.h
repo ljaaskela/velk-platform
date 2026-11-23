@@ -208,7 +208,7 @@ inline constexpr uint32_t kLightMaxSegments = 64;
 /// Pixels VELK_LIGHT_READ can name for the lighting to write its terms at (VELK_POOL_READ_TERMS),
 /// and the words of each one's terms (VELK_LIGHT_READ_WORDS).
 inline constexpr uint32_t kLightReadPixels = 4;
-inline constexpr uint32_t kLightReadWords = 69;
+inline constexpr uint32_t kLightReadWords = 70;
 inline constexpr uint32_t kLightPoolAheadFrames = 40;
 inline constexpr uint32_t kLightPoolAheadEvery = 60;
 
@@ -326,7 +326,7 @@ inline constexpr uint32_t kLightPoolAheadEvery = 60;
                                                     kLightReadPixels words */                                        \
     X(ReadTerms, READ_TERMS, 195)                /* the lighting's terms at them, kLightReadWords each \
                                                     (VELK_LIGHT_READ_*) */                                           \
-    X(HeaderEnd, HEADER_END, 471)
+    X(HeaderEnd, HEADER_END, 475)
 
 #define VELK_LIGHT_POOL_CPP_WORD(cpp, glsl, word) inline constexpr uint32_t kLightPool##cpp = word;
 VELK_LIGHT_POOL_HEADER(VELK_LIGHT_POOL_CPP_WORD)
@@ -455,7 +455,7 @@ bool velk_light_inherits(uint value)
 // light and the colour before tonemapping, three words each; then its metallic, whether its points
 // of light were traced and probes covered it (bits 0 and 1) with the frame that wrote them (the
 // bits from 8 on, its present counter), and how well the probes matched.
-#define VELK_LIGHT_READ_WORDS 69u
+#define VELK_LIGHT_READ_WORDS 70u
 // Then what it reads of its triangle's pieces (velk_light_explain), from word 24: its record's
 // light word, its triangle, its record's triangles in pieces, its record's coarse light, its
 // triangle's root word, the level it reads (a page, or VELK_PIECE_VERTICES), that level's depth
@@ -468,7 +468,9 @@ bool velk_light_inherits(uint value)
 // Then, floats as their bits: its triangle's three corners in the world, the pixel's place in the
 // world and the way its first light shines.
 #define VELK_LIGHT_READ_EXPLAIN 24u
-#define VELK_LIGHT_EXPLAIN_WORDS 45u
+#define VELK_LIGHT_EXPLAIN_WORDS 46u
+// And the depth of the deepest piece there is on the pixel's way down, before a coarse cell's stop.
+#define VELK_LIGHT_EXPLAIN_DEEPEST 45u
 #define VELK_LIGHT_EXPLAIN_CORNERS 30u
 #define VELK_LIGHT_EXPLAIN_AT 39u
 #define VELK_LIGHT_EXPLAIN_LIGHT 42u
@@ -1759,6 +1761,7 @@ void velk_light_explain(uint pool, uvec2 ids, vec3 b, vec3 at, float tri_size, o
     e[VELK_LIGHT_EXPLAIN_ROOT] = root;
     VelkPieceWay way = velk_piece_way(pool, root, b, tri_size * px_per_world, VELK_LIGHT_PIXELS);
     uint cell = velk_way_cell(pool, first, corners, way, true);
+    e[VELK_LIGHT_EXPLAIN_DEEPEST] = way.piece == VELK_PIECE_VERTICES ? VELK_LIGHT_NONE : way.depth;
     if (cell == 1u) velk_way_stop_at_coarse(way);
     e[VELK_LIGHT_EXPLAIN_PIECE] = way.piece;
     e[VELK_LIGHT_EXPLAIN_WAY] = way.depth | (cell << 8u) | (uint(clamp(tri_size * px_per_world, 0.0, 65535.0)) << 16u);

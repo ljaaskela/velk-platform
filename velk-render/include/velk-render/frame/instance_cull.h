@@ -5587,6 +5587,16 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
         if (pool.header.valid() && pool.reads) {
             uint32_t r[kLightReadPixels * (1u + kLightReadWords)] = {};
             arena->read_at(pool.header.offset() + uint64_t(kLightPoolReadPixels) * sizeof(uint32_t), r, sizeof(r));
+            // The pool's work around them: the last frame's asks for pieces, and since the log
+            // last read them, pieces made and asks not made.
+            uint32_t counts[4] = {};
+            arena->read_at(pool.header.offset() + uint64_t(kLightPoolLastSplits) * sizeof(uint32_t), &counts[0], sizeof(uint32_t));
+            arena->read_at(pool.header.offset() + uint64_t(kLightPoolSumPiecesMade) * sizeof(uint32_t), &counts[1], sizeof(uint32_t));
+            arena->read_at(pool.header.offset() + uint64_t(kLightPoolSumSplitsRefused) * sizeof(uint32_t), &counts[2], sizeof(uint32_t));
+            arena->read_at(pool.header.offset() + uint64_t(kLightPoolLastUntracedPoints) * sizeof(uint32_t), &counts[3], sizeof(uint32_t));
+            VELK_LOG(I, "light read pool (now %llu): last frame %u asks for pieces, %u untraced points listed; summed %u pieces made, "
+                        "%u asks not made",
+                     static_cast<unsigned long long>(ctx.present_counter), counts[0], counts[3], counts[1], counts[2]);
             for (uint32_t k = 0; k < kLightReadPixels; ++k) {
                 const uint32_t packed = r[k];
                 if (packed == kLightNone) continue;
@@ -5618,10 +5628,11 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
                     return frame == kLightNone ? -1 : static_cast<int>(int64_t(e[27]) - int64_t(frame & 0x0FFFFFFFu));
                 };
                 VELK_LOG(I, "light read %u,%u frame %u: record %08x triangle %u of %u, coarse %08x, root %08x, reads %08x depth %u "
-                            "cell %u tri %u px; vertices %s listed -%d -%d -%d changed -%d; level %s listed -%d -%d -%d changed -%d",
+                            "(deepest %d) cell %u tri %u px; vertices %s listed -%d -%d -%d changed -%d; level %s listed -%d -%d -%d "
+                            "changed -%d",
                          packed & 0xFFFFu, packed >> 16u, flags >> 8u, e[0], e[1], e[2], e[3], e[4], e[5], e[6] & 255u,
-                         (e[6] >> 8u) & 255u, e[6] >> 16u, vertices, back(e[21]), back(e[22]), back(e[23]), back(e[28]), read_level,
-                         back(e[24]), back(e[25]), back(e[26]), back(e[29]));
+                         e[45] == kLightNone ? -1 : static_cast<int>(e[45]), (e[6] >> 8u) & 255u, e[6] >> 16u, vertices, back(e[21]),
+                         back(e[22]), back(e[23]), back(e[28]), read_level, back(e[24]), back(e[25]), back(e[26]), back(e[29]));
                 float place[15];
                 std::memcpy(place, e + 30, sizeof(place));
                 VELK_LOG(I, "light read %u,%u frame %u places: corners %.3f %.3f %.3f | %.3f %.3f %.3f | %.3f %.3f %.3f, at %.3f "

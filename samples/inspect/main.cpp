@@ -271,6 +271,9 @@ int main(int argc, char* argv[])
     // the camera at frame F and what the scene moves at frame M, saved as _glideF_mM.
     velk::vector<long> glide_at;
     velk::vector<long> glide_movers_at;
+    // verify with hold=K:N: a view's motion stops at step K and stays there N frames.
+    int hold_step = 0;
+    long hold_frames = 0;
     // verify with glide_save=A-B: a glide view's frames A to B saved as they are, every one.
     long glide_save_from = -1;
     long glide_save_to = -1;
@@ -290,6 +293,10 @@ int main(int argc, char* argv[])
             only_views = arg + 6;
         } else if (std::strncmp(arg, "settle=", 7) == 0) {
             settle_frames = std::max(1l, std::atol(arg + 7));
+        } else if (std::strncmp(arg, "hold=", 5) == 0) {
+            char* end = nullptr;
+            hold_step = static_cast<int>(std::strtol(arg + 5, &end, 10));
+            hold_frames = end && *end == ':' ? std::strtol(end + 1, nullptr, 10) : 60;
         } else if (std::strncmp(arg, "glide_save=", 11) == 0) {
             char* end = nullptr;
             glide_save_from = std::strtol(arg + 11, &end, 10);
@@ -1017,6 +1024,22 @@ int main(int argc, char* argv[])
                         moving.tile_x = d.tile_x;
                         moving.tile_y = d.tile_y;
                         worst_step = k;
+                    }
+                    // With hold=K:N: the camera stays at step K for N frames, each against that
+                    // step's reference and saved; the rest of the motion is left out.
+                    if (k == hold_step && hold_frames > 0) {
+                        for (long h = 1; h <= hold_frames; ++h) {
+                            if (!frame()) return 1;
+                            inspect::Image held;
+                            if (!grab(held)) return 1;
+                            const inspect::Difference hd = inspect::compare(inspect::downscale(held, kCompareScale), step_reference, tile);
+                            VELK_LOG(I, "inspect: %s hold %ld at step %d: mean %.4f p95 %.4f tile %.4f", name, h, k,
+                                     static_cast<double>(hd.mean), static_cast<double>(hd.p95), static_cast<double>(hd.worst_tile));
+                            char held_suffix[48];
+                            std::snprintf(held_suffix, sizeof(held_suffix), "_move%d_hold%ld.png", k, h);
+                            inspect::save_png(*writer, held, run_path(spec, view, held_suffix));
+                        }
+                        break;
                     }
                 }
                 char moving_name[64];
