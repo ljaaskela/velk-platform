@@ -1067,7 +1067,7 @@ int main(int argc, char* argv[])
                 std::snprintf(buf, sizeof(buf), "%zu passed, %zu failed; images in %s", passed, failed, INSPECT_RUN_DIR);
                 line(buf);
                 // A run of every scene goes into the history, with the commits it ran.
-                if (!only_scene && !skip_scenes) {
+                if (!only_scene && !skip_scenes && !only_views) {
                     bool dirty = false;
                     bool velk_dirty = false;
                     const velk::string commit = inspect::commit_of(view_of(INSPECT_SOURCE_DIR), view_of(INSPECT_MEASURED_PATHS), dirty);

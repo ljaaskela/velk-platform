@@ -884,10 +884,19 @@ BuiltScene build_scene(const SceneSpec& spec, velk::Scene& scene, velk::Element&
     return out;
 }
 
+namespace {
+
+// Each of @p built's movers @p t of the way, 0 to 1.
+void place_movers_along(BuiltScene& built, float t)
+{
+    for (Mover& m : built.movers) m.trs.set_translate(m.from + (m.to - m.from) * t);
+}
+
+} // namespace
+
 void place_movers(BuiltScene& built, long frame)
 {
-    const float t = built.frames > 0 ? std::min(static_cast<float>(frame) / static_cast<float>(built.frames), 1.f) : 1.f;
-    for (Mover& m : built.movers) m.trs.set_translate(m.from + (m.to - m.from) * t);
+    place_movers_along(built, built.frames > 0 ? std::min(static_cast<float>(frame) / static_cast<float>(built.frames), 1.f) : 1.f);
 }
 
 void set_look(BuiltScene& built, bool night)
@@ -926,7 +935,9 @@ Place glide_place(const ViewSpec& view, long frame)
 
 void place_glide_movers(BuiltScene& built, const ViewSpec& view, long frame)
 {
-    place_movers(built, view.glide_frames > 0 ? built.frames * frame / view.glide_frames : built.frames);
+    // A fraction of the motion, so that they move a little every frame whatever the two lengths.
+    place_movers_along(built, view.glide_frames > 0 ? std::clamp(static_cast<float>(frame) / static_cast<float>(view.glide_frames), 0.f, 1.f)
+                                                     : 1.f);
 }
 
 velk::vec3 forward_of(float yaw_degrees, float pitch_degrees)
