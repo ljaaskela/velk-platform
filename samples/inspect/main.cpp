@@ -1168,19 +1168,24 @@ int main(int argc, char* argv[])
     };
 
     long frame = 0;
+    // After capture=N with then=VIEW: what moves, the look and the camera stay as they were at
+    // frame N, so that both images show the same thing.
+    bool held_pose = false;
     while (app.poll()) {
         // What the scene moves goes there and back, again and again.
         const long cycle = std::max(built.frames, 1l) * 2;
         const long at = frame % cycle;
-        inspect::place_movers(built, at <= built.frames ? at : cycle - at);
+        if (!held_pose) inspect::place_movers(built, at <= built.frames ? at : cycle - at);
         // A look switch: night over its frames of the run, until N switches it by hand.
-        if (!built.look.empty() && !look_by_hand) {
+        if (!built.look.empty() && !look_by_hand && !held_pose) {
             const bool night = frame >= built.night_from && frame < built.night_to;
             if (built.night != (night ? 1 : 0)) VELK_LOG(I, "inspect: %s at frame %ld", night ? "night" : "day", frame);
             inspect::set_look(built, night);
         }
         ++frame;
-        if (scripted) {
+        if (held_pose) {
+            // The camera stays where frame N had it.
+        } else if (scripted) {
             // Out along the view and back, rising and falling, the same every time, from the start.
             const float t = static_cast<float>(scripted_frame++) / 60.f;
             const float along = 0.5f - 0.5f * std::cos(t * 0.15f);
@@ -1229,6 +1234,7 @@ int main(int argc, char* argv[])
             save_frame("capture");
             if (then_view == kViewCount) break;
             show_view(then_view);
+            held_pose = true;
         }
         if (capture_frame > 0 && then_view != kViewCount && frame == capture_frame + 2) {
             char name[64];

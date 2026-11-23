@@ -194,6 +194,10 @@ uint32_t env_uint(const char* name, long lo, long hi)
 // Diagnostic: shows the visibility buffer instead of the image. See visibility_debug_compute_src.
 uint32_t visibility_debug_mode() { return env_uint("VELK_VISIBILITY_DEBUG", 1, static_cast<uint32_t>(DebugView::Light)); }
 
+// Diagnostic: the frame VELK_VISIBILITY_DEBUG starts at, so that a run is lit and settled
+// before it. 0 when not set: from the first frame.
+uint32_t visibility_debug_from() { return env_uint("VELK_VISIBILITY_DEBUG_FROM", 1, 1000000000); }
+
 // Diagnostic: the cut-off for clusters drawn in compute, in pixels, in place of the camera's
 // tiny_cluster_pixels. 0 when not set.
 uint32_t tiny_pixels_override() { return env_uint("VELK_TINY_PIXELS", 1, 64); }
@@ -889,7 +893,8 @@ void DeferredPath::build_passes(IViewEntry& entry,
     emit_visibility_resolve_pass(vs, render_view, ctx, graph);
     emit_light_changes_pass(vs, render_view, ctx, graph);
     emit_light_claim_pass(vs, render_view, ctx, graph);
-    const uint32_t visibility_mode = visibility_debug_mode() != 0u ? visibility_debug_mode()
+    const bool debug_by_env = visibility_debug_mode() != 0u && ctx.present_counter >= visibility_debug_from();
+    const uint32_t visibility_mode = debug_by_env ? visibility_debug_mode()
                                    : camera_state ? static_cast<uint32_t>(camera_state->debug_view)
                                                   : 0u;
 
