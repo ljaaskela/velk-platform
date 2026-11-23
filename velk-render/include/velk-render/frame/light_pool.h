@@ -315,7 +315,8 @@ inline constexpr uint32_t kLightPoolAheadEvery = 60;
     X(SumProbesRead, SUM_PROBES_READ, 185)       /* summed: screen probes that read their cell without rays, that \
                                                     added rays to it, that cast rays alone, and settled cells a \
                                                     change woke: four words */                                       \
-    X(HeaderEnd, HEADER_END, 189)
+    X(LastFreePages, LAST_FREE_PAGES, 189)       /* pages the last frame left on the stack, for the pieces' keep */  \
+    X(HeaderEnd, HEADER_END, 190)
 
 #define VELK_LIGHT_POOL_CPP_WORD(cpp, glsl, word) inline constexpr uint32_t kLightPool##cpp = word;
 VELK_LIGHT_POOL_HEADER(VELK_LIGHT_POOL_CPP_WORD)
@@ -5426,10 +5427,11 @@ bool velk_pieces_marked(uint pool, uint page)
 // Frames an unread piece is kept: VELK_PIECE_KEEP_FRAMES when the pool is short of pages, longer
 // the more room it has, so that turning back to what went out of view finds its pieces and their
 // light. It shortens a step at a time as the pool fills, so that a burst of new pieces while the
-// camera turns does not let every piece out of view go at once.
+// camera turns does not let every piece out of view go at once. The room is what the last frame
+// left free: this runs before the sweep refills the stack.
 uint velk_pieces_keep_frames(uint pool)
 {
-    uint free_pages = light_words.data[pool + VELK_POOL_FREE_PAGES];
+    uint free_pages = light_words.data[pool + VELK_POOL_LAST_FREE_PAGES];
     uint pages = light_words.data[pool + VELK_POOL_PAGES];
     if (free_pages * 2u > pages) return 32u * VELK_PIECE_KEEP_FRAMES;
     if (free_pages * 4u > pages) return 8u * VELK_PIECE_KEEP_FRAMES;
@@ -5623,6 +5625,8 @@ void main()
             light_words.data[pool + VELK_POOL_RAYS_CAST] = 0u;
             light_words.data[pool + VELK_POOL_STEPS] = 0u;
             light_words.data[pool + VELK_POOL_FIRST_RAYS] = 0u;
+            light_words.data[pool + VELK_POOL_LAST_FREE_PAGES] = light_words.data[pool + VELK_POOL_FREE_PAGES]
+                - min(light_words.data[pool + VELK_POOL_PAGES_TAKEN], light_words.data[pool + VELK_POOL_FREE_PAGES]);
             light_words.data[pool + VELK_POOL_FREE_PAGES] = 0u;
             // Kept for the pool's growth, which looks only now and then.
             light_words.data[pool + VELK_POOL_MOST_PAGES_WANTED] = max(light_words.data[pool + VELK_POOL_MOST_PAGES_WANTED],
