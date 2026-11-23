@@ -5557,18 +5557,29 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
                 VELK_LOG(I, "light pool +%u to %u pg ahead: %u free for %u frames", added, pool.pages(), free_pages,
                          kLightPoolAheadFrames);
             }
-            // Short only when a frame wanted more than the last sweep had free, or the pool is
-            // nearly full: else what pieces out of view hold (velk_pieces_keep_frames) is given back
-            // as the sweep frees them.
-            if (wanted != 0 && (wanted > free_pages || free_pages * 8u < pool.pages()) && pool.segments.size() < pool.max_segments) {
-                // What was asked for, and a segment more: room for pieces out of view to stay a
-                // while, so that turning back finds them. At least half the pool again: a frame
-                // asks for at most its split list's worth (VELK_LIGHT_SPLIT_CAPACITY), far less
-                // than a new view wants, so that the pool reaches it in a few steps.
-                const uint32_t asked = std::max(wanted + kLightSegmentPages, pool.pages() / 2u);
+            // Short only when frames still asked for pages that were not there a check after the
+            // first that did: a frame asking makes the sweep give back what pieces out of view hold
+            // (velk_pieces_keep_frames), which may be room enough.
+            // Frames still in flight when it last grew asked before its new pages were on the
+            // stack: the check after a growth does not count.
+            const bool settling = ctx.present_counter < pool.grew_frame + 8u;
+            if (!settling) {
+                pool.short_checks = wanted != 0 ? pool.short_checks + 1u : 0u;
+            }
+            if (!settling && pool.short_checks >= 2u && pool.segments.size() < pool.max_segments) {
+                pool.grew_frame = ctx.present_counter;
+                // What was asked for, and a segment more. Still short at the next check, at least
+                // half the pool again: a frame asks for at most its split list's worth
+                // (VELK_LIGHT_SPLIT_CAPACITY), far less than a new view wants, so that the pool
+                // reaches it in a few steps.
+                uint32_t asked = wanted + kLightSegmentPages;
+                if (pool.short_checks > 2u) {
+                    asked = std::max(asked, pool.pages() / 2u);
+                }
                 const uint32_t added = grow_light_pool(pool, *arena, (asked + kLightSegmentPages - 1u) / kLightSegmentPages);
-                VELK_LOG(I, "light pool +%u to %u pg: %u pages asked for were not there, %u free at the last sweep", added,
-                         pool.pages(), wanted, free_pages);
+                VELK_LOG(I, "light pool +%u to %u pg: %u pages asked for were not there, %u checks in a row, %u free at the "
+                            "last sweep",
+                         added, pool.pages(), wanted, pool.short_checks, free_pages);
             }
         }
         // What it holds, now and then, from the last frame's complete counts.

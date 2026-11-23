@@ -5429,9 +5429,10 @@ bool velk_pieces_marked(uint pool, uint page)
 // the more room it has, so that turning back to what went out of view finds its pieces and their
 // light. It shortens a step at a time as the pool fills, so that a burst of new pieces while the
 // camera turns does not let every piece out of view go at once. The room is what the last frame
-// left free: this runs before the sweep refills the stack. A pool that cannot grow and was asked
-// for pages it did not have keeps them half as long for each such frame in a row, down to an
-// eighth, so that the pieces read longest ago make room for those in view.
+// left free: this runs before the sweep refills the stack. A pool asked for pages it did not have
+// keeps them VELK_PIECE_KEEP_FRAMES, so that what out-of-view pieces were let keep goes to what is
+// in view before the pool grows; one that cannot grow, half as long for each such frame in a row,
+// down to an eighth, so that the pieces read longest ago make room for those in view.
 uint velk_pieces_keep_frames(uint pool)
 {
     uint free_pages = light_words.data[pool + VELK_POOL_LAST_FREE_PAGES];
@@ -5439,7 +5440,7 @@ uint velk_pieces_keep_frames(uint pool)
     uint demand = light_words.data[pool + VELK_POOL_DEMAND_FRAMES];
     // The free stack has room for the most pages the pool may have: all of them are there.
     bool at_most = pages == light_words.data[pool + VELK_POOL_MARKS_WORD] - light_words.data[pool + VELK_POOL_STACK_WORD];
-    if (at_most && demand > 0u) return VELK_PIECE_KEEP_FRAMES >> min(demand, 3u);
+    if (demand > 0u) return at_most ? VELK_PIECE_KEEP_FRAMES >> min(demand, 3u) : VELK_PIECE_KEEP_FRAMES;
     if (free_pages * 2u > pages) return 32u * VELK_PIECE_KEEP_FRAMES;
     if (free_pages * 4u > pages) return 8u * VELK_PIECE_KEEP_FRAMES;
     if (free_pages * 8u > pages) return 4u * VELK_PIECE_KEEP_FRAMES;
@@ -5677,6 +5678,8 @@ struct LightPool
     uint64_t check_frame = 0;      ///< When pages asked for were last read back.
     uint64_t low_since = 0;        ///< Since when it has been under a sixteenth free, 0 while not.
     uint64_t ahead_frame = 0;      ///< When it last grew ahead of a frame asking (kLightPoolAheadFrames).
+    uint32_t short_checks = 0;     ///< Checks in a row that found pages asked for and not there.
+    uint64_t grew_frame = 0;       ///< When it last grew for pages asked for.
     uint64_t log_frame = 0;        ///< When its counts were last logged.
     uint32_t recorded_pages = 0;   ///< What the culling recording sweeps.
     float rays = kLightTraceRays;  ///< The trace's budget in rays a frame (adjust_light_rays).
