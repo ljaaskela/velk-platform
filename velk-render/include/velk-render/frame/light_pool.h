@@ -208,7 +208,7 @@ inline constexpr uint32_t kLightMaxSegments = 64;
 /// Pixels VELK_LIGHT_READ can name for the lighting to write its terms at (VELK_POOL_READ_TERMS),
 /// and the words of each one's terms (VELK_LIGHT_READ_WORDS).
 inline constexpr uint32_t kLightReadPixels = 4;
-inline constexpr uint32_t kLightReadWords = 24;
+inline constexpr uint32_t kLightReadWords = 48;
 inline constexpr uint32_t kLightPoolAheadFrames = 40;
 inline constexpr uint32_t kLightPoolAheadEvery = 60;
 
@@ -326,7 +326,7 @@ inline constexpr uint32_t kLightPoolAheadEvery = 60;
                                                     kLightReadPixels words */                                        \
     X(ReadTerms, READ_TERMS, 195)                /* the lighting's terms at them, kLightReadWords each \
                                                     (VELK_LIGHT_READ_*) */                                           \
-    X(HeaderEnd, HEADER_END, 291)
+    X(HeaderEnd, HEADER_END, 387)
 
 #define VELK_LIGHT_POOL_CPP_WORD(cpp, glsl, word) inline constexpr uint32_t kLightPool##cpp = word;
 VELK_LIGHT_POOL_HEADER(VELK_LIGHT_POOL_CPP_WORD)
@@ -449,12 +449,30 @@ bool velk_light_inherits(uint value)
 #define VELK_LIGHT_TRUSTED_TRACES 8.0
 // kLightPixels.
 #define VELK_LIGHT_PIXELS 4.0
+)" R"(
 // A read pixel's terms (VELK_POOL_READ_TERMS), floats as their bits: its albedo, direct light,
 // indirect light, the environment's diffuse light, specular light in all, area lights' diffuse
 // light and the colour before tonemapping, three words each; then its metallic, whether its points
 // of light were traced and probes covered it (bits 0 and 1) with the frame that wrote them (the
 // bits from 8 on, its present counter), and how well the probes matched.
-#define VELK_LIGHT_READ_WORDS 24u
+#define VELK_LIGHT_READ_WORDS 48u
+// Then what it reads of its triangle's pieces (velk_light_explain), from word 24: its record's
+// light word, its triangle, its record's triangles in pieces, its record's coarse light, its
+// triangle's root word, the level it reads (a page, or VELK_PIECE_VERTICES), that level's depth
+// with its coarse cell (velk_way_cell) from bit 8 and its triangle's size on screen in pixels from
+// bit 16; then for its vertex points and for the level it reads, the three points around it: their
+// light words, their traces and their weights in 255ths, a byte each.
+#define VELK_LIGHT_READ_EXPLAIN 24u
+#define VELK_LIGHT_EXPLAIN_WORDS 21u
+#define VELK_LIGHT_EXPLAIN_RECORD 0u
+#define VELK_LIGHT_EXPLAIN_TRIANGLE 1u
+#define VELK_LIGHT_EXPLAIN_PIECED 2u
+#define VELK_LIGHT_EXPLAIN_COARSE 3u
+#define VELK_LIGHT_EXPLAIN_ROOT 4u
+#define VELK_LIGHT_EXPLAIN_PIECE 5u
+#define VELK_LIGHT_EXPLAIN_WAY 6u
+#define VELK_LIGHT_EXPLAIN_VERTICES 7u
+#define VELK_LIGHT_EXPLAIN_LEVEL 14u
 #define VELK_LIGHT_READ_ALBEDO 0u
 #define VELK_LIGHT_READ_DIRECT 3u
 #define VELK_LIGHT_READ_INDIRECT 6u
@@ -1699,6 +1717,57 @@ bool velk_light_direct(uint pool, uvec2 ids, vec3 b, vec3 at, float tri_size, fl
     }
     for (uint k = 0u; k < VELK_LIGHT_SLOTS; ++k) through[k] = sums[k].y / max(sums[k].x, 1e-6);
     return true;
+}
+)" R"(
+// For VELK_LIGHT_READ: what the pixel with ids `ids` at weights `b` (`at` relative to the camera,
+// `tri_size` its triangle's longest edge) reads of its triangle's pieces, into `e`
+// (VELK_LIGHT_EXPLAIN_*). VELK_LIGHT_NONE where it does not apply.
+void velk_light_explain(uint pool, uvec2 ids, vec3 b, vec3 at, float tri_size, out uint e[VELK_LIGHT_EXPLAIN_WORDS])
+{
+    for (uint k = 0u; k < VELK_LIGHT_EXPLAIN_WORDS; ++k) e[k] = VELK_LIGHT_NONE;
+    VelkDrawData d = velk_draw_data.data[velk_ids_draw(ids)];
+    uint record = velk_ids_record(d, ids);
+    if (record == VELK_NO_RECORD) return;
+    uint value = VELK_LIGHT_WORDS.data[record + VELK_RECORD_LIGHT];
+    e[VELK_LIGHT_EXPLAIN_RECORD] = value;
+    if (value >= VELK_LIGHT_ONE_VALUE || value >= VELK_LIGHT_WORDS.data[pool + VELK_POOL_PAGES]) return;
+    uint first = velk_light_page(pool, value);
+    uint cluster = velk_ids_cluster(d, ids);
+    if (cluster == VELK_NO_CLUSTER) return;
+    uint t = velk_ids_triangle(d, ids);
+    e[VELK_LIGHT_EXPLAIN_TRIANGLE] = t;
+    e[VELK_LIGHT_EXPLAIN_PIECED] = velk_light_pieced(first);
+    e[VELK_LIGHT_EXPLAIN_COARSE] = VELK_LIGHT_WORDS.data[first + VELK_PAGE_COARSE];
+    if (t >= velk_light_pieced(first)) return;
+    uint word = d.index_base + velk_cluster_first_index(cluster) + t * 3u;
+    uvec3 corners = uvec3(velk_mesh_words.data[word], velk_mesh_words.data[word + 1u], velk_mesh_words.data[word + 2u]);
+    GlobalData g = velk_globals.data[d.globals_base];
+    mat4 vp = g.view_projection;
+    float px_per_world = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * g.viewport.y * 0.5 / max(length(at), 1e-4);
+    uint root = VELK_LIGHT_WORDS.data[velk_light_root_word(pool, first, t)];
+    e[VELK_LIGHT_EXPLAIN_ROOT] = root;
+    VelkPieceWay way = velk_piece_way(pool, root, b, tri_size * px_per_world, VELK_LIGHT_PIXELS);
+    uint cell = velk_way_cell(pool, first, corners, way, true);
+    if (cell == 1u) velk_way_stop_at_coarse(way);
+    e[VELK_LIGHT_EXPLAIN_PIECE] = way.piece;
+    e[VELK_LIGHT_EXPLAIN_WAY] = way.depth | (cell << 8u) | (uint(clamp(tri_size * px_per_world, 0.0, 65535.0)) << 16u);
+    // Its vertex points, then the level it reads: each of the three points around it, its light,
+    // its traces and its weight in 255ths.
+    for (uint level = 0u; level < 2u; ++level) {
+        uint page = level == 0u ? VELK_PIECE_VERTICES : way.piece;
+        uint words[3];
+        vec3 w;
+        velk_way_around(pool, first, corners, page, level == 0u ? b : way.at, words, w);
+        uint base = level == 0u ? VELK_LIGHT_EXPLAIN_VERTICES : VELK_LIGHT_EXPLAIN_LEVEL;
+        uint weights = 0u;
+        for (uint k = 0u; k < 3u; ++k) {
+            e[base + k] = VELK_LIGHT_WORDS.data[words[k]];
+            e[base + 3u + k] = velk_light_point_traces(pool, first, page == VELK_PIECE_VERTICES ? VELK_LIGHT_NONE : page,
+                                                       VELK_LIGHT_WORDS.data[words[k] + 1u]);
+            weights |= uint(clamp(w[k], 0.0, 1.0) * 255.0 + 0.5) << (8u * k);
+        }
+        e[base + 6u] = weights;
+    }
 }
 )"
 

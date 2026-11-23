@@ -5601,6 +5601,22 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
                          t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8], t[9], t[10], t[11], t[12], t[13], t[14], t[15],
                          t[16], t[17], t[18], t[19], t[20], t[21], (flags & 1u) ? "traced" : "not traced",
                          (flags & 2u) ? "yes" : "no", t[23]);
+                // What it reads of its triangle's pieces (velk_light_explain): the first light's
+                // shade (0 lit to 15 blocked, - for none) and traces of each point, weights in 255ths.
+                const uint32_t* e = r + kLightReadPixels + k * kLightReadWords + 24u;
+                const auto shade = [](uint32_t word) { return word == kLightNone ? -1 : static_cast<int>(word & 15u); };
+                const auto level = [&](uint32_t at, char* text, size_t size) {
+                    std::snprintf(text, size, "%d/%u %d/%u %d/%u w %u %u %u", shade(e[at]), e[at + 3], shade(e[at + 1]), e[at + 4],
+                                  shade(e[at + 2]), e[at + 5], e[at + 6] & 255u, (e[at + 6] >> 8u) & 255u, (e[at + 6] >> 16u) & 255u);
+                };
+                char vertices[96];
+                char read_level[96];
+                level(7u, vertices, sizeof(vertices));
+                level(14u, read_level, sizeof(read_level));
+                VELK_LOG(I, "light read %u,%u frame %u: record %08x triangle %u of %u, coarse %08x, root %08x, reads %08x depth %u "
+                            "cell %u tri %u px; vertices %s; level %s",
+                         packed & 0xFFFFu, packed >> 16u, flags >> 8u, e[0], e[1], e[2], e[3], e[4], e[5], e[6] & 255u,
+                         (e[6] >> 8u) & 255u, e[6] >> 16u, vertices, read_level);
             }
         }
         // What it holds, now and then, from the last frame's complete counts.

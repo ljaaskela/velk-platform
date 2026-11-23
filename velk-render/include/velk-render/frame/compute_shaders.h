@@ -1792,6 +1792,12 @@ void main()
                 velk_light_cell_words.data[at + VELK_LIGHT_READ_FLAGS] = (points ? 1u : 0u) | (probed ? 2u : 0u)
                     | (VELK_GLOBALS.present_counter << 8u);
                 velk_light_cell_words.data[at + VELK_LIGHT_READ_MATCH] = floatBitsToUint(match);
+                uint explain[VELK_LIGHT_EXPLAIN_WORDS];
+                velk_light_explain(pc.spare3, velk_pixel_ids(pc.spare4, pc.spare2, coord), velk_pixel_weights(pc.spare4, pc.spare2, coord),
+                                   world_pos, position.w, explain);
+                for (uint e = 0u; e < VELK_LIGHT_EXPLAIN_WORDS; ++e) {
+                    velk_light_cell_words.data[at + VELK_LIGHT_READ_EXPLAIN + e] = explain[e];
+                }
             }
         }
     }
