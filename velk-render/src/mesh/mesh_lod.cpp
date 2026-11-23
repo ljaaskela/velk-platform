@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 
@@ -1013,6 +1014,182 @@ void build_rays(MeshLod& lod, const LodVertices& v, bool rays)
 
 } // namespace
 
+namespace {
+
+// A development aid (VELK_PATCH_STATS): how many of a mesh's triangles flat patches would hold.
+// In each cluster, neighbouring triangles within 2 degrees of a seed's plane and within a
+// thousandth of the cluster's radius of it form a patch; a patch fills its bounds well when its
+// area is at least 0.8 of the rectangle along its main axis, and one more than twice as long as
+// wide counts as that many square tiles. Logs triangles, long thin ones (an edge over four times
+// the height to it), those in well filled patches, roots per triangle against roots per patch
+// tile, and patches that fill their bounds poorly.
+void log_patch_stats(const MeshLod& lod, const vector<float>& positions, const vector<uint32_t>& remap)
+{
+    struct Totals
+    {
+        uint64_t triangles = 0, slivers = 0, patched = 0, slivers_patched = 0, roots_after = 0, poor = 0, poor_triangles = 0;
+        uint64_t patches = 0, two_triangle = 0, patched_half = 0, slivers_patched_half = 0;
+    } t;
+    const auto pos = [&](uint32_t id, int k) { return positions[size_t(id) * 3 + k]; };
+    for (const MeshLodCluster& cluster : lod.clusters) {
+        const uint32_t n = cluster.triangle_count;
+        if (n == 0) continue;
+        const uint32_t* ids = lod.indices.data() + cluster.index_word;
+        vector<float> normal(size_t(n) * 3, 0.f);
+        vector<float> area(n, 0.f);
+        vector<uint8_t> sliver(n, 0);
+        for (uint32_t i = 0; i < n; ++i) {
+            float e[3][3];
+            float len[3];
+            for (int k = 0; k < 3; ++k) {
+                for (int c = 0; c < 3; ++c) e[k][c] = pos(ids[i * 3 + (k + 1) % 3], c) - pos(ids[i * 3 + k], c);
+                len[k] = std::sqrt(e[k][0] * e[k][0] + e[k][1] * e[k][1] + e[k][2] * e[k][2]);
+            }
+            const float cx = e[0][1] * e[2][2] - e[0][2] * e[2][1];
+            const float cy = e[0][2] * e[2][0] - e[0][0] * e[2][2];
+            const float cz = e[0][0] * e[2][1] - e[0][1] * e[2][0];
+            const float twice = std::sqrt(cx * cx + cy * cy + cz * cz);
+            area[i] = 0.5f * twice;
+            if (twice > 0.f) {
+                normal[i * 3] = -cx / twice;
+                normal[i * 3 + 1] = -cy / twice;
+                normal[i * 3 + 2] = -cz / twice;
+            }
+            const float longest = std::max(std::max(len[0], len[1]), len[2]);
+            const float height = longest > 0.f ? twice / longest : 0.f;
+            sliver[i] = height > 0.f && longest > 4.f * height ? 1 : 0;
+            t.triangles += 1;
+            t.slivers += sliver[i];
+        }
+        // Edges by the welded ids of their ends, sorted, so that neighbours are found by search.
+        struct Edge
+        {
+            uint64_t key;
+            uint32_t triangle;
+        };
+        vector<Edge> edges;
+        edges.reserve(size_t(n) * 3);
+        for (uint32_t i = 0; i < n; ++i) {
+            for (int k = 0; k < 3; ++k) {
+                uint32_t a = remap[ids[i * 3 + k]];
+                uint32_t b = remap[ids[i * 3 + (k + 1) % 3]];
+                if (a > b) std::swap(a, b);
+                edges.push_back({(uint64_t(a) << 32) | b, i});
+            }
+        }
+        std::sort(edges.begin(), edges.end(), [](const Edge& x, const Edge& y) { return x.key < y.key; });
+        vector<uint32_t> order(n);
+        for (uint32_t i = 0; i < n; ++i) order[i] = i;
+        std::sort(order.begin(), order.end(), [&](uint32_t x, uint32_t y) { return area[x] > area[y]; });
+        vector<int32_t> patch_of(n, -1);
+        const float eps = std::max(cluster.own_radius * 1e-3f, 1e-6f);
+        const float cos_tol = 0.99939f;
+        vector<uint32_t> queue;
+        for (uint32_t seed : order) {
+            if (patch_of[seed] != -1 || area[seed] <= 0.f) continue;
+            const float* n0 = normal.data() + size_t(seed) * 3;
+            const float d0 = n0[0] * pos(ids[seed * 3], 0) + n0[1] * pos(ids[seed * 3], 1) + n0[2] * pos(ids[seed * 3], 2);
+            const int32_t id = static_cast<int32_t>(seed);
+            queue.clear();
+            queue.push_back(seed);
+            patch_of[seed] = id;
+            for (size_t q = 0; q < queue.size(); ++q) {
+                const uint32_t tri = queue[q];
+                for (int k = 0; k < 3; ++k) {
+                    uint32_t a = remap[ids[tri * 3 + k]];
+                    uint32_t b = remap[ids[tri * 3 + (k + 1) % 3]];
+                    if (a > b) std::swap(a, b);
+                    const uint64_t key = (uint64_t(a) << 32) | b;
+                    auto it = std::lower_bound(edges.begin(), edges.end(), key, [](const Edge& e, uint64_t v) { return e.key < v; });
+                    for (; it != edges.end() && it->key == key; ++it) {
+                        const uint32_t other = it->triangle;
+                        if (patch_of[other] != -1 || area[other] <= 0.f) continue;
+                        const float* no = normal.data() + size_t(other) * 3;
+                        if (no[0] * n0[0] + no[1] * n0[1] + no[2] * n0[2] < cos_tol) continue;
+                        bool near = true;
+                        for (int v = 0; v < 3 && near; ++v) {
+                            const uint32_t vid = ids[other * 3 + v];
+                            near = std::abs(n0[0] * pos(vid, 0) + n0[1] * pos(vid, 1) + n0[2] * pos(vid, 2) - d0) <= eps;
+                        }
+                        if (!near) continue;
+                        patch_of[other] = id;
+                        queue.push_back(other);
+                    }
+                }
+            }
+            if (queue.size() < 2) continue;
+            // Bounds along the patch's main axis in its plane: from the spread of its corners.
+            const float ux0 = std::abs(n0[0]) < 0.9f ? 1.f : 0.f;
+            const float uy0 = ux0 == 1.f ? 0.f : 1.f;
+            float u[3] = {uy0 * n0[2] - 0.f * n0[1], 0.f * n0[0] - ux0 * n0[2], ux0 * n0[1] - uy0 * n0[0]};
+            const float ul = std::sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
+            for (float& c : u) c /= ul;
+            const float w[3] = {n0[1] * u[2] - n0[2] * u[1], n0[2] * u[0] - n0[0] * u[2], n0[0] * u[1] - n0[1] * u[0]};
+            double sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0, sum_area = 0;
+            size_t corners = 0;
+            for (uint32_t tri : queue) {
+                sum_area += area[tri];
+                for (int v = 0; v < 3; ++v) {
+                    const uint32_t vid = ids[tri * 3 + v];
+                    const double x = u[0] * pos(vid, 0) + u[1] * pos(vid, 1) + u[2] * pos(vid, 2);
+                    const double y = w[0] * pos(vid, 0) + w[1] * pos(vid, 1) + w[2] * pos(vid, 2);
+                    sx += x; sy += y; sxx += x * x; syy += y * y; sxy += x * y;
+                    ++corners;
+                }
+            }
+            const double mx = sx / corners, my = sy / corners;
+            const double cxx = sxx / corners - mx * mx, cyy = syy / corners - my * my, cxy = sxy / corners - mx * my;
+            const double angle = 0.5 * std::atan2(2.0 * cxy, cxx - cyy);
+            const double ax = std::cos(angle), ay = std::sin(angle);
+            double lo0 = DBL_MAX, hi0 = -DBL_MAX, lo1 = DBL_MAX, hi1 = -DBL_MAX;
+            for (uint32_t tri : queue) {
+                for (int v = 0; v < 3; ++v) {
+                    const uint32_t vid = ids[tri * 3 + v];
+                    const double x = u[0] * pos(vid, 0) + u[1] * pos(vid, 1) + u[2] * pos(vid, 2);
+                    const double y = w[0] * pos(vid, 0) + w[1] * pos(vid, 1) + w[2] * pos(vid, 2);
+                    const double p0 = x * ax + y * ay, p1 = -x * ay + y * ax;
+                    lo0 = std::min(lo0, p0); hi0 = std::max(hi0, p0); lo1 = std::min(lo1, p1); hi1 = std::max(hi1, p1);
+                }
+            }
+            const double l0 = hi0 - lo0, l1 = hi1 - lo1;
+            const double longer = std::max(l0, l1), shorter = std::max(std::min(l0, l1), 1e-9);
+            const double fill = sum_area / std::max(l0 * l1, 1e-12);
+            t.patches += 1;
+            if (queue.size() == 2) t.two_triangle += 1;
+            if (fill >= 0.5) {
+                t.patched_half += queue.size();
+                for (uint32_t tri : queue) t.slivers_patched_half += sliver[tri];
+            }
+            if (fill < 0.8) {
+                t.poor += 1;
+                t.poor_triangles += queue.size();
+                for (uint32_t tri : queue) patch_of[tri] = -2;  // stays per triangle
+                continue;
+            }
+            t.roots_after += longer > 2.0 * shorter ? static_cast<uint64_t>(std::ceil(longer / shorter)) : 1u;
+            for (uint32_t tri : queue) {
+                t.patched += 1;
+                t.slivers_patched += sliver[tri];
+            }
+        }
+    }
+    t.roots_after += t.triangles - t.patched;
+    // The same as numbers alone, for summing over meshes: triangles, long thin, patched at a fill
+    // of 0.8 and of 0.5, the long thin of each, roots after, patches, two-triangle patches, poor.
+    VELK_LOG(I, "patch numbers: %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu", (unsigned long long)t.triangles,
+             (unsigned long long)t.slivers, (unsigned long long)t.patched, (unsigned long long)t.patched_half,
+             (unsigned long long)t.slivers_patched, (unsigned long long)t.slivers_patched_half, (unsigned long long)t.roots_after,
+             (unsigned long long)t.patches, (unsigned long long)t.two_triangle, (unsigned long long)t.poor);
+    VELK_LOG(I, "patch stats: %llu triangles, %llu long thin; %llu in well filled patches (%llu of the long thin); roots %llu "
+                "-> %llu; %llu patches (%llu of two triangles), %llu filling their bounds poorly (%llu triangles)",
+             (unsigned long long)t.triangles, (unsigned long long)t.slivers, (unsigned long long)t.patched,
+             (unsigned long long)t.slivers_patched, (unsigned long long)t.triangles, (unsigned long long)t.roots_after,
+             (unsigned long long)t.patches, (unsigned long long)t.two_triangle, (unsigned long long)t.poor,
+             (unsigned long long)t.poor_triangles);
+}
+
+} // namespace
+
 MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, const float* uv1, const uint32_t* colors,
                        uint32_t stride, uint32_t normal_offset, bool deforming)
 {
@@ -1220,6 +1397,7 @@ MeshLod build_mesh_lod(const BlasBuild& blas, const uint8_t* vertices, const flo
         fill_cluster_bounds(cluster, lod.indices, positions);
     }
     LodTreeBuilder{lod}.build();
+    if (!deforming && std::getenv("VELK_PATCH_STATS")) log_patch_stats(lod, positions, remap);
     if (vertices && !deforming) {
         own_vertices(lod, lod_vertices, lod_vertices.bytes.empty() ? vertices : lod_vertices.bytes.data(), uv1, colors);
     }
