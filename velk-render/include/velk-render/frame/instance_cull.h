@@ -5525,7 +5525,13 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
         }
         adjust_light_rays(pool, *arena, trace_ms, state.light_trace_ms);
         if (pool.segments.empty()) {
-            grow_light_pool(pool, *arena, 1u);
+            // A development aid: VELK_LIGHT_POOL_START starts the pool with that many segments.
+            uint32_t start = 1u;
+            if (const char* text = std::getenv("VELK_LIGHT_POOL_START")) {
+                const long n = std::strtol(text, nullptr, 10);
+                if (n > 1) start = static_cast<uint32_t>(n);
+            }
+            grow_light_pool(pool, *arena, start);
             VELK_LOG(I, "light pool: the trace fills the device at %u threads", pool.fill);
         } else if (ctx.present_counter >= pool.check_frame + 4u) {
             pool.check_frame = ctx.present_counter;

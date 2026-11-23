@@ -1014,6 +1014,8 @@ int main(int argc, char* argv[])
                     }
                     const inspect::Image small = inspect::downscale(image, kCompareScale);
                     const inspect::Difference d = inspect::compare(small, step_reference, tile);
+                    VELK_LOG(I, "inspect: %s step %d: mean %.4f p95 %.4f tile %.4f", name, k, static_cast<double>(d.mean),
+                             static_cast<double>(d.p95), static_cast<double>(d.worst_tile));
                     velk::string diff = run_path(spec, view, suffix);
                     diff.append("_diff.png");
                     inspect::save_png(*writer, inspect::difference_map(small, step_reference), diff);
