@@ -608,11 +608,17 @@ void build_soft(SceneBuilder& b)
 /// a tall block whose shadow crosses it with a wide penumbra, buildings all round, a few posts and
 /// a thin board as a sign: shadows on long thin triangles, settled, coming into view, and on
 /// turning back after long enough away that what was out of view went (the turn view).
-void build_pavement(SceneBuilder& b)
+// The paving scene, its ground the fan of long thin triangles or, as a control, a square grid of
+// as many triangles over the same place.
+void build_paving(SceneBuilder& b, bool fan)
 {
     set_sky(b, "pavement", 0.2f, 0.25f, 0.33f);
     add_sun(b, {50.f, 30.f, 0.f}, 0.8f, 2.f);
-    add_mesh(b, build_fan(raw(b), {-150.f, 0.f, 150.f}, 900.f, 128, standard(0.55f, 0.55f, 0.55f)), {});
+    if (fan) {
+        add_mesh(b, build_fan(raw(b), {-150.f, 0.f, 150.f}, 900.f, 128, standard(0.55f, 0.55f, 0.55f)), {});
+    } else {
+        add_mesh(b, build_ground(raw(b), 1800.f, 8, standard(0.55f, 0.55f, 0.55f)), {-150.f, 0.f, 150.f});
+    }
     add_mesh(b, build_box(raw(b), {70.f, 400.f, 260.f}, 8, standard(0.75f, 0.72f, 0.68f)), {300.f, 0.f, 120.f});
     // Buildings all round, so that every way the camera turns has shadows across the paving.
     const velk::IMesh::Ptr building = build_box(raw(b), {120.f, 300.f, 120.f}, 8, standard(0.72f, 0.7f, 0.66f));
@@ -623,6 +629,16 @@ void build_pavement(SceneBuilder& b)
     const velk::IMesh::Ptr post = build_box(raw(b), {6.f, 70.f, 6.f}, 2, standard(0.2f, 0.2f, 0.2f));
     for (int i = 0; i < 3; ++i) add_mesh(b, post, {-120.f + static_cast<float>(i) * 70.f, 0.f, 40.f});
     add_mesh(b, build_box(raw(b), {40.f, 60.f, 3.f}, 2, standard(0.4f, 0.28f, 0.15f)), {60.f, 0.f, 70.f});
+}
+
+void build_pavement(SceneBuilder& b)
+{
+    build_paving(b, true);
+}
+
+void build_pavement_grid(SceneBuilder& b)
+{
+    build_paving(b, false);
 }
 
 /// A line of text standing on a plane under a sun: the shadow of glyphs, not of their quads.
@@ -848,6 +864,9 @@ const velk::vector<SceneSpec>& scenes()
           {"turn", {{0.f, -110.f, 300.f}, -35.f, -15.f}, {{0.f, -110.f, 300.f}, 145.f, -15.f}, 10, false, nullptr, 1100},
           {"glide", {{0.f, -110.f, 300.f}, -35.f, -15.f}, {{0.f, -110.f, 300.f}, 145.f, -15.f}, 0, false, nullptr, 0, 180}},
          build_pavement},
+        {"pavement_grid", "the paving scene with a square grid of as many triangles in place of the fan: a control for shadows on long thin triangles",
+         {{"turn", {{0.f, -110.f, 300.f}, -35.f, -15.f}, {{0.f, -110.f, 300.f}, 145.f, -15.f}, 10}},
+         build_pavement_grid, nullptr, false},
         {"text", "a line of text standing on a plane under a sun: glyph shadows",
          {{"front", {{0.f, -110.f, 300.f}, 0.f, -15.f}}, {"low", {{200.f, -50.f, 200.f}, 40.f, -8.f}}},
          build_text},
