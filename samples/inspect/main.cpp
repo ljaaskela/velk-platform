@@ -973,6 +973,7 @@ int main(int argc, char* argv[])
                 for (int k = 1; k <= view.move_frames; ++k) {
                     place_camera(main_camera, inspect::motion_place(view, k));
                     if (!frame()) return 1;
+                    VELK_LOG(I, "inspect: %s step %d", name, k);
                     step_ms.push_back(frame_ms(*backend));
                     add_passes(step_passes);
                     inspect::Image image;
