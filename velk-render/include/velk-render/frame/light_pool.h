@@ -452,7 +452,8 @@ bool velk_light_inherits(uint value)
 // A read pixel's terms (VELK_POOL_READ_TERMS), floats as their bits: its albedo, direct light,
 // indirect light, the environment's diffuse light, specular light in all, area lights' diffuse
 // light and the colour before tonemapping, three words each; then its metallic, whether its points
-// of light were traced and probes covered it (bits 0 and 1), and how well the probes matched.
+// of light were traced and probes covered it (bits 0 and 1) with the frame that wrote them (the
+// bits from 8 on, its present counter), and how well the probes matched.
 #define VELK_LIGHT_READ_WORDS 24u
 #define VELK_LIGHT_READ_ALBEDO 0u
 #define VELK_LIGHT_READ_DIRECT 3u
@@ -5707,6 +5708,7 @@ struct LightPool
     uint64_t ahead_frame = 0;      ///< When it last grew ahead of a frame asking (kLightPoolAheadFrames).
     uint32_t short_checks = 0;     ///< Checks in a row that found pages asked for and not there.
     uint64_t grew_frame = 0;       ///< When it last grew for pages asked for.
+    bool reads = false;            ///< Whether VELK_LIGHT_READ named pixels, logged every frame.
     uint64_t log_frame = 0;        ///< When its counts were last logged.
     uint32_t recorded_pages = 0;   ///< What the culling recording sweeps.
     float rays = kLightTraceRays;  ///< The trace's budget in rays a frame (adjust_light_rays).
@@ -5780,7 +5782,10 @@ inline bool ensure_light_pool(LightPool& pool, IGpuArena& arena, uint64_t device
             const unsigned long x = std::strtoul(at, &end, 10);
             if (end && *end == ',') {
                 const unsigned long y = std::strtoul(end + 1, &end, 10);
-                if (x < 65536u && y < 65536u) initial[kLightPoolReadPixels + k++] = uint32_t(x) | (uint32_t(y) << 16u);
+                if (x < 65536u && y < 65536u) {
+                    initial[kLightPoolReadPixels + k++] = uint32_t(x) | (uint32_t(y) << 16u);
+                    pool.reads = true;
+                }
             }
             at = std::strchr(at, ';');
             if (at) ++at;

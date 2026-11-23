@@ -5582,6 +5582,27 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
                          added, pool.pages(), wanted, pool.short_checks, free_pages);
             }
         }
+        // VELK_LIGHT_READ's pixels, every frame: the lighting's terms at each, before tonemapping,
+        // with the frame that wrote them (a pixel nothing lit keeps an older frame's).
+        if (pool.header.valid() && pool.reads) {
+            uint32_t r[kLightReadPixels * (1u + kLightReadWords)] = {};
+            arena->read_at(pool.header.offset() + uint64_t(kLightPoolReadPixels) * sizeof(uint32_t), r, sizeof(r));
+            for (uint32_t k = 0; k < kLightReadPixels; ++k) {
+                const uint32_t packed = r[k];
+                if (packed == kLightNone) continue;
+                float t[kLightReadWords];
+                std::memcpy(t, r + kLightReadPixels + k * kLightReadWords, sizeof(t));
+                uint32_t flags = 0;
+                std::memcpy(&flags, t + 22, sizeof(flags));
+                VELK_LOG(I, "light read %u,%u frame %u (now %llu): albedo %.3f %.3f %.3f, direct %.3f %.3f %.3f, indirect "
+                            "%.3f %.3f %.3f, env %.3f %.3f %.3f, specular %.3f %.3f %.3f, area %.3f %.3f %.3f, colour %.3f %.3f "
+                            "%.3f, metallic %.2f, points %s, probed %s, match %.2f",
+                         packed & 0xFFFFu, packed >> 16u, flags >> 8u, static_cast<unsigned long long>(ctx.present_counter),
+                         t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8], t[9], t[10], t[11], t[12], t[13], t[14], t[15],
+                         t[16], t[17], t[18], t[19], t[20], t[21], (flags & 1u) ? "traced" : "not traced",
+                         (flags & 2u) ? "yes" : "no", t[23]);
+            }
+        }
         // What it holds, now and then, from the last frame's complete counts.
         if (pool.header.valid() && ctx.present_counter >= pool.log_frame + 30u) {
             pool.log_frame = ctx.present_counter;
@@ -5682,21 +5703,6 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
                      h[kLightPoolSumPiecesFreed], h[kLightPoolSumPiecesUnread], h[kLightPoolSumPiecesMerged],
                      h[kLightPoolSumSplitsRefused]);
             clear(kLightPoolSumPiecesUnread, 2u);
-            // VELK_LIGHT_READ's pixels: the lighting's terms at each, before tonemapping.
-            for (uint32_t k = 0; k < kLightReadPixels; ++k) {
-                const uint32_t packed = h[kLightPoolReadPixels + k];
-                if (packed == kLightNone) continue;
-                float t[kLightReadWords];
-                std::memcpy(t, h + kLightPoolReadTerms + k * kLightReadWords, sizeof(t));
-                uint32_t flags = 0;
-                std::memcpy(&flags, t + 22, sizeof(flags));
-                VELK_LOG(I, "light read %u,%u: albedo %.3f %.3f %.3f, direct %.3f %.3f %.3f, indirect %.3f %.3f %.3f, env "
-                            "%.3f %.3f %.3f, specular %.3f %.3f %.3f, area %.3f %.3f %.3f, colour %.3f %.3f %.3f, metallic %.2f, "
-                            "points %s, probed %s, match %.2f",
-                         packed & 0xFFFFu, packed >> 16u, t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8], t[9], t[10],
-                         t[11], t[12], t[13], t[14], t[15], t[16], t[17], t[18], t[19], t[20], t[21],
-                         (flags & 1u) ? "traced" : "not traced", (flags & 2u) ? "yes" : "no", t[23]);
-            }
             // What the culling arena holds: in use of its buffer, and this view's part of it.
             uint64_t cut_bytes = 0;
             for (const auto& c : state.cuts) cut_bytes += c.region.size();

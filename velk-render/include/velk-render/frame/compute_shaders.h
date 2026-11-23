@@ -1789,7 +1789,8 @@ void main()
                     for (uint c = 0u; c < 3u; ++c) velk_light_cell_words.data[at + t * 3u + c] = floatBitsToUint(terms[t][c]);
                 }
                 velk_light_cell_words.data[at + VELK_LIGHT_READ_METALLIC] = floatBitsToUint(metallic);
-                velk_light_cell_words.data[at + VELK_LIGHT_READ_FLAGS] = (points ? 1u : 0u) | (probed ? 2u : 0u);
+                velk_light_cell_words.data[at + VELK_LIGHT_READ_FLAGS] = (points ? 1u : 0u) | (probed ? 2u : 0u)
+                    | (VELK_GLOBALS.present_counter << 8u);
                 velk_light_cell_words.data[at + VELK_LIGHT_READ_MATCH] = floatBitsToUint(match);
             }
         }

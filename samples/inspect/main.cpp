@@ -266,6 +266,11 @@ int main(int argc, char* argv[])
     long reference_frames = 128;
     long capture_frame = 0;
     size_t then_view = kViewCount;
+    // reference with glide_at=F,F,...: a glide view's references at those frames of its motion
+    // instead of the judged ones, for comparing a run's frame with poses around it. F:M places
+    // the camera at frame F and what the scene moves at frame M, saved as _glideF_mM.
+    velk::vector<long> glide_at;
+    velk::vector<long> glide_movers_at;
     for (int i = 1; i < argc; ++i) {
         const char* arg = argv[i];
         if (std::strcmp(arg, "verify") == 0) {
@@ -282,6 +287,15 @@ int main(int argc, char* argv[])
             only_views = arg + 6;
         } else if (std::strncmp(arg, "settle=", 7) == 0) {
             settle_frames = std::max(1l, std::atol(arg + 7));
+        } else if (std::strncmp(arg, "glide_at=", 9) == 0) {
+            for (const char* at = arg + 9; at && *at;) {
+                char* end = nullptr;
+                const long camera_at = std::strtol(at, &end, 10);
+                glide_at.push_back(camera_at);
+                glide_movers_at.push_back(end && *end == ':' ? std::strtol(end + 1, nullptr, 10) : -1);
+                at = std::strchr(at, ',');
+                if (at) ++at;
+            }
         } else if (std::strncmp(arg, "frames=", 7) == 0) {
             reference_frames = std::max(1l, std::atol(arg + 7));
         } else if (std::strncmp(arg, "capture=", 8) == 0) {
@@ -581,17 +595,23 @@ int main(int argc, char* argv[])
                 // A smooth camera motion: references at the frames a run judges, the camera and
                 // what the scene moves where that frame has them.
                 if (mode == Mode::Reference && view.glide_frames > 0) {
-                    for (int k = 1; k <= kGlideSamples; ++k) {
-                        const long at = glide_frame(view, k);
+                    const int count = glide_at.empty() ? kGlideSamples : static_cast<int>(glide_at.size());
+                    for (int k = 1; k <= count; ++k) {
+                        const long at = glide_at.empty() ? glide_frame(view, k) : glide_at[k - 1];
+                        const long movers_at = glide_at.empty() || glide_movers_at[k - 1] < 0 ? at : glide_movers_at[k - 1];
                         place_camera(main_camera, inspect::glide_place(view, at));
                         for (long f = 0; f < reference_frames; ++f) {
-                            inspect::place_glide_movers(built, view, at);
+                            inspect::place_glide_movers(built, view, movers_at);
                             if (!frame()) return 1;
                         }
                         inspect::Image image;
                         if (!grab(image)) return 1;
                         char suffix[32];
-                        std::snprintf(suffix, sizeof(suffix), "_glide%ld", at);
+                        if (movers_at == at) {
+                            std::snprintf(suffix, sizeof(suffix), "_glide%ld", at);
+                        } else {
+                            std::snprintf(suffix, sizeof(suffix), "_glide%ld_m%ld", at, movers_at);
+                        }
                         velk::string ref = reference_path(spec, view, suffix);
                         velk::string png = ref;
                         ref.append(".ref");
@@ -622,6 +642,7 @@ int main(int argc, char* argv[])
                         glide_ms.push_back(frame_ms(*backend));
                         if (next > kGlideSamples || f != glide_frame(view, next)) continue;
                         ++next;
+                        VELK_LOG(I, "inspect: %s judged at frame %ld", name, f);
                         inspect::Image image;
                         if (!grab(image)) return 1;
                         char suffix[32];
@@ -629,6 +650,22 @@ int main(int argc, char* argv[])
                         velk::string ours = run_path(spec, view, suffix);
                         ours.append(".png");
                         inspect::save_png(*writer, image, ours);
+                        // With then=VIEW: that debug view too, two frames later, the pose held.
+                        if (then_view != kViewCount) {
+                            main_camera.camera.set_debug_view(kViews[then_view].view);
+                            for (int held = 0; held < 2; ++held) {
+                                inspect::place_glide_movers(built, view, f);
+                                if (!frame()) return 1;
+                            }
+                            inspect::Image debug_image;
+                            if (!grab(debug_image)) return 1;
+                            velk::string debug_path = run_path(spec, view, suffix);
+                            debug_path.append("_");
+                            debug_path.append(kViews[then_view].key);
+                            debug_path.append(".png");
+                            inspect::save_png(*writer, debug_image, debug_path);
+                            main_camera.camera.set_debug_view(kViews[start_view].view);
+                        }
                         velk::string ref = reference_path(spec, view, suffix);
                         ref.append(".ref");
                         inspect::Image glide_reference;
