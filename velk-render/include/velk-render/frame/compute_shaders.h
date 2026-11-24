@@ -1294,7 +1294,7 @@ void velk_surface_lights(bool points, uint point_lights[VELK_LIGHT_SLOTS], float
         float NdotL = max(dot(N, L), 0.0);
         float diffuse = stand_in >= 0.0 ? mix(velk_ball_response(L, V), max(dot(face, L), 0.0), stand_in)
                                         : mix(NdotL, max(-dot(N, L), 0.0), transmission);
-        if (diffuse <= 0.0 || atten <= 0.0) continue;
+        if ((diffuse <= 0.0 && NdotL <= 0.0) || atten <= 0.0) continue;
         vec3 radiance = light.color_intensity.rgb * light.color_intensity.a * atten;
         direct += diffuse * radiance * through;
         if (NdotL <= 0.0) continue;
@@ -1305,7 +1305,9 @@ void velk_surface_lights(bool points, uint point_lights[VELK_LIGHT_SLOTS], float
         float D = ggx_d(NdotH, a);
         float G = smith_g(NdotV, NdotL, roughness);
         vec3 F = fresnel_schlick(VdotH, F0);
-        highlights += (D * G) * F / max(4.0 * NdotV * NdotL, 1e-6) * NdotL * radiance * through;
+        // A light's intensity is the irradiance it gives over pi (diffuse is albedo times it, as the
+        // indirect light, a radiance, is), so its highlight takes pi back, as an area light's does.
+        highlights += (D * G) * F / max(4.0 * NdotV * NdotL, 1e-6) * NdotL * radiance * through * 3.14159265;
     }
 }
 )"
@@ -2186,6 +2188,11 @@ float velk_hit_transmission = 0.0;
 // Whether the surface being shaded is seen from both sides (VELK_DRAW_DOUBLE_SIDED), set by
 // velk_hit_context: only such a thin sheet passes light through.
 bool velk_hit_two_sided = false;
+// Whether the lights' highlights count where this path is: from the camera and along mirror
+// reflections, but not once it has bounced off a surface diffusely, as the deferred lighting's
+// bounce light is diffuse only (and those highlights' light, the lights seen in a gloss from a
+// diffuse surface, would only sparkle at a reference's sample counts).
+bool velk_shade_highlights = true;
 
 BrdfSample velk_pbr_shade(MaterialEval eval, EvalContext ctx)
 {
@@ -2226,10 +2233,25 @@ BrdfSample velk_pbr_shade(MaterialEval eval, EvalContext ctx)
         // behind it, its shadow ray leaving the side the light is on.
         float facing = dot(N, L);
         float lobe = facing > 0.0 ? (1.0 - transmission) * facing : transmission * -facing;
-        if (lobe <= 0.0 || atten <= 0.0) continue;
+        if ((lobe <= 0.0 && facing <= 0.0) || atten <= 0.0) continue;
         float shadow = velk_eval_shadow(light.flags.y, li, ctx.rel_pos, facing > 0.0 ? N : -N);
         vec3 radiance = light.color_intensity.rgb * light.color_intensity.a * atten * shadow;
         direct += base * (1.0 - metallic) * lobe * radiance * li_weight;
+        // Its highlight, on the side the light is on, as the deferred lighting's: GGX, Smith and
+        // Schlick, times pi, since a light's intensity is the irradiance it gives over pi.
+        // Continuing rays never meet a light, so this is its only highlight.
+        if (facing > 0.0 && velk_shade_highlights) {
+            vec3 Hl = normalize(L + V);
+            float NdotH = max(dot(N, Hl), 0.0);
+            float VdotH = max(dot(V, Hl), 0.0);
+            float a2 = roughness * roughness * roughness * roughness;
+            float dd = NdotH * NdotH * (a2 - 1.0) + 1.0;
+            float D = a2 / max(3.14159265 * dd * dd, 1e-6);
+            float k = (roughness + 1.0) * (roughness + 1.0) * 0.125;
+            float G = VdotN / max(VdotN * (1.0 - k) + k, 1e-6) * facing / max(facing * (1.0 - k) + k, 1e-6);
+            vec3 Fl = (F0 + (vec3(1.0) - F0) * pow(clamp(1.0 - VdotH, 0.0, 1.0), 5.0)) * eval.specular_factor;
+            direct += D * G * Fl / max(4.0 * VdotN * facing, 1e-6) * facing * radiance * li_weight * 3.14159265;
+        }
     }
 
     // Diffuse term: crude "irradiance at the normal" via a single env
@@ -2456,6 +2478,7 @@ vec3 reference_path(Ray ray, out vec3 first)
     first = vec3(0.0);
     vec3 total = vec3(0.0);
     vec3 carried = vec3(1.0);
+    velk_shade_highlights = true;
     for (uint bounce = 0u; bounce < kBounces; ++bounce) {
         RayHit hit;
         if (!trace_closest_hit(ray, 1e30, hit)) {
@@ -2494,6 +2517,7 @@ vec3 reference_path(Ray ray, out vec3 first)
             if (dot(ray.dir, side) <= 0.0) break;
         } else {
             carried *= velk_hit_diffuse / (1.0 - specular_share);
+            velk_shade_highlights = false;
             // Through a thin sheet as often as it passes light through: to its other side.
             if (rng_next_float() < velk_hit_transmission) {
                 n = -n;
