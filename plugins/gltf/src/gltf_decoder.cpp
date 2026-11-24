@@ -405,8 +405,8 @@ IMaterial::Ptr build_material(const cgltf_data* data, const cgltf_material& m,
         mat.set_roughness(1.f - sg.glossiness_factor);
 
         // Its reflectance at normal incidence as the specular colour over 0.04, which may exceed
-        // 1 (up to a reflectance of 1), at full strength: black reflects nothing, polished
-        // marble's 1 reflects fully.
+        // 1 (up to a reflectance of 1), at full strength: black reflects nothing head on (still
+        // fully at grazing, as Schlick has it), polished marble's 1 reflects fully.
         mat.specular().set_factor(1.f);
         mat.specular_color().set_factor({sg.specular_factor[0] / 0.04f,
                                           sg.specular_factor[1] / 0.04f,
