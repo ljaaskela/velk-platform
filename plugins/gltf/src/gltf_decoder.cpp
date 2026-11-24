@@ -404,18 +404,13 @@ IMaterial::Ptr build_material(const cgltf_data* data, const cgltf_material& m,
         mat.set_metallic(0.f);
         mat.set_roughness(1.f - sg.glossiness_factor);
 
-        const float smax = std::max({sg.specular_factor[0],
-                                     sg.specular_factor[1],
-                                     sg.specular_factor[2]});
-        if (smax > 0.f) {
-            // F0 caps at 0.04 in the specular extension; values above
-            // (e.g. polished marble's F0 ~= 1.0) get clamped and look
-            // matte. Heuristic upgrade to metal is a future improvement.
-            mat.specular().set_factor(std::min(smax / 0.04f, 1.f));
-            mat.specular_color().set_factor({sg.specular_factor[0] / smax,
-                                              sg.specular_factor[1] / smax,
-                                              sg.specular_factor[2] / smax, 1.f});
-        }
+        // Its reflectance at normal incidence as the specular colour over 0.04, which may exceed
+        // 1 (up to a reflectance of 1), at full strength: black reflects nothing, polished
+        // marble's 1 reflects fully.
+        mat.specular().set_factor(1.f);
+        mat.specular_color().set_factor({sg.specular_factor[0] / 0.04f,
+                                          sg.specular_factor[1] / 0.04f,
+                                          sg.specular_factor[2] / 0.04f, 1.f});
 
         // Per-pixel data: split specularGlossinessTexture (RGB = sRGB
         // specular tint, A = linear glossiness) into two new textures:
