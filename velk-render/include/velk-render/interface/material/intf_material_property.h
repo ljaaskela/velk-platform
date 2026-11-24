@@ -87,14 +87,23 @@ public:
     )
 };
 
-/// KHR_materials_specular: specularFactor + specularTexture (A channel),
-/// specularColorFactor + specularColorTexture (RGB channels).
+/// KHR_materials_specular: specularFactor + specularTexture (A channel, linear).
+/// The strength of a dielectric's reflection, at grazing angles too.
 class ISpecularProperty : public Interface<ISpecularProperty>
 {
 public:
     VELK_INTERFACE(
-        (PROP, float, factor, 1.f),
-        (PROP, color, color_factor, (color{1.f, 1.f, 1.f, 1.f}))
+        (PROP, float, factor, 1.f)
+    )
+};
+
+/// KHR_materials_specular: specularColorFactor + specularColorTexture (RGB channels, sRGB).
+/// Tints a dielectric's reflection at normal incidence; may exceed 1.
+class ISpecularColorProperty : public Interface<ISpecularColorProperty>
+{
+public:
+    VELK_INTERFACE(
+        (PROP, color, factor, (color{1.f, 1.f, 1.f, 1.f}))
     )
 };
 

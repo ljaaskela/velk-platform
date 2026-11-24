@@ -1145,13 +1145,15 @@ void DeferredPath::emit_visibility_resolve_pass(ViewState& vs, const RenderView&
         float env_params[2];
         uint32_t extras[4];
         uint32_t env[4];
+        uint32_t more[4];
     };
     // No lights here, so their count carries the words of each pixel. See RESOLVE_TINY.
     const PushC pc{0u, render_view.view_globals_base, static_cast<uint32_t>(vs.pixel_words.offset() / sizeof(uint32_t)),
                    0u, {0.f, 0.f},
                    {vs.visibility->attachment(0), vs.visibility_size.x, vs.visibility_size.y, handle(GBufferAttachment::Albedo)},
                    {handle(GBufferAttachment::Normal), handle(GBufferAttachment::WorldPos),
-                    handle(GBufferAttachment::MaterialParams), handle(GBufferAttachment::Emissive)}};
+                    handle(GBufferAttachment::MaterialParams), handle(GBufferAttachment::Emissive)},
+                   {handle(GBufferAttachment::Specular), 0u, 0u, 0u}};
 
     bool dirty = true;
     emit_cached_view_pass(vs.visibility_resolve_pass, dirty,
@@ -2439,6 +2441,8 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     pc.worldpos_tex_id = worldpos_id;
     pc.material_tex_id = material_id;
     pc.emissive_tex_id = emissive_id;
+    // A dielectric's reflectance (GBufferAttachment::Specular).
+    pc.spare6 = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Specular));
     pc.width  = static_cast<uint32_t>(w);
     pc.height = static_cast<uint32_t>(h);
     pc.light_count = static_cast<uint32_t>(render_view.lights.size());

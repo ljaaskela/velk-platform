@@ -320,8 +320,7 @@ ReturnValue StandardMaterial::write_draw_data(void* out, size_t size, ITextureRe
 
             // Common per-property base surface — every IMaterialProperty
             // carries a tex_coord PROP that selects TEXCOORD_0 (0) or
-            // TEXCOORD_1 (1). Read once per property; specular has a second
-            // tex_coord for its color texture and is handled below.
+            // TEXCOORD_1 (1). Read once per property.
             uint32_t tc = 0;
             if (auto r = read_state<IMaterialProperty>(prop)) {
                 tc = static_cast<uint32_t>(r->tex_coord);
@@ -362,14 +361,14 @@ ReturnValue StandardMaterial::write_draw_data(void* out, size_t size, ITextureRe
             } else if (cid == ClassId::SpecularProperty) {
                 if (auto r = read_state<ISpecularProperty>(prop)) {
                     p.specular.factor = r->factor;
-                    p.specular.color_factor = r->color_factor;
                 }
                 p.specular.texture_id = resolve(tex);
                 p.specular.tex_coord = tc;
-                // Specular_color may use a different UV set per glTF
-                // KHR_materials_specular. Round 1 leaves it equal to the
-                // base specular tex_coord; the importer in round 2 will
-                // populate it from the spec's separate texCoord field.
+            } else if (cid == ClassId::SpecularColorProperty) {
+                if (auto r = read_state<ISpecularColorProperty>(prop)) {
+                    p.specular.color_factor = r->factor;
+                }
+                p.specular.color_texture_id = resolve(tex);
                 p.specular.color_tex_coord = tc;
             }
         }
@@ -468,6 +467,7 @@ vector<ISurface*> StandardMaterial::get_textures() const
     out.push_back(property_texture(get_material_property(ClassId::OcclusionProperty)));
     out.push_back(property_texture(get_material_property(ClassId::EmissiveProperty)));
     out.push_back(property_texture(get_material_property(ClassId::SpecularProperty)));
+    out.push_back(property_texture(get_material_property(ClassId::SpecularColorProperty)));
     return out;
 }
 

@@ -830,6 +830,37 @@ void build_leaf_area(SceneBuilder& b)
     build_leaf_lit(b, false);
 }
 
+/// Glossy grey balls under a sun, each with its own KHR_materials_specular settings: as glTF's
+/// default, half strength, a red tint, a tint above 1, and half metal.
+void build_specular(SceneBuilder& b)
+{
+    set_sky(b, "specular", 0.2f, 0.25f, 0.33f);
+    add_sun(b, {50.f, 30.f, 0.f}, 0.8f);
+    add_mesh(b, build_ground(raw(b), 1200.f, 64, standard(0.5f, 0.5f, 0.5f)), {});
+    const auto ball = [&](float x, float specular, const velk::color& tint, float metallic) {
+        auto material = velk::material::create_standard(velk::color{0.5f, 0.5f, 0.5f, 1.f}, metallic, 0.25f);
+        material.specular().set_factor(specular);
+        material.specular_color().set_factor(tint);
+        velk::Mesh mesh(b.ctx.build_sphere(32));
+        mesh.set_material(0, material);
+        const float radius = 35.f;
+        auto element = velk::create_element();
+        auto trs = velk::trait::transform::create_trs();
+        trs.set_translate({x - radius, -2.f * radius, -radius});
+        trs.set_scale({radius * 2.f, radius * 2.f, radius * 2.f});
+        element.add_trait(trs);
+        auto visual = velk::trait::visual::create_mesh();
+        visual.set_mesh(mesh);
+        element.add_trait(visual);
+        place(b, element);
+    };
+    ball(-180.f, 1.f, velk::color{1.f, 1.f, 1.f, 1.f}, 0.f);
+    ball(-90.f, 0.5f, velk::color{1.f, 1.f, 1.f, 1.f}, 0.f);
+    ball(0.f, 1.f, velk::color{1.f, 0.5f, 0.5f, 1.f}, 0.f);
+    ball(90.f, 1.f, velk::color{2.f, 1.f, 1.f, 1.f}, 0.f);
+    ball(180.f, 0.5f, velk::color{1.f, 1.f, 1.f, 1.f}, 0.5f);
+}
+
 velk::Light add_look_light(SceneBuilder& b, const velk::vec3& position, bool sun, float size, float day, float night)
 {
     auto light = sun ? velk::trait::render::create_directional_light(velk::color{1.f, 0.96f, 0.88f, 1.f}, day)
@@ -1001,6 +1032,9 @@ const velk::vector<SceneSpec>& scenes()
         {"pavement_grid", "the paving scene with a square grid of as many triangles in place of the fan: a control for shadows on long thin triangles",
          {{"turn", {{0.f, -110.f, 300.f}, -35.f, -15.f}, {{0.f, -110.f, 300.f}, 145.f, -15.f}, 10}},
          build_pavement_grid, nullptr, false},
+        {"specular", "glossy balls with KHR_materials_specular strengths and tints under a sun: highlights and reflections by material",
+         {{"front", {{0.f, -90.f, 330.f}, 0.f, -10.f}}},
+         build_specular},
         {"text", "a line of text standing on a plane under a sun: glyph shadows",
          {{"front", {{0.f, -110.f, 300.f}, 0.f, -15.f}}, {"low", {{200.f, -50.f, 200.f}, 40.f, -8.f}}},
          build_text},

@@ -61,6 +61,7 @@ ReturnValue RenderPlugin::initialize(IVelk& velk, PluginConfig& config)
     rv &= register_type<impl::OcclusionProperty>(velk);
     rv &= register_type<impl::EmissiveProperty>(velk);
     rv &= register_type<impl::SpecularProperty>(velk);
+    rv &= register_type<impl::SpecularColorProperty>(velk);
     rv &= register_type<impl::MaterialOptions>(velk);
     rv &= register_type<impl::RtShadow>(velk);
     rv &= register_type<impl::ProgramDataBuffer>(velk);

@@ -26,6 +26,7 @@ inline constexpr Uid NormalProperty{"06a7f15d-0787-4b46-ba50-86c8bc2ef3a2"};
 inline constexpr Uid OcclusionProperty{"9c20673d-48af-4431-9a88-08739644fd10"};
 inline constexpr Uid EmissiveProperty{"72229e6c-15db-4cda-8d30-58e66e95c679"};
 inline constexpr Uid SpecularProperty{"447cb08a-10b9-49f0-bcc5-18c57799608a"};
+inline constexpr Uid SpecularColorProperty{"62ff364f-ef97-4677-b735-d1967ea4c58a"};
 
 /** @brief Pipeline-state options attachable to any material. */
 inline constexpr Uid MaterialOptions{"791cbf4f-7a8b-4343-b12a-a278fc46393e"};

@@ -65,7 +65,8 @@ public:
         SlotOcclusion = 3,
         SlotEmissive = 4,
         SlotSpecular = 5,
-        SlotCount = 6,
+        SlotSpecularColor = 6,
+        SlotCount = 7,
     };
 
 private:

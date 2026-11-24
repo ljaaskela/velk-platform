@@ -267,6 +267,7 @@ layout(set = 0, binding = 0) uniform usampler2D velk_textures_uint[];
 #define RESOLVE_POSITION pc.env.y
 #define RESOLVE_MATERIAL pc.env.z
 #define RESOLVE_EMISSIVE pc.env.w
+#define RESOLVE_SPECULAR pc.more.x
 // The resolve has no lights, so their count carries the word of the depth plane that compute raster drew to, a word a pixel
 // (instance_tiny_draw_src). After it come the pixels' ids, two words a pixel
 // (velk_pixel_ids): compute raster's where it drew, the hardware's written here elsewhere.
@@ -460,6 +461,7 @@ void main()
             imageStore(gStorageImagesF32[nonuniformEXT(RESOLVE_POSITION)], coord, vec4(0.0));
             imageStore(gStorageImages[nonuniformEXT(RESOLVE_MATERIAL)], coord, vec4(0.0));
             imageStore(gStorageImagesF16[nonuniformEXT(RESOLVE_EMISSIVE)], coord, vec4(0.0));
+            imageStore(gStorageImages[nonuniformEXT(RESOLVE_SPECULAR)], coord, vec4(0.0));
         }
         return;
     }
@@ -478,6 +480,12 @@ void main()
     imageStore(gStorageImages[nonuniformEXT(RESOLVE_MATERIAL)], coord,
                vec4(e.metallic, roughness, float(e.lighting_mode) / 255.0, velk_stand_in_pack(stand_in)));
     imageStore(gStorageImagesF16[nonuniformEXT(RESOLVE_EMISSIVE)], coord, vec4(e.emissive, two_sided ? clamp(e.transmission, 0.0, 1.0) : 0.0));
+    // As a dielectric (KHR_materials_specular, velk_specular_f0): the square root of its
+    // reflectance at normal incidence, for steps fine near 0.04 and room up to 1, and its
+    // reflectance at grazing.
+    float specular = clamp(e.specular_factor, 0.0, 1.0);
+    vec3 dielectric_f0 = min(0.04 * max(e.specular_color_factor, vec3(0.0)), vec3(1.0)) * specular;
+    imageStore(gStorageImages[nonuniformEXT(RESOLVE_SPECULAR)], coord, vec4(sqrt(dielectric_f0), specular));
 }
 )";
 
@@ -1209,19 +1217,31 @@ float smith_g(float NdotV, float NdotL, float a)
     return smith_g1(NdotV, a) * smith_g1(NdotL, a);
 }
 
-vec3 fresnel_schlick(float cos_theta, vec3 F0)
+vec3 fresnel_schlick(float cos_theta, vec3 F0, float F90)
 {
-    return F0 + (vec3(1.0) - F0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
+    return F0 + (vec3(F90) - F0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
 }
 
-// Roughness-aware Schlick for environment / IBL specular: caps the grazing
-// reflectance (F90) at (1 - roughness), so rough surfaces don't reflect the
-// full environment at glancing angles. Without this, rough geometry edges
-// (e.g. painted facades) get an over-bright Fresnel rim of the env.
-vec3 fresnel_schlick_roughness(float cos_theta, vec3 F0, float roughness)
+// KHR_materials_specular, with the base colour, metalness and the material's specular colour
+// and strength (MaterialEval::specular_color_factor, specular_factor): reflectance at normal
+// incidence, and in `F90` at grazing. A dielectric's is the strength times 0.04 tinted by the
+// colour (capped at 1), and the strength; a metal's its base colour, and 1.
+vec3 velk_specular_f0(vec3 base, float metallic, vec3 specular_color, float specular, out float F90)
 {
-    vec3 F90 = max(vec3(1.0 - roughness), F0);
-    return F0 + (F90 - F0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
+    specular = clamp(specular, 0.0, 1.0);
+    F90 = mix(specular, 1.0, metallic);
+    return mix(min(0.04 * max(specular_color, vec3(0.0)), vec3(1.0)) * specular, base, metallic);
+}
+
+// Roughness-aware Schlick for environment / IBL specular: scales the grazing
+// reflectance (F90) by (1 - roughness), so rough surfaces don't reflect the
+// full environment at glancing angles. Without this, rough geometry edges
+// (e.g. painted facades) get an over-bright Fresnel rim of the env. A weaker
+// specular strength (F90 below 1) weakens the whole lobe in proportion.
+vec3 fresnel_schlick_roughness(float cos_theta, vec3 F0, float F90, float roughness)
+{
+    vec3 grazing = max(vec3((1.0 - roughness) * F90), F0);
+    return F0 + (grazing - F0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
 }
 )"
 
@@ -1235,9 +1255,10 @@ vec3 fresnel_schlick_roughness(float cos_theta, vec3 F0, float roughness)
 // (`stand_in` its flatness, velk_stand_in_flatness; below 0 for a surface as drawn) takes diffuse
 // light as a rough ball would, toward its face's as it is flatter, that face turned to the viewer.
 // A thin sheet passing `transmission` of its diffuse light takes that share from behind it, the
-// rest from in front.
+// rest from in front. Its reflectance is `F0` at normal incidence and `F90` at grazing
+// (velk_specular_f0).
 void velk_surface_lights(bool points, uint point_lights[VELK_LIGHT_SLOTS], float point_through[VELK_LIGHT_SLOTS],
-                         vec3 world_pos, vec3 N, vec3 V, vec3 F0, float roughness, float stand_in, float transmission,
+                         vec3 world_pos, vec3 N, vec3 V, vec3 F0, float F90, float roughness, float stand_in, float transmission,
                          out vec3 direct, out vec3 highlights, out vec3 area_irr, out vec3 area_spec)
 {
     direct = vec3(0.0);
@@ -1270,7 +1291,7 @@ void velk_surface_lights(bool points, uint point_lights[VELK_LIGHT_SLOTS], float
                 vec2 t2 = velk_texture(pc.ltc_magnitude_id,
                                        vec2(clamp(roughness, 0.0, 1.0),
                                             sqrt(clamp(1.0 - max(dot(N, V), 0.0), 0.0, 1.0)))).xy;
-                area_spec += radiance * es.y * (F0 * t2.x + (1.0 - F0) * t2.y)
+                area_spec += radiance * es.y * (F0 * t2.x + (vec3(F90) - F0) * t2.y)
                              * 3.14159265;
             }
             continue;
@@ -1304,7 +1325,7 @@ void velk_surface_lights(bool points, uint point_lights[VELK_LIGHT_SLOTS], float
         float VdotH = max(dot(V, H), 0.0);
         float D = ggx_d(NdotH, a);
         float G = smith_g(NdotV, NdotL, roughness);
-        vec3 F = fresnel_schlick(VdotH, F0);
+        vec3 F = fresnel_schlick(VdotH, F0, F90);
         // A light's intensity is the irradiance it gives over pi (diffuse is albedo times it, as the
         // indirect light, a radiance, is), so its highlight takes pi back, as an area light's does.
         highlights += (D * G) * F / max(4.0 * NdotV * NdotL, 1e-6) * NdotL * radiance * through * 3.14159265;
@@ -1647,7 +1668,8 @@ void main()
         opacity = e.color.a + fresnel * (1.0 - e.color.a);
         float metallic = clamp(e.metallic, 0.0, 1.0);
         float roughness = clamp(e.roughness, 0.04, 1.0);
-        vec3 F0 = mix(vec3(0.04), e.color.rgb, metallic);
+        float F90;
+        vec3 F0 = velk_specular_f0(e.color.rgb, metallic, e.specular_color_factor, e.specular_factor, F90);
 
         // The lights its points of light keep and what of each gets through; before they are
         // traced, every light, unshadowed.
@@ -1668,7 +1690,7 @@ void main()
         vec3 highlights;
         vec3 area_irr;
         vec3 area_spec;
-        velk_surface_lights(points, point_lights, point_through, v_rel_pos, N, V, F0, roughness, -1.0, transmission, direct,
+        velk_surface_lights(points, point_lights, point_through, v_rel_pos, N, V, F0, F90, roughness, -1.0, transmission, direct,
                             highlights, area_irr, area_spec);
 
         float env_max_lod = float(textureQueryLevels(velk_textures[nonuniformEXT(pc.env_texture_id)])) - 1.0;
@@ -1684,7 +1706,7 @@ void main()
         }
         // A thin sheet passing light through: that share of its diffuse light from its other side.
         if (transmission > 0.0) indirect = mix(indirect, env_miss_color_lod(-N, env_max_lod), transmission);
-        vec3 F_env = fresnel_schlick_roughness(NdotV, F0, roughness);
+        vec3 F_env = fresnel_schlick_roughness(NdotV, F0, F90, roughness);
         color = e.color.rgb * (1.0 - metallic) * (direct + indirect + area_irr) + highlights + F_env * env_specular
               + area_spec;
     }
@@ -1788,7 +1810,11 @@ void main()
         vec3 N = normalize(world_n);
         vec3 V = normalize(-world_pos);
         float NdotV = max(dot(N, V), 0.0);
-        vec3 F0 = mix(vec3(0.04), albedo.rgb, metallic);
+        // A dielectric's reflectance (velk_specular_f0), its square root at normal incidence and
+        // its grazing one (the resolve's RESOLVE_SPECULAR, here pc.spare6); a metal's its colour.
+        vec4 specular = velk_texture(pc.spare6, uv);
+        vec3 F0 = mix(specular.rgb * specular.rgb, albedo.rgb, metallic);
+        float F90 = mix(specular.a, 1.0, metallic);
 
         // The lights its points of light keep and what of each gets through; before its points
         // are traced, every light, unshadowed.
@@ -1808,7 +1834,7 @@ void main()
         vec3 highlights;
         vec3 area_irr;
         vec3 area_spec;
-        velk_surface_lights(points, point_lights, point_through, world_pos, N, V, F0, roughness, stand_in, transmission, direct,
+        velk_surface_lights(points, point_lights, point_through, world_pos, N, V, F0, F90, roughness, stand_in, transmission, direct,
                             highlights, area_irr, area_spec);
 
         // Env lighting: single-sample approximation. Diffuse reads along N with a deep LOD
@@ -1833,7 +1859,7 @@ void main()
             vec4 traced = texelFetch(velk_textures[nonuniformEXT(pc.spare0)], coord, 0);
             if (traced.a > 0.0) env_specular = mix(env_specular, traced.rgb, 1.0 - smoothstep(0.21, 0.3, roughness));
         }
-        vec3 F_env = fresnel_schlick_roughness(NdotV, F0, roughness);
+        vec3 F_env = fresnel_schlick_roughness(NdotV, F0, F90, roughness);
 
         if (!probed) {
             indirect = env_diffuse;
@@ -1896,6 +1922,7 @@ void main()
                 velk_light_cell_words.data[at + VELK_LIGHT_READ_FIRST_LIGHT + 2u] = floatBitsToUint(n_dot_l);
                 velk_light_cell_words.data[at + VELK_LIGHT_READ_FIRST_LIGHT + 3u] = velk_pixel_ids(pc.spare4, pc.spare2, coord).x;
                 for (uint c = 0u; c < 3u; ++c) velk_light_cell_words.data[at + VELK_LIGHT_READ_HIGHLIGHTS + c] = floatBitsToUint(highlights[c]);
+                for (uint c = 0u; c < 3u; ++c) velk_light_cell_words.data[at + VELK_LIGHT_READ_NORMAL + c] = floatBitsToUint(N[c]);
             }
         }
     }
@@ -2204,13 +2231,14 @@ BrdfSample velk_pbr_shade(MaterialEval eval, EvalContext ctx)
     float ao = clamp(eval.occlusion, 0.0, 1.0);
     float transmission = velk_hit_two_sided ? clamp(eval.transmission, 0.0, 1.0) : 0.0;
 
-    // KHR_materials_specular: dielectric F0 tinted by specular_color_factor
-    // and weighted by specular_factor. Metals continue to use base as F0.
-    vec3 dielectric_F0 = 0.04 * eval.specular_color_factor * eval.specular_factor;
-    vec3 F0 = mix(dielectric_F0, base, metallic);
+    // KHR_materials_specular, as the deferred lighting's velk_specular_f0: a dielectric reflects
+    // its strength times 0.04 tinted by its colour (capped at 1) at normal incidence and its
+    // strength at grazing; a metal its base colour, and 1.
+    float specular = clamp(eval.specular_factor, 0.0, 1.0);
+    vec3 F0 = mix(min(0.04 * max(eval.specular_color_factor, vec3(0.0)), vec3(1.0)) * specular, base, metallic);
+    float F90 = mix(specular, 1.0, metallic);
     float VdotN = max(dot(V, N), 0.0);
-    vec3 F = F0 + (vec3(1.0) - F0) * pow(1.0 - VdotN, 5.0);
-    F *= eval.specular_factor;
+    vec3 F = F0 + (vec3(F90) - F0) * pow(1.0 - VdotN, 5.0);
 
     // Direct lighting from scene lights. Each light contributes a
     // Lambertian diffuse term scaled by its distance / spot attenuation
@@ -2249,7 +2277,7 @@ BrdfSample velk_pbr_shade(MaterialEval eval, EvalContext ctx)
             float D = a2 / max(3.14159265 * dd * dd, 1e-6);
             float k = (roughness + 1.0) * (roughness + 1.0) * 0.125;
             float G = VdotN / max(VdotN * (1.0 - k) + k, 1e-6) * facing / max(facing * (1.0 - k) + k, 1e-6);
-            vec3 Fl = (F0 + (vec3(1.0) - F0) * pow(clamp(1.0 - VdotH, 0.0, 1.0), 5.0)) * eval.specular_factor;
+            vec3 Fl = F0 + (vec3(F90) - F0) * pow(clamp(1.0 - VdotH, 0.0, 1.0), 5.0);
             direct += D * G * Fl / max(4.0 * VdotN * facing, 1e-6) * facing * radiance * li_weight * 3.14159265;
         }
     }
@@ -2260,7 +2288,7 @@ BrdfSample velk_pbr_shade(MaterialEval eval, EvalContext ctx)
     vec3 env_at_normal = transmission > 0.0 ? mix(env_miss_color(N), env_miss_color(-N), transmission) : env_miss_color(N);
     vec3 diffuse = base * (1.0 - metallic) * env_at_normal * ao;
     vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
-    velk_hit_diffuse = kD * base * (1.0 - metallic) * ao;
+    velk_hit_diffuse = kD * base * ao;
     velk_hit_transmission = transmission;
 
     // Specular: sample a GGX half-vector, reflect V around it. Main's

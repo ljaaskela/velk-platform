@@ -293,7 +293,7 @@ void split_spec_gloss(ISurface& src, IImage& mr, string_view mr_uri,
         sp_pixels[i * 4 + 0] = px[0];
         sp_pixels[i * 4 + 1] = px[1];
         sp_pixels[i * 4 + 2] = px[2];
-        sp_pixels[i * 4 + 3] = 255;                                 // A: specular strength = 1
+        sp_pixels[i * 4 + 3] = 255;                                 // A: unread (specular colour is RGB)
     }
     mr.init_from_pixels(mr_uri, static_cast<int>(dims.x), static_cast<int>(dims.y),
                         PixelFormat::RGBA8, mr_pixels.data(), mr_pixels.size());
@@ -377,12 +377,16 @@ IMaterial::Ptr build_material(const cgltf_data* data, const cgltf_material& m,
     if (m.has_specular) {
         const auto& sp = m.specular;
         mat.specular().set_factor(sp.specular_factor);
-        mat.specular().set_color_factor({sp.specular_color_factor[0],
+        mat.specular_color().set_factor({sp.specular_color_factor[0],
                                           sp.specular_color_factor[1],
                                           sp.specular_color_factor[2], 1.f});
         if (auto img = image_for(sp.specular_texture.texture)) {
             mat.specular().set_texture(img);
             apply_tex_transform(mat.specular(), sp.specular_texture);
+        }
+        if (auto img = image_for(sp.specular_color_texture.texture)) {
+            mat.specular_color().set_texture(img);
+            apply_tex_transform(mat.specular_color(), sp.specular_color_texture);
         }
     }
 
@@ -408,7 +412,7 @@ IMaterial::Ptr build_material(const cgltf_data* data, const cgltf_material& m,
             // (e.g. polished marble's F0 ~= 1.0) get clamped and look
             // matte. Heuristic upgrade to metal is a future improvement.
             mat.specular().set_factor(std::min(smax / 0.04f, 1.f));
-            mat.specular().set_color_factor({sg.specular_factor[0] / smax,
+            mat.specular_color().set_factor({sg.specular_factor[0] / smax,
                                               sg.specular_factor[1] / smax,
                                               sg.specular_factor[2] / smax, 1.f});
         }
@@ -416,7 +420,7 @@ IMaterial::Ptr build_material(const cgltf_data* data, const cgltf_material& m,
         // Per-pixel data: split specularGlossinessTexture (RGB = sRGB
         // specular tint, A = linear glossiness) into two new textures:
         //   - metallicRoughness: G = 1 - alpha (roughness, linear), B = 0
-        //   - specularColor: RGB copied (sRGB), A = 255 (full strength)
+        //   - specularColor: RGB copied (sRGB), the material's specular colour texture
         // The source decodes asynchronously, so the two targets are created
         // empty and bound to the material now, and filled from the source
         // pixels once it has loaded (before the renderer uploads it).
@@ -442,8 +446,8 @@ IMaterial::Ptr build_material(const cgltf_data* data, const cgltf_material& m,
                     mat.metallic_roughness().set_texture(interface_pointer_cast<ISurface>(mr_img));
                     apply_tex_transform(mat.metallic_roughness(),
                                         sg.specular_glossiness_texture);
-                    mat.specular().set_texture(interface_pointer_cast<ISurface>(sp_img));
-                    apply_tex_transform(mat.specular(),
+                    mat.specular_color().set_texture(interface_pointer_cast<ISurface>(sp_img));
+                    apply_tex_transform(mat.specular_color(),
                                         sg.specular_glossiness_texture);
 
                     // Weak refs only: the handler lives on the source image's
@@ -930,7 +934,7 @@ IResource::Ptr GltfDecoder::decode(const IResource::Ptr& inner) const
 
     // Color space by role. Images decode sRGB by default (correct for
     // base-color / emissive / specular-color). glTF requires non-color data —
-    // normal, metallic-roughness, occlusion, specular weight — in LINEAR space,
+    // normal, metallic-roughness, occlusion — in LINEAR space,
     // so retag those by the material slot that references them. (Shared-image
     // caveat: an image used in two roles with different color spaces gets the
     // last writer's format; rare in practice, same as the sampler model above.)
@@ -950,8 +954,8 @@ IResource::Ptr GltfDecoder::decode(const IResource::Ptr& inner) const
         if (m.occlusion_texture.texture) mark_linear(m.occlusion_texture);
         if (m.has_pbr_metallic_roughness)
             mark_linear(m.pbr_metallic_roughness.metallic_roughness_texture);
-        if (m.has_specular)
-            mark_linear(m.specular.specular_texture); // A = specular weight (linear)
+        // The specular weight texture stays as decoded: its weight is in A, which an sRGB image
+        // keeps linear, and its image is often the specular colour texture too, whose RGB is sRGB.
     }
 
     // Build materials.

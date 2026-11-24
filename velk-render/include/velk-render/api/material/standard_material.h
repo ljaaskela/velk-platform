@@ -88,6 +88,9 @@ public:
     SpecularProperty specular() { return ensure<SpecularProperty, ISpecularProperty>(ClassId::SpecularProperty); }
     SpecularProperty specular() const { return canonical<SpecularProperty, ISpecularProperty>(); }
 
+    SpecularColorProperty specular_color() { return ensure<SpecularColorProperty, ISpecularColorProperty>(ClassId::SpecularColorProperty); }
+    SpecularColorProperty specular_color() const { return canonical<SpecularColorProperty, ISpecularColorProperty>(); }
+
 private:
     template <class Wrapper, class Interface>
     Wrapper canonical() const

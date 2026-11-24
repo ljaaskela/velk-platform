@@ -77,6 +77,12 @@ public:
     VELK_CLASS_UID(ClassId::SpecularProperty, "SpecularProperty");
 };
 
+class SpecularColorProperty : public PropertyBase<SpecularColorProperty, ISpecularColorProperty>
+{
+public:
+    VELK_CLASS_UID(ClassId::SpecularColorProperty, "SpecularColorProperty");
+};
+
 /**
  * @brief Material pipeline options carrier.
  *

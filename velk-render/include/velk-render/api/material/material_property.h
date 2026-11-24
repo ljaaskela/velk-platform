@@ -241,8 +241,8 @@ public:
 /**
  * @brief Wrapper for a SpecularProperty attachment.
  *
- * KHR_materials_specular. @c factor modulates specular weight (sampled from the
- * texture's A channel); @c color_factor tints dielectric F0 (sampled from RGB).
+ * KHR_materials_specular's strength: @c factor times the texture's A channel scales a
+ * dielectric's reflection, at grazing angles too.
  */
 class SpecularProperty : public MaterialProperty
 {
@@ -257,16 +257,29 @@ public:
     }
     /** @copybrief get_factor */
     void set_factor(float v) { write_state_value<ISpecularProperty>(&ISpecularProperty::State::factor, v); }
+};
+
+/**
+ * @brief Wrapper for a SpecularColorProperty attachment.
+ *
+ * KHR_materials_specular's colour: @c factor times the texture's RGB channels tints a
+ * dielectric's reflection at normal incidence. Values above 1 are allowed.
+ */
+class SpecularColorProperty : public MaterialProperty
+{
+public:
+    SpecularColorProperty() = default;
+    explicit SpecularColorProperty(IObject::Ptr obj) : MaterialProperty(check_object<ISpecularColorProperty>(obj)) {}
 
     /** @brief Specular color tint for dielectrics. Multiplies the texture's RGB channels. */
-    color get_color_factor() const
+    color get_factor() const
     {
-        return read_state_value<ISpecularProperty>(&ISpecularProperty::State::color_factor);
+        return read_state_value<ISpecularColorProperty>(&ISpecularColorProperty::State::factor);
     }
-    /** @copybrief get_color_factor */
-    void set_color_factor(const color& v)
+    /** @copybrief get_factor */
+    void set_factor(const color& v)
     {
-        write_state_value<ISpecularProperty>(&ISpecularProperty::State::color_factor, v);
+        write_state_value<ISpecularColorProperty>(&ISpecularColorProperty::State::factor, v);
     }
 };
 
