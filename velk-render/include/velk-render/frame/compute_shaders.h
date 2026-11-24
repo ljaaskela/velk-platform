@@ -367,8 +367,11 @@ void main()
     float stand_in = -1.0;
     // The draw and instance, which a neighbour must share to count.
     uvec2 surface = uvec2(0xFFFFFFFFu);
+    // Seen from both sides: only such a thin sheet passes light through (MaterialEval::transmission).
+    bool two_sided = false;
     if (drawn) {
         VelkDrawData d = velk_draw_data.data[velk_ids_draw(ids)];
+        two_sided = (d.flags & VELK_DRAW_DOUBLE_SIDED) != 0u;
         uint triangle = velk_ids_triangle(d, ids);
         uint slot = velk_ids_slot(d, ids);
         ElementInstance inst = velk_draw_instance(d, slot);
@@ -418,10 +421,11 @@ void main()
         N = resolve_shading_normal(e, ctx);
         smooth_normal = ctx.normal;
         // Seen from both sides: the side it shows is the one toward the camera, of its plane as
-        // drawn (whatever its winding), and its normal turns to that side.
-        if ((d.flags & VELK_DRAW_DOUBLE_SIDED) != 0u) {
+        // drawn (whatever its winding), and its normal turns to that side. Which side its normals
+        // are on is its vertex normal's, so that a normal map cannot tip it.
+        if (two_sided) {
             vec3 plane = cross(e1, e2);
-            if (dot(N, plane) * dot(-rel, plane) < 0.0) {
+            if (dot(smooth_normal, plane) * dot(-rel, plane) < 0.0) {
                 N = -N;
                 smooth_normal = -smooth_normal;
             }
@@ -473,7 +477,7 @@ void main()
     imageStore(gStorageImagesF32[nonuniformEXT(RESOLVE_POSITION)], coord, vec4(rel, tri_size));
     imageStore(gStorageImages[nonuniformEXT(RESOLVE_MATERIAL)], coord,
                vec4(e.metallic, roughness, float(e.lighting_mode) / 255.0, velk_stand_in_pack(stand_in)));
-    imageStore(gStorageImagesF16[nonuniformEXT(RESOLVE_EMISSIVE)], coord, vec4(e.emissive, clamp(e.transmission, 0.0, 1.0)));
+    imageStore(gStorageImagesF16[nonuniformEXT(RESOLVE_EMISSIVE)], coord, vec4(e.emissive, two_sided ? clamp(e.transmission, 0.0, 1.0) : 0.0));
 }
 )";
 
@@ -1624,11 +1628,13 @@ void main()
         vec3 N = normalize(length(e.normal) > 0.0 ? e.normal : v_world_normal);
         // Seen from both sides: the side it shows is the one toward the camera, of its plane as
         // drawn, as the deferred resolve has it.
-        if ((d.flags & VELK_DRAW_DOUBLE_SIDED) != 0u) {
+        bool two_sided = (d.flags & VELK_DRAW_DOUBLE_SIDED) != 0u;
+        if (two_sided) {
             vec3 plane = cross(dFdx(v_rel_pos), dFdy(v_rel_pos));
-            if (dot(N, plane) * dot(-v_rel_pos, plane) < 0.0) N = -N;
+            if (dot(v_world_normal, plane) * dot(-v_rel_pos, plane) < 0.0) N = -N;
         }
-        float transmission = clamp(e.transmission, 0.0, 1.0);
+        // Only a thin sheet seen from both sides passes light through.
+        float transmission = two_sided ? clamp(e.transmission, 0.0, 1.0) : 0.0;
         vec3 V = normalize(-v_rel_pos);
         float NdotV = max(dot(N, V), 0.0);
         float fresnel = 0.04 + 0.96 * pow(1.0 - NdotV, 5.0);
@@ -2153,6 +2159,9 @@ void velk_light_sample(Light light, vec3 pos, out vec3 L, out float atten)
 // from its other side (MaterialEval::transmission).
 vec3 velk_hit_diffuse = vec3(0.0);
 float velk_hit_transmission = 0.0;
+// Whether the surface being shaded is seen from both sides (VELK_DRAW_DOUBLE_SIDED), set by
+// velk_hit_context: only such a thin sheet passes light through.
+bool velk_hit_two_sided = false;
 
 BrdfSample velk_pbr_shade(MaterialEval eval, EvalContext ctx)
 {
@@ -2162,7 +2171,7 @@ BrdfSample velk_pbr_shade(MaterialEval eval, EvalContext ctx)
     float roughness = clamp(eval.roughness, 0.04, 1.0);
     vec3 base = eval.color.rgb;
     float ao = clamp(eval.occlusion, 0.0, 1.0);
-    float transmission = clamp(eval.transmission, 0.0, 1.0);
+    float transmission = velk_hit_two_sided ? clamp(eval.transmission, 0.0, 1.0) : 0.0;
 
     // KHR_materials_specular: dielectric F0 tinted by specular_color_factor
     // and weighted by specular_factor. Metals continue to use base as F0.
@@ -2448,7 +2457,9 @@ vec3 reference_path(Ray ray, out vec3 first)
         if (bounce == 0u) first = total;
         if (bs.terminate) break;
 
-        vec3 n = dot(hit.normal, ray.dir) > 0.0 ? -hit.normal : hit.normal;
+        // The side of its plane the ray came from, and the normal it was shaded with turned to it.
+        vec3 side = dot(hit.plane, ray.dir) > 0.0 ? -hit.plane : hit.plane;
+        vec3 n = dot(shading, side) < 0.0 ? -shading : shading;
         float diffuse_part = reference_luma(velk_hit_diffuse);
         float specular_part = reference_luma(bs.throughput);
         if (diffuse_part + specular_part < 1e-4) break;
@@ -2456,14 +2467,18 @@ vec3 reference_path(Ray ray, out vec3 first)
         if (rng_next_float() < specular_share) {
             carried *= bs.throughput / specular_share;
             ray.dir = bs.next_dir;
-            if (dot(ray.dir, n) <= 0.0) break;
+            if (dot(ray.dir, side) <= 0.0) break;
         } else {
             carried *= velk_hit_diffuse / (1.0 - specular_share);
             // Through a thin sheet as often as it passes light through: to its other side.
-            if (rng_next_float() < velk_hit_transmission) n = -n;
+            if (rng_next_float() < velk_hit_transmission) {
+                n = -n;
+                side = -side;
+            }
             ray.dir = reference_cosine(n);
+            if (dot(ray.dir, side) <= 0.0) break;
         }
-        ray.origin = ctx.rel_pos + n * 0.01;
+        ray.origin = ctx.rel_pos + side * 0.01;
         if (max(carried.r, max(carried.g, carried.b)) < 1e-3) break;
     }
     return total;
@@ -2768,8 +2783,10 @@ EvalContext velk_hit_context(RayHit hit, vec3 ray_dir, vec3 rel, vec3 normal, ou
     ctx.normal = normal;
     ctx.tangent = vec4(0.0);
     material = 0u;
+    velk_hit_two_sided = false;
     if (hit.draw != 0xFFFFFFFFu && hit.instance != 0xFFFFFFFFu) {
         VelkDrawData d = velk_draw_data.data[hit.draw];
+        velk_hit_two_sided = (d.flags & VELK_DRAW_DOUBLE_SIDED) != 0u;
         // A quad's hit names the quad's word, as its pixel does.
         ElementInstance inst = (d.flags & VELK_DRAW_QUADS) != 0u ? velk_quad_instance(hit.instance) : velk_instances.data[hit.instance];
         material = d.material_id;

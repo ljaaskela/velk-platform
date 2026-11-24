@@ -5550,6 +5550,10 @@ void main()
         s_lights = 0u;
         bool again = false;
         uint pages = light_words.data[pool + VELK_POOL_PAGES];
+        uint draw = light_words.data[entry + VELK_CLUSTER_ENTRY_DRAW];
+        // Seen from both sides, its points and its records for light only take light from either.
+        uint two_sided = draw != 0xFFFFFFFFu && (velk_draw_data.data[draw].flags & VELK_DRAW_DOUBLE_SIDED) != 0u
+                       ? VELK_LIGHT_TWO_SIDED : 0u;
         // The instance's records for light only, beside it: an instance's records are together,
         // in order within its partition's records.
         uint record_pool;
@@ -5583,7 +5587,7 @@ void main()
                     uint other_cluster = clusters + light_words.data[other + VELK_RECORD_CLUSTER] * VELK_LOD_CLUSTER_WORDS;
                     uint other_vertices = light_words.data[other_cluster + VELK_LOD_CLUSTER_VERTICES];
                     uint laid;
-                    if (!velk_light_lay_out(other_vertices, other_cluster, VELK_LIGHT_OWN, 0u, 2u * other_vertices,
+                    if (!velk_light_lay_out(other_vertices, other_cluster, VELK_LIGHT_OWN | two_sided, 0u, 2u * other_vertices,
                                             VELK_LIGHT_NONE, laid)) {
                         light_words.data[other + VELK_RECORD_LIGHT] = VELK_LIGHT_NONE;
                         again = true;
@@ -5610,7 +5614,6 @@ void main()
                 }
             }
         }
-        uint draw = light_words.data[entry + VELK_CLUSTER_ENTRY_DRAW];
         if (again || (s_lights != 0u && draw == 0xFFFFFFFFu)) {
             light_words.data[record + VELK_RECORD_LIGHT] = was;
         } else if (s_lights == 0u) {
@@ -5622,8 +5625,7 @@ void main()
             uint counts = velk_patch_counts(cluster);
             uint triangles = min(counts != 0u ? counts >> 16u : light_words.data[cluster + VELK_LOD_CLUSTER_TRIANGLES], kMaxTriangles);
             uint table = index_base != VELK_LIGHT_NONE ? triangles : 0u;
-            uint kind = table != 0u ? VELK_LIGHT_PIECED | triangles : VELK_LIGHT_OWN;
-            if (draw != 0xFFFFFFFFu && (velk_draw_data.data[draw].flags & VELK_DRAW_DOUBLE_SIDED) != 0u) kind |= VELK_LIGHT_TWO_SIDED;
+            uint kind = (table != 0u ? VELK_LIGHT_PIECED | triangles : VELK_LIGHT_OWN) | two_sided;
             uint laid;
             if (velk_light_lay_out(vertices, cluster, kind, table, 2u * vertices, index_base, laid)) {
                 s_page = laid;
