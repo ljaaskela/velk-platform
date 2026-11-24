@@ -2174,8 +2174,38 @@ void velk_cut_record_box(uint record, uint instances_base, uint items_word, floa
         hi += vec3(pad);
         return;
     }
-    // A cluster's own sphere, or a whole mesh's: its table's, in the mesh's own coordinates.
     world = velk_sized_world(world, cull_instances.data[instance].offset.xyz, cull_instances.data[instance].size.xyz);
+    // A cluster that does not deform: the box of its triangle tree's root, as the walk finds the
+    // tree (its ray header), which holds every triangle rays test of it.
+    if (entry != 0xFFFFFFFFu && (cull_words.data[entry + VELK_CLUSTER_ENTRY_FLAGS] & VELK_LOD_DEFORMING) == 0u) {
+        uint rays = cull_words.data[entry + VELK_CLUSTER_ENTRY_RAY];
+        uint root = rays != 0xFFFFFFFFu ? cluster_words.data[rays + cluster * 20u + 10u] : 0xFFFFFFFFu;
+        if (root != 0xFFFFFFFFu && (root & (VELK_BLAS_LEAF | VELK_BLAS_CLUSTER | VELK_BLAS_UPPER)) == 0u) {
+            uint node = (cluster_words.data[rays + cluster * 20u + 13u] + root) * 16u;
+            vec3 llo = vec3(uintBitsToFloat(lod_nodes.data[node]), uintBitsToFloat(lod_nodes.data[node + 1u]),
+                            uintBitsToFloat(lod_nodes.data[node + 2u]));
+            vec3 lhi = vec3(uintBitsToFloat(lod_nodes.data[node + 3u]), uintBitsToFloat(lod_nodes.data[node + 4u]),
+                            uintBitsToFloat(lod_nodes.data[node + 5u]));
+            vec3 rlo = vec3(uintBitsToFloat(lod_nodes.data[node + 6u]), uintBitsToFloat(lod_nodes.data[node + 7u]),
+                            uintBitsToFloat(lod_nodes.data[node + 8u]));
+            vec3 rhi = vec3(uintBitsToFloat(lod_nodes.data[node + 9u]), uintBitsToFloat(lod_nodes.data[node + 10u]),
+                            uintBitsToFloat(lod_nodes.data[node + 11u]));
+            bool has_l = all(lessThanEqual(llo, lhi));
+            bool has_r = all(lessThanEqual(rlo, rhi));
+            if (has_l || has_r) {
+                vec3 blo = has_l && has_r ? min(llo, rlo) : has_l ? llo : rlo;
+                vec3 bhi = has_l && has_r ? max(lhi, rhi) : has_l ? lhi : rhi;
+                // Into the world, the box around the box (Arvo).
+                vec3 c = mat3(world) * ((blo + bhi) * 0.5) + world[3].xyz;
+                vec3 e = (bhi - blo) * 0.5;
+                vec3 reach = abs(world[0].xyz) * e.x + abs(world[1].xyz) * e.y + abs(world[2].xyz) * e.z + vec3(pad);
+                lo = c - reach;
+                hi = c + reach;
+                return;
+            }
+        }
+    }
+    // Otherwise its own sphere, or a whole mesh's: its table's, in the mesh's own coordinates.
     uint sphere = entry != 0xFFFFFFFFu ? cull_words.data[entry + VELK_CLUSTER_ENTRY_TABLE] + cluster * VELK_LOD_CLUSTER_WORDS + VELK_LOD_CLUSTER_OWN_SPHERE : cluster;
     float scale = sqrt(max(max(dot(world[0].xyz, world[0].xyz), dot(world[1].xyz, world[1].xyz)),
                            dot(world[2].xyz, world[2].xyz)));
@@ -2215,6 +2245,10 @@ struct CullInstance {
 
 layout(set = 1, binding = 3, scalar) readonly buffer CullInstances { CullInstance data[]; } cull_instances;
 layout(set = 1, binding = 16, std430) buffer CullWords { uint data[]; } cull_words;
+// The clusters' triangle trees (VelkMeshNode, 16 words each) and their ray headers, for a
+// cluster's box (velk_cut_record_box).
+layout(set = 1, binding = 12, std430) readonly buffer LodNodes { uint data[]; } lod_nodes;
+layout(set = 1, binding = 13, std430) readonly buffer ClusterWords { uint data[]; } cluster_words;
 
 layout(push_constant) uniform PC {
     uint cut_word;
