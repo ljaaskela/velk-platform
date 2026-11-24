@@ -5633,15 +5633,19 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
                              lit[0], lit[1], lit[2], normal[0], normal[1], normal[2]);
                 }
                 // What it reads of its triangle's pieces (velk_light_explain): the first light's
-                // shade (0 lit to 15 blocked, - for none) and traces of each point, weights in 255ths.
+                // shade (0 lit to 15 blocked, - for none), traces and first slot's blocker code
+                // (b: 1 at 1/128 or nearer, doubling each step, 13 at 32 or more, 15 nothing in the
+                // way, 0 not traced) of each point, weights in 255ths.
                 const uint32_t* e = r + kLightReadPixels + k * kLightReadWords + 24u;
                 const auto shade = [](uint32_t word) { return word == kLightNone ? -1 : static_cast<int>(word & 15u); };
                 const auto level = [&](uint32_t at, char* text, size_t size) {
-                    std::snprintf(text, size, "%d/%u %d/%u %d/%u w %u %u %u", shade(e[at]), e[at + 3], shade(e[at + 1]), e[at + 4],
-                                  shade(e[at + 2]), e[at + 5], e[at + 6] & 255u, (e[at + 6] >> 8u) & 255u, (e[at + 6] >> 16u) & 255u);
+                    std::snprintf(text, size, "%d/%u b%u %d/%u b%u %d/%u b%u w %u %u %u", shade(e[at]), e[at + 3] & 255u,
+                                  (e[at + 3] >> 8u) & 15u, shade(e[at + 1]), e[at + 4] & 255u, (e[at + 4] >> 8u) & 15u,
+                                  shade(e[at + 2]), e[at + 5] & 255u, (e[at + 5] >> 8u) & 15u, e[at + 6] & 255u,
+                                  (e[at + 6] >> 8u) & 255u, (e[at + 6] >> 16u) & 255u);
                 };
-                char vertices[96];
-                char read_level[96];
+                char vertices[128];
+                char read_level[128];
                 level(7u, vertices, sizeof(vertices));
                 level(14u, read_level, sizeof(read_level));
                 // Listed and changed frames as their distance back from the pool's frame, - for none.
@@ -5682,13 +5686,13 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             }
             clear(kLightPoolSumChanged, 1u);
             VELK_LOG(I, "light: %u pages, %u of them free; records %u paged (%u linked), %u one value; last frame %u searched, %u one values "
-                        "traced, points listed: %u untraced coarse, %u stale coarse, %u fine, %u warming up; "
+                        "traced, points listed: %u untraced coarse, %u stale coarse, %u fine, %u warming up, %u to refine; "
                         "%u records changed since the last log, %u records "
                         "chosen again of which %u kept their light, %u lit pixels untraced; budget %u rays",
                      h[kLightPoolPages], h[kLightPoolFreePages], h[kLightPoolLastRecordsPaged], h[kLightPoolLastRecordsLinked],
                      h[kLightPoolLastRecordsOneValue], h[kLightPoolLastSearched], h[kLightPoolLastTraces],
                      h[kLightPoolLastUntracedPoints], h[kLightPoolLastCoarsePoints], h[kLightPoolLastFinePoints],
-                     h[kLightPoolLastWarmupPoints],
+                     h[kLightPoolLastWarmupPoints], h[kLightPoolLastRefinePoints],
                      h[kLightPoolSumChanged], written, took, h[kLightPoolLastUntracedPixels], h[kLightPoolRayBudget]);
             uint32_t longest = 0;
             uint32_t most = 0;
@@ -5721,12 +5725,13 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             clear(kLightPoolSumRecordsHit, 7u);
             VELK_LOG(I, "light trace: a ray tests %.0f triangles, %.0f records (%.1f through their box: %.1f patches, %.1f quads, "
                         "%.1f without an instance, %.1f clusters, %.1f whole meshes, %.1f meshes without a tree), %.0f nodes; "
-                        "points traced %u first, %u later",
+                        "points traced %u first, %u later, %u refined",
                      tris / rays, tested / rays, double(h[kLightPoolSumRecordsHit]) / rays, double(h[kLightPoolSumHitBy]) / rays,
                      double(h[kLightPoolSumHitBy + 1u]) / rays, double(h[kLightPoolSumHitBy + 2u]) / rays,
                      double(h[kLightPoolSumHitBy + 3u]) / rays, double(h[kLightPoolSumHitBy + 4u]) / rays,
                      double(h[kLightPoolSumHitBy + 5u]) / rays, std::max(steps - tris - tested, 0.0) / rays,
-                     h[kLightPoolSumFirstTraces], h[kLightPoolSumLaterTraces]);
+                     h[kLightPoolSumFirstTraces], h[kLightPoolSumLaterTraces], h[kLightPoolSumRefines]);
+            clear(kLightPoolSumRefines, 1u);
             clear(kLightPoolSumMeshWide, 8u);
             VELK_LOG(I, "light trace: whole meshes a ray walks by box size %.1f under 1 unit, %.1f under 4, %.1f under 16, %.1f "
                         "more; by triangles %.1f under 64, %.1f under 512, %.1f under 4096, %.1f more",

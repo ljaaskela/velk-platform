@@ -233,8 +233,10 @@ IGpuPipeline::Ptr compose_deferred_compute_pipeline(FrameContext& ctx,
                                                     string_view main_src,
                                                     uint64_t variant_tag,
                                                     bool with_area_lights = false,
-                                                    uint32_t cells = 0)
+                                                    uint32_t cells = 0,
+                                                    string_view main_tail = {})
 {
+    // `main_tail` follows `main_src`, for a main past what one string literal may hold.
     // `cells` 5 builds the shader with the light grid's code, for the points of light
     // (light_grid_src); 0 without it.
     if (!ctx.render_ctx || !ctx.snippets) return {};
@@ -283,6 +285,7 @@ IGpuPipeline::Ptr compose_deferred_compute_pipeline(FrameContext& ctx,
         src += light_grid_src;
     }
     src += main_src;
+    src += main_tail;
     for (auto id : intersect_ids) {
         if (id < 3 || id - 3 >= intersect_info_by_id.size()) continue;
         const auto& ii = intersect_info_by_id[id - 3];
@@ -1444,11 +1447,14 @@ void DeferredPath::emit_light_claim_pass(ViewState& vs, const RenderView& render
     // walk, and the light grid. Without the light header there is no grid yet: nothing is traced.
     const bool trace = vs.light_header.valid();
     // Its three shaders: the sizes, the one values, the points.
-    auto args_pipeline = trace ? compose_deferred_compute_pipeline(ctx, light_trace_args_src, 0x4c50'5452'4141ULL, false, 5u)
+    auto args_pipeline = trace ? compose_deferred_compute_pipeline(ctx, light_trace_args_src, 0x4c50'5452'4141ULL, false, 5u,
+                                                                   light_trace_tail_src)
                                : IGpuPipeline::Ptr{};
-    auto trace_pipeline = trace ? compose_deferred_compute_pipeline(ctx, light_trace_ones_src, 0x4c50'5452'4143ULL, false, 5u)
+    auto trace_pipeline = trace ? compose_deferred_compute_pipeline(ctx, light_trace_ones_src, 0x4c50'5452'4143ULL, false, 5u,
+                                                                    light_trace_tail_src)
                                 : IGpuPipeline::Ptr{};
-    auto points_pipeline = trace ? compose_deferred_compute_pipeline(ctx, light_trace_points_src, 0x4c50'5452'4150ULL, false, 5u)
+    auto points_pipeline = trace ? compose_deferred_compute_pipeline(ctx, light_trace_points_src, 0x4c50'5452'4150ULL, false, 5u,
+                                                                     light_trace_tail_src)
                                  : IGpuPipeline::Ptr{};
     if (!pipeline || !search_pipeline || (trace && (!args_pipeline || !trace_pipeline || !points_pipeline))) return;
 
