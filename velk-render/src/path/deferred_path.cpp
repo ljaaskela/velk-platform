@@ -223,6 +223,33 @@ bool test_diagnostics_enabled() { return std::getenv("VELK_TEST_DIAGNOSTICS") !=
 // Diagnostic: draws everything the frustum holds, to compare with occlusion culling.
 bool no_occlusion_culling() { return env_uint("VELK_NO_OCCLUSION", 1, 1) != 0u; }
 
+// How the sun's visibility is found, while the sun pass is being tried: VELK_SUN_PASS=hard for a
+// ray a pixel to its middle in place of what its points keep (sun_rays_main_src), soft for that
+// softened over its penumbra (sun_soften_main_src). kSunPoints when not set, the points as they are.
+enum SunPass : uint32_t { kSunPoints, kSunHard, kSunSoft };
+SunPass sun_pass_mode()
+{
+    const char* v = std::getenv("VELK_SUN_PASS");
+    if (v && std::strcmp(v, "hard") == 0) return kSunHard;
+    if (v && std::strcmp(v, "soft") == 0) return kSunSoft;
+    return kSunPoints;
+}
+
+// The sun the sun pass shades, as velk_sun_index finds it: the first lit directional light.
+const GpuLight* sun_light(const RenderView& render_view)
+{
+    for (const GpuLight& l : render_view.lights) {
+        if (l.flags[0] == static_cast<uint32_t>(LightType::Directional) && l.color_intensity[3] > 0.f) return &l;
+    }
+    return nullptr;
+}
+
+// A development aid, what to show in place of the lit image: VELK_SUN_VIEW=1 what the lighting
+// takes of the sun, 0 to 1; of the sun pass's softening, 2 the penumbra's width, 3 the blocked
+// pixels its search found, 4 the pixels its filter took, 5 the surface's N.L toward the sun
+// (VELK_SUN_SHOW_SHIFT). 0 when not set.
+uint32_t sun_view() { return env_uint("VELK_SUN_VIEW", 1, 5); }
+
 // Composes a deferred-family compute pipeline: the shared prelude
 // (deferred_compute_prelude_src) + the given main() + the intersect_shape
 // and velk_eval_shadow switches built from the frame's snippet set. The
@@ -907,6 +934,7 @@ void DeferredPath::build_passes(IViewEntry& entry,
     if (visibility_mode == 0) {
         emit_light_probes_pass(vs, render_view, ctx, graph);
         emit_reflection_pass(vs, render_view, ctx, graph);
+        emit_sun_rays_pass(vs, render_view, ctx, graph);
         emit_lighting_pass(entry, vs, render_view, color_target, ctx,
                            static_cast<int>(vs.gbuffer_size.x),
                            static_cast<int>(vs.gbuffer_size.y), graph);
@@ -2379,6 +2407,99 @@ void DeferredPath::ensure_deferred_output(ViewState& vs, int w, int h, IRenderGr
     vs.lighting_dirty = true;
 }
 
+void DeferredPath::emit_sun_rays_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph)
+{
+    vs.sun_shaded = {};
+    const SunPass mode = sun_pass_mode();
+    const GpuLight* sun = sun_light(render_view);
+    if (mode == kSunPoints || !sun || !vs.gbuffer || vs.gbuffer_size.x == 0 || vs.gbuffer_size.y == 0) return;
+    const bool soft = mode == kSunSoft && sun->params[3] > 0.f;
+    const uint32_t width = vs.gbuffer_size.x;
+    const uint32_t height = vs.gbuffer_size.y;
+    const auto make = [&](IRenderTarget::Ptr& target) {
+        TextureDesc td{};
+        td.width = static_cast<int>(width);
+        td.height = static_cast<int>(height);
+        td.format = PixelFormat::RGBA16F;
+        td.usage = TextureUsage::Storage;
+        td.sampler.wrap_s = SamplerAddressMode::ClampToEdge;
+        td.sampler.wrap_t = SamplerAddressMode::ClampToEdge;
+        td.sampler.mag_filter = SamplerFilter::Nearest;
+        td.sampler.min_filter = SamplerFilter::Nearest;
+        td.sampler.mipmap_mode = SamplerMipmapMode::Nearest;
+        target = graph.resources().create_render_texture(td);
+    };
+    if (vs.sun_rays_size != vs.gbuffer_size) {
+        vs.sun_rays = {};
+        vs.sun_soft = {};
+        vs.sun_rays_size = vs.gbuffer_size;
+    }
+    if (!vs.sun_rays) make(vs.sun_rays);
+    if (soft && !vs.sun_soft) make(vs.sun_soft);
+    if (!vs.sun_rays || (soft && !vs.sun_soft)) return;
+    auto pipeline = compose_deferred_compute_pipeline(ctx, sun_rays_main_src, 0x5355'4e52'4159'0001ULL);
+    auto soften_pipeline = soft ? compose_deferred_compute_pipeline(ctx, sun_soften_main_src, 0x5355'4e53'4f46'0001ULL)
+                                : IGpuPipeline::Ptr{};
+    if (!pipeline || (soft && !soften_pipeline)) return;
+
+    const auto handle = [](const IRenderTarget::Ptr& t) { return static_cast<uint32_t>(t->get_gpu_handle(GpuResourceKey::Default)); };
+    DeferredComputePushC pc{};
+    pc.globals_base = render_view.view_globals_base;
+    pc.cam_pos[0] = render_view.cam_pos.x;
+    pc.cam_pos[1] = render_view.cam_pos.y;
+    pc.cam_pos[2] = render_view.cam_pos.z;
+    pc.output_image_id = handle(vs.sun_rays);
+    pc.normal_tex_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Normal));
+    pc.worldpos_tex_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::WorldPos));
+    pc.material_tex_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::MaterialParams));
+    pc.emissive_tex_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Emissive));
+    pc.width = width;
+    pc.height = height;
+    pc.light_count = static_cast<uint32_t>(render_view.lights.size());
+    pc.lights_base = render_view.lights_base;
+    DeferredComputePushC soften_pc = pc;
+    if (soft) {
+        soften_pc.output_image_id = handle(vs.sun_soft);
+        soften_pc.spare0 = handle(vs.sun_rays);
+    }
+
+    const auto emit = [&](IRenderPass::Ptr& pass, const char* name, const char* other_name, const char* label,
+                          const IGpuPipeline::Ptr& used, const DeferredComputePushC& used_pc, const IRenderTarget::Ptr& read,
+                          const IRenderTarget::Ptr& written) {
+        bool dirty = true;
+        emit_cached_view_pass(pass, dirty, view_pass_name(vs.instance_cull.chosen_by_other, name, other_name), graph,
+                              [&](CachedPassRecording& rec) {
+            auto cmd = ctx.backend->create_command_buffer();
+            if (!cmd) return;
+            DispatchCall dc{};
+            dc.pipeline = used.get();
+            dc.groups_x = (width + 7u) / 8u;
+            dc.groups_y = (height + 7u) / 8u;
+            dc.groups_z = 1;
+            dc.root_constants_size = sizeof(used_pc);
+            std::memcpy(dc.root_constants, &used_pc, sizeof(used_pc));
+            cmd->begin_recording();
+            cmd->push_label(label);
+            cmd->record_global_barrier();
+            cmd->record_dispatch(dc);
+            cmd->record_global_barrier();
+            cmd->pop_label();
+            cmd->end_recording();
+            rec.cmd = std::move(cmd);
+            rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
+            if (read) rec.reads.push_back(interface_pointer_cast<IGpuResource>(read));
+            rec.writes.push_back(interface_pointer_cast<IGpuResource>(written));
+            rec.held.push_back(used);
+        });
+    };
+    emit(vs.sun_rays_pass, "deferred.sun_rays", "other:deferred.sun_rays", "DeferredPath: sun rays", pipeline, pc, {}, vs.sun_rays);
+    if (soft) {
+        emit(vs.sun_soften_pass, "deferred.sun_soften", "other:deferred.sun_soften", "DeferredPath: sun soften", soften_pipeline,
+             soften_pc, vs.sun_rays, vs.sun_soft);
+    }
+    vs.sun_shaded = soft ? vs.sun_soft : vs.sun_rays;
+}
+
 void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
                                       const RenderView& render_view,
                                       IRenderTarget::Ptr color_target,
@@ -2476,6 +2597,13 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
     IRenderTarget::Ptr reflections = vs.reflect_result[vs.reflect_parity];
     pc.spare0 = reflections && !vs.reflect_fresh ? static_cast<uint32_t>(reflections->get_gpu_handle(GpuResourceKey::Default)) : kLightNone;
     if (reflections) vs.lighting_dirty = true;
+    // The sun pass's result (emit_sun_rays_pass), and VELK_SUN_VIEW (the shader's VELK_SUN_RAYS_MASK
+    // and VELK_SUN_SHOW).
+    const IRenderTarget::Ptr sun_shaded = vs.sun_shaded;
+    pc.mode = (sun_shaded ? static_cast<uint32_t>(sun_shaded->get_gpu_handle(GpuResourceKey::Default)) + 1u : 0u)
+            | (sun_view() << 28u);
+    if (pc.mode != vs.lighting_sun_mode) vs.lighting_dirty = true;
+    vs.lighting_sun_mode = pc.mode;
 
     // Writes the finished image and blits it to the target.
     emit_cached_view_pass(
@@ -2504,6 +2632,7 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
             }
             rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
             if (reflections) rec.reads.push_back(interface_pointer_cast<IGpuResource>(reflections));
+            if (sun_shaded) rec.reads.push_back(interface_pointer_cast<IGpuResource>(sun_shaded));
             rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.deferred_output));
             if (color_target) {
                 rec.writes.push_back(interface_pointer_cast<IGpuResource>(color_target));

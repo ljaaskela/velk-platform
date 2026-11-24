@@ -197,6 +197,16 @@ public:
         vec3 reflect_cam{};
         IRenderPass::Ptr reflect_trace_pass;
         IRenderPass::Ptr reflect_resolve_pass;
+        /// The sun pass (VELK_SUN_PASS): a ray a pixel to the sun's middle (sun_rays_main_src), and
+        /// that softened (sun_soften_main_src), which the lighting takes in place of what the sun's
+        /// points keep. `sun_shaded` is what the lighting takes this frame, none without the pass.
+        IRenderTarget::Ptr sun_rays;
+        IRenderTarget::Ptr sun_soft;
+        uvec2 sun_rays_size{};
+        IRenderTarget::Ptr sun_shaded;
+        uint32_t lighting_sun_mode = 0;  ///< The sun terms the lighting pass was recorded with.
+        IRenderPass::Ptr sun_rays_pass;
+        IRenderPass::Ptr sun_soften_pass;
         IRenderPass::Ptr visibility_debug_pass;
         IRenderPass::Ptr chooser_frustum_pass;
         IRenderPass::Ptr partition_bounds_pass;
@@ -327,6 +337,10 @@ private:
     /// Traces and resolves reflections of smooth surfaces (light_probes_main_src with
     /// VELK_REFLECT, reflect_resolve_src), after the probes and before the lighting.
     void emit_reflection_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
+    /// The sun pass (VELK_SUN_PASS): casts a ray a pixel to the sun's middle (sun_rays_main_src),
+    /// and softens it (sun_soften_main_src) for soft, before the lighting. Nothing without a lit
+    /// directional light; no softening for a sun without a size.
+    void emit_sun_rays_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
     /// Replaces the final image with the visibility buffer as flat colours.
     void emit_visibility_debug_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
                                     FrameContext& ctx, uint32_t mode, IRenderGraph& graph);
