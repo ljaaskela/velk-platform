@@ -37,7 +37,8 @@ float velk_shadow_rt(uint light_idx, vec3 world_pos, vec3 world_normal)
         L = -light.direction.xyz;
         t_max = 1e30;
     } else {
-        vec3 to_light = light.position.xyz - world_pos;
+        // A square area light: toward the place on it velk_light_sample chose.
+        vec3 to_light = (light.flags.x == 3u ? velk_light_target : light.position.xyz) - world_pos;
         t_max = length(to_light);
         if (t_max < 1e-6) return 1.0;
         L = to_light / t_max;
@@ -48,8 +49,9 @@ float velk_shadow_rt(uint light_idx, vec3 world_pos, vec3 world_normal)
     // frames by the caller. params.w is an angular
     // radius (rad) for a directional sun, or a world-space radius for a
     // point / spot source -> its apparent angular spread is radius/dist.
-    // size == 0 keeps a single hard ray (today's behaviour).
-    float size = max(light.params.w, 0.0);
+    // size == 0 keeps a single hard ray (today's behaviour). A square area
+    // light's place is already chosen on it.
+    float size = light.flags.x == 3u ? 0.0 : max(light.params.w, 0.0);
     if (size > 0.0) {
         float spread = (light.flags.x == 0u) ? tan(size) : (size / max(t_max, 1e-4));
         // Mixed one component at a time. A linear sum of the position's bits gives

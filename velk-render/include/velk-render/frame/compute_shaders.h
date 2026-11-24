@@ -1153,6 +1153,10 @@ struct Light {
     vec4  params;          // x range, y cos(inner), z cos(outer), w light size (dir: angular radius rad; point/spot: world radius)
 };
 
+// The place on a square area light that velk_light_sample chose last, which the shadow ray toward
+// that light aims at, so that its light and what blocks it are of the same place.
+vec3 velk_light_target = vec3(0.0);
+
 // Scene lights bound by index (set = 1 slot 5); this view's run starts at
 // pc.lights_base. Same buffer the RT compute reads.
 layout(set = 1, binding = 5, std430) readonly buffer VelkLights { Light data[]; } velk_lights;
@@ -1937,6 +1941,10 @@ struct Light {
     vec4  params;          // x = range, y = cos(inner), z = cos(outer), w = light size (dir: angular radius rad; point/spot: world radius)
 };
 
+// The place on a square area light that velk_light_sample chose last, which the shadow ray toward
+// that light aims at, so that its light and what blocks it are of the same place.
+vec3 velk_light_target = vec3(0.0);
+
 // Scene lights bound by index (set = 1 slot 5); this view's run starts at
 // pc.lights_base. Same buffer the deferred-lighting compute reads.
 layout(set = 1, binding = 5, std430) readonly buffer VelkLights { Light data[]; } velk_lights;
@@ -2140,6 +2148,22 @@ void velk_light_sample(Light light, vec3 pos, out vec3 L, out float atten)
     atten = 1.0;
     if (light.flags.x == 0u) {
         L = -light.direction.xyz;
+    } else if (light.flags.x == 3u) {
+        // A square area light: one place on it, chosen evenly (velk_light_target, which its shadow
+        // ray aims at), weighted so that over many its N.L times this is what the deferred
+        // lighting's closed form gives (velk_area_irradiance's diffuse, times pi): the square's
+        // area, its cosine toward `pos` on either face, over the distance squared.
+        vec3 ln = normalize(light.direction.xyz);
+        vec3 lt = (abs(ln.y) < 0.9) ? normalize(cross(vec3(0.0, 1.0, 0.0), ln))
+                                    : normalize(cross(vec3(1.0, 0.0, 0.0), ln));
+        vec3 lb = cross(ln, lt);
+        float hs = max(light.params.w, 1e-4);
+        vec2 u = rng_next_vec2() * 2.0 - 1.0;
+        velk_light_target = light.position.xyz + (lt * u.x + lb * u.y) * hs;
+        vec3 to_light = velk_light_target - pos;
+        float dist2 = max(dot(to_light, to_light), 1e-8);
+        L = to_light * inversesqrt(dist2);
+        atten = 4.0 * hs * hs * abs(dot(ln, L)) / dist2;
     } else {
         vec3 to_light = light.position.xyz - pos;
         float dist = length(to_light);
