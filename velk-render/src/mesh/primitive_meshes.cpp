@@ -198,12 +198,13 @@ MeshBuilder::CachedGeometry MeshBuilder::make_sphere_geometry(uint32_t subdivisi
             uint32_t i10 = i00 + 1;
             uint32_t i01 = i00 + stride;
             uint32_t i11 = i01 + 1;
+            // CCW winding when viewed from outside (normal direction), as the cube's faces.
             indices.push_back(i00);
+            indices.push_back(i11);
             indices.push_back(i01);
-            indices.push_back(i11);
             indices.push_back(i00);
-            indices.push_back(i11);
             indices.push_back(i10);
+            indices.push_back(i11);
         }
     }
 
