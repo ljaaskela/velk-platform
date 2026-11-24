@@ -205,8 +205,17 @@ public:
         uvec2 sun_rays_size{};
         IRenderTarget::Ptr sun_shaded;
         uint32_t lighting_sun_mode = 0;  ///< The sun terms the lighting pass was recorded with.
+        /// The light the sun pass shades this frame, which the light points leave untraced for
+        /// what is drawn opaque (kLightPoolSunSkip); kLightNone for none. `sun_skip_changed` until
+        /// the light changes pass has traced everything again for a change of it.
+        uint32_t sun_skip = 0xFFFFFFFFu;
+        bool sun_skip_changed = false;
         IRenderPass::Ptr sun_rays_pass;
         IRenderPass::Ptr sun_soften_pass;
+        /// The sun pass's pipelines for this frame, as prepare_sun_pass made them; none when it
+        /// cannot run.
+        IGpuPipeline::Ptr sun_pipeline;
+        IGpuPipeline::Ptr sun_soften_pipeline;
         IRenderPass::Ptr visibility_debug_pass;
         IRenderPass::Ptr chooser_frustum_pass;
         IRenderPass::Ptr partition_bounds_pass;
@@ -337,6 +346,10 @@ private:
     /// Traces and resolves reflections of smooth surfaces (light_probes_main_src with
     /// VELK_REFLECT, reflect_resolve_src), after the probes and before the lighting.
     void emit_reflection_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
+    /// Makes the sun pass's targets and pipelines for this frame; false when it cannot run (no
+    /// VELK_SUN_PASS, no lit directional light, no G-buffer, or a target or pipeline missing), so
+    /// that the light points keep tracing the sun.
+    bool prepare_sun_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
     /// The sun pass (VELK_SUN_PASS): casts a ray a pixel to the sun's middle (sun_rays_main_src),
     /// and softens it (sun_soften_main_src) for soft, before the lighting. Nothing without a lit
     /// directional light; no softening for a sun without a size.

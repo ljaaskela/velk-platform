@@ -244,6 +244,14 @@ const GpuLight* sun_light(const RenderView& render_view)
     return nullptr;
 }
 
+// The index of the light the sun pass shades, kLightNone without the pass or a sun.
+uint32_t sun_pass_light(const RenderView& render_view)
+{
+    if (sun_pass_mode() == kSunPoints) return kLightNone;
+    const GpuLight* sun = sun_light(render_view);
+    return sun ? static_cast<uint32_t>(sun - render_view.lights.data()) : kLightNone;
+}
+
 // A development aid, what to show in place of the lit image: VELK_SUN_VIEW=1 what the lighting
 // takes of the sun, 0 to 1; of the sun pass's softening, 2 the penumbra's width, 3 the blocked
 // pixels its search found, 4 the pixels its filter took, 5 the surface's N.L toward the sun
@@ -921,12 +929,23 @@ void DeferredPath::build_passes(IViewEntry& entry,
     // above had only the hardware's first pass to go by.
     if (vs.instance_cull.tiny_word != kCullNoSlot) emit_depth_pyramid_pass(vs, ctx, graph, true);
     emit_visibility_resolve_pass(vs, render_view, ctx, graph);
-    emit_light_changes_pass(vs, render_view, ctx, graph);
-    emit_light_claim_pass(vs, render_view, ctx, graph);
     const bool debug_by_env = visibility_debug_mode() != 0u && ctx.present_counter >= visibility_debug_from();
     const uint32_t visibility_mode = debug_by_env ? visibility_debug_mode()
                                    : camera_state ? static_cast<uint32_t>(camera_state->debug_view)
                                                   : 0u;
+    // The light the sun pass shades this frame (emit_sun_rays_pass), which the light points then
+    // leave untraced for what is drawn opaque (VELK_POOL_SUN_SKIP): settled before anything reads
+    // them. When it changes, everything's light is traced again (emit_light_changes_pass).
+    // Its targets and pipelines made first (prepare_sun_pass): a frame it cannot shade keeps the
+    // sun on the points.
+    const uint32_t sun_skip = visibility_mode == 0 && prepare_sun_pass(vs, render_view, ctx, graph) ? sun_pass_light(render_view)
+                                                                                                   : kLightNone;
+    if (sun_skip != vs.sun_skip) {
+        vs.sun_skip = sun_skip;
+        vs.sun_skip_changed = true;
+    }
+    emit_light_changes_pass(vs, render_view, ctx, graph);
+    emit_light_claim_pass(vs, render_view, ctx, graph);
 
     if (vs.gbuffer_size.x == 0 || vs.gbuffer_size.y == 0) return;
     ensure_deferred_output(vs, static_cast<int>(vs.gbuffer_size.x), static_cast<int>(vs.gbuffer_size.y), graph);
@@ -1228,10 +1247,14 @@ void DeferredPath::emit_light_changes_pass(ViewState& vs, const RenderView& rend
     auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
     IGpuBuffer* arena_buffer = arena ? arena->buffer() : nullptr;
     if (!arena_buffer) return;
+    // The light the sun pass shades this frame, for the points to leave untraced; a change of it
+    // has everything traced again, so that none keeps a sun it never traced, or loses one.
+    arena->update_at(pool.header.offset() + uint64_t(kLightPoolSunSkip) * sizeof(uint32_t), &vs.sun_skip, sizeof(uint32_t));
 
     vector<uint32_t> words(kLightChangeHeaderWords, 0u);
     uint32_t count = 0;
-    bool all = render_view.bvh.changed_all;
+    bool all = render_view.bvh.changed_all || vs.sun_skip_changed;
+    vs.sun_skip_changed = false;
     const auto add = [&](const float lo[3], const float hi[3], uint32_t light, uint32_t wakes) {
         uint32_t change[kLightChangeWords] = {};
         std::memcpy(change + kChangeMin, lo, sizeof(float) * 3);
@@ -2407,12 +2430,13 @@ void DeferredPath::ensure_deferred_output(ViewState& vs, int w, int h, IRenderGr
     vs.lighting_dirty = true;
 }
 
-void DeferredPath::emit_sun_rays_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph)
+bool DeferredPath::prepare_sun_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph)
 {
-    vs.sun_shaded = {};
+    vs.sun_pipeline = {};
+    vs.sun_soften_pipeline = {};
     const SunPass mode = sun_pass_mode();
     const GpuLight* sun = sun_light(render_view);
-    if (mode == kSunPoints || !sun || !vs.gbuffer || vs.gbuffer_size.x == 0 || vs.gbuffer_size.y == 0) return;
+    if (mode == kSunPoints || !sun || !vs.gbuffer || vs.gbuffer_size.x == 0 || vs.gbuffer_size.y == 0) return false;
     const bool soft = mode == kSunSoft && sun->params[3] > 0.f;
     const uint32_t width = vs.gbuffer_size.x;
     const uint32_t height = vs.gbuffer_size.y;
@@ -2436,11 +2460,27 @@ void DeferredPath::emit_sun_rays_pass(ViewState& vs, const RenderView& render_vi
     }
     if (!vs.sun_rays) make(vs.sun_rays);
     if (soft && !vs.sun_soft) make(vs.sun_soft);
-    if (!vs.sun_rays || (soft && !vs.sun_soft)) return;
-    auto pipeline = compose_deferred_compute_pipeline(ctx, sun_rays_main_src, 0x5355'4e52'4159'0001ULL);
-    auto soften_pipeline = soft ? compose_deferred_compute_pipeline(ctx, sun_soften_main_src, 0x5355'4e53'4f46'0001ULL)
-                                : IGpuPipeline::Ptr{};
-    if (!pipeline || (soft && !soften_pipeline)) return;
+    if (!vs.sun_rays || (soft && !vs.sun_soft)) return false;
+    vs.sun_pipeline = compose_deferred_compute_pipeline(ctx, sun_rays_main_src, 0x5355'4e52'4159'0001ULL);
+    if (soft) vs.sun_soften_pipeline = compose_deferred_compute_pipeline(ctx, sun_soften_main_src, 0x5355'4e53'4f46'0001ULL);
+    if (!vs.sun_pipeline || (soft && !vs.sun_soften_pipeline)) {
+        vs.sun_pipeline = {};
+        vs.sun_soften_pipeline = {};
+        return false;
+    }
+    return true;
+}
+
+void DeferredPath::emit_sun_rays_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph)
+{
+    vs.sun_shaded = {};
+    // Ready only as prepare_sun_pass found it, before the light points left the sun untraced.
+    if (vs.sun_skip == kLightNone || !vs.sun_pipeline) return;
+    const bool soft = static_cast<bool>(vs.sun_soften_pipeline);
+    const uint32_t width = vs.gbuffer_size.x;
+    const uint32_t height = vs.gbuffer_size.y;
+    const IGpuPipeline::Ptr pipeline = vs.sun_pipeline;
+    const IGpuPipeline::Ptr soften_pipeline = vs.sun_soften_pipeline;
 
     const auto handle = [](const IRenderTarget::Ptr& t) { return static_cast<uint32_t>(t->get_gpu_handle(GpuResourceKey::Default)); };
     DeferredComputePushC pc{};

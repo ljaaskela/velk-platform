@@ -337,11 +337,13 @@ inline constexpr uint32_t kLightPoolAheadEvery = 60;
                                                     their room (POINT_TAKES and POINT_COUNTS' fifth): two words */   \
     X(SumRefines, SUM_REFINES, 199)              /* summed: points refined (VELK_LIGHT_LIST_REFINE) */               \
     X(RefineGroups, REFINE_GROUPS, 200)          /* the point dispatch's groups for refines, after the spread ones */ \
-    X(ReadPixels, READ_PIXELS, 201)              /* VELK_LIGHT_READ's pixels, x | y << 16, kLightNone for none: \
+    X(SunSkip, SUN_SKIP, 201)                    /* the light the sun pass shades this frame, which points of \
+                                                    what is drawn opaque leave untraced; kLightNone for none */      \
+    X(ReadPixels, READ_PIXELS, 202)              /* VELK_LIGHT_READ's pixels, x | y << 16, kLightNone for none: \
                                                     kLightReadPixels words */                                        \
-    X(ReadTerms, READ_TERMS, 205)                /* the lighting's terms at them, kLightReadWords each \
+    X(ReadTerms, READ_TERMS, 206)                /* the lighting's terms at them, kLightReadWords each \
                                                     (VELK_LIGHT_READ_*) */                                           \
-    X(HeaderEnd, HEADER_END, 525)
+    X(HeaderEnd, HEADER_END, 526)
 
 #define VELK_LIGHT_POOL_CPP_WORD(cpp, glsl, word) inline constexpr uint32_t kLightPool##cpp = word;
 VELK_LIGHT_POOL_HEADER(VELK_LIGHT_POOL_CPP_WORD)
@@ -393,6 +395,9 @@ inline constexpr uint32_t kLightTraceRaysUnlimited = 1u << 30;
 #define VELK_LIGHT_DIRECT_PAGES 15u
 #define VELK_LIGHT_PIECED 0x40000000u
 #define VELK_LIGHT_TWO_SIDED 0x20000000u
+// A page's kind: its record's draw is blended, which the sun pass does not shade
+// (VELK_POOL_SUN_SKIP), so its points trace the sun as every other light.
+#define VELK_LIGHT_BLENDED 0x10000000u
 #define VELK_LIGHT_SLOTS 8u
 #define VELK_LIGHT_ONE_TRACED 0x40000000u
 #define VELK_LIGHT_ONE_ASKED 0x20000000u
@@ -2208,6 +2213,22 @@ void velk_points_count(uint pool)
 )" R"(
 // The blocker codes of the slots of `slots` without a light: VELK_LIGHT_BLOCKER_CLEAR, so that a
 // code VELK_LIGHT_BLOCKER_UNTRACED always means a light still to trace (velk_light_list_at).
+// For a record drawn opaque (`kind` its page's, without VELK_LIGHT_BLENDED): the light the sun pass
+// shades (VELK_POOL_SUN_SKIP) taken out of `slots`, as a slot without a light. True when it was
+// there.
+bool velk_points_leave_sun(uint pool, uint kind, inout uint slots[VELK_LIGHT_SLOTS])
+{
+    uint sun = VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUN_SKIP];
+    if (sun == VELK_LIGHT_NONE || (kind & VELK_LIGHT_BLENDED) != 0u) return false;
+    bool left = false;
+    for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) {
+        if (slots[s] != sun) continue;
+        slots[s] = VELK_LIGHT_NONE;
+        left = true;
+    }
+    return left;
+}
+
 uint velk_points_none_clear(uint slots[VELK_LIGHT_SLOTS])
 {
     uint codes = 0u;
@@ -2504,6 +2525,9 @@ void velk_points_trace_point(uint pool, uint i, uint frame, uint counts[VELK_LIG
             }
         }
     }
+    // The light the sun pass shades (VELK_POOL_SUN_SKIP), for a record drawn opaque: its slot is
+    // traced as one without a light, settled with nothing to cast, its choice kept as stored.
+    bool sun_left = velk_points_leave_sun(pool, kind, slots);
 
     // A vertex, or a piece's point in a triangle at weights of its corners.
     uint vertex_word = VELK_LIGHT_WORDS.data[cluster + VELK_LOD_CLUSTER_VERTEX];
@@ -2820,8 +2844,9 @@ void velk_points_trace_point(uint pool, uint i, uint frame, uint counts[VELK_LIG
                 blockers |= (nearest < 1e29 ? velk_light_blocker_code(nearest) : VELK_LIGHT_BLOCKER_CLEAR) << (4u * s);
             }
         }
-        // Stored as one more.
-        traces = fully && four ? (restart ? VELK_LIGHT_WARM_TRACES - 1u : 3u) : 0u;
+        // Stored as one more. With no light left once the sun pass's is taken out, settled at once.
+        traces = sun_left && full == 0u ? VELK_LIGHT_WARM_TRACES - 1u
+               : fully && four ? (restart ? VELK_LIGHT_WARM_TRACES - 1u : 3u) : 0u;
         if (lane == 0u) {
             atomicAdd(VELK_LIGHT_WORDS.data[pool + (restart ? VELK_POOL_SUM_RETRACES : VELK_POOL_SUM_FIRST_TRACES)], 1u);
             // What the budget charged it (velk_points_trace_point's from_none), whatever it cast.
@@ -2866,6 +2891,10 @@ void velk_points_trace_point(uint pool, uint i, uint frame, uint counts[VELK_LIG
             } else {
                 blockers |= VELK_LIGHT_BLOCKER_CLEAR << (4u * t);
             }
+        }
+        // With no light left once the sun pass's is taken out, settled.
+        if (sun_left && slots[0] == VELK_LIGHT_NONE && velk_points_none_clear(slots) == 0xFFFFFFFFu) {
+            traces = max(traces, VELK_LIGHT_WARM_TRACES - 1u);
         }
         atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUM_LATER_TRACES], 1u);
     }
@@ -3108,6 +3137,24 @@ void main()
                 s_slots[s] = chosen[s];
                 if (coarse_first != VELK_LIGHT_NONE) VELK_LIGHT_WORDS.data[coarse_first + VELK_PAGE_SLOTS + s] = chosen[s];
             }
+        }
+        // The light the sun pass shades, for a cluster of an opaque draw or its points' coarse light:
+        // its rays cast nothing (velk_points_leave_sun), its choice kept as stored. A quad node or a
+        // whole mesh, whose draw this does not know, traces it.
+        uint sun_kind = VELK_LIGHT_BLENDED;
+        if (coarse_first != VELK_LIGHT_NONE) {
+            sun_kind = VELK_LIGHT_WORDS.data[coarse_first + VELK_PAGE_KIND];
+        } else if (kind == VELK_LIGHT_TRACE_CLUSTER) {
+            uint entry = VELK_LIGHT_WORDS.data[at + VELK_RECORD_ENTRY];
+            if (velk_cut_light_only(entry)) entry &= ~VELK_CUT_LIGHT_ONLY;
+            if (entry < VELK_CUT_RAY_QUAD) {
+                sun_kind = (VELK_LIGHT_WORDS.data[entry + VELK_CLUSTER_ENTRY_FLAGS] & VELK_LOD_RAYS_ONLY) != 0u ? VELK_LIGHT_BLENDED : 0u;
+            }
+        }
+        uint traced[VELK_LIGHT_SLOTS];
+        for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) traced[s] = s_slots[s];
+        if (velk_points_leave_sun(pool, sun_kind, traced)) {
+            for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) s_slots[s] = traced[s];
         }
     }
     barrier();
@@ -3854,6 +3901,43 @@ uint velk_cell_find(uint table, uint key, uint check, out bool claimed)
 }
 )"
 
+// The sun's visibility from a surface by one ray: the deferred path's sun pass (sun_rays_main_src),
+// the probes' and reflections' hits (light_probes_main_src) and the reference's visibility modes
+// cast it alike. Needs the walk (velk_trace.glsl), velk_light_at and push constants `pc` with
+// light_count and lights_base.
+#define VELK_SUN_VISIBILITY_GLSL R"(
+// The sun: the first lit directional light. VELK_LIGHT_NONE (all bits) for none.
+uint velk_sun_index()
+{
+    for (uint i = 0u; i < pc.light_count; ++i) {
+        Light light = velk_light_at(pc.lights_base + i);
+        if (light.flags.x == 0u && light.color_intensity.a > 0.0) return i;
+    }
+    return 0xFFFFFFFFu;
+}
+
+// Whether light along `dir` reaches `pos` (from the camera) on a surface facing `n`: 1 where nothing
+// is in the way, 0 where something is, between for blended surfaces on the way. One seen from both
+// sides (`two_sided`) is lit on the side the light is on. A stand-in for small pieces (`stand_in`)
+// faces every way: its ray starts off it toward the light, as a light point's does. `blocker_t` is
+// how far away what was in the way is, 0 where nothing was; `facing_away` is true where the surface
+// faces away from the light, which then is in its own way at no distance.
+float velk_sun_visibility(vec3 pos, vec3 n, bool two_sided, bool stand_in, vec3 dir, out float blocker_t, out bool facing_away)
+{
+    blocker_t = 0.0;
+    if (two_sided && dot(n, dir) < 0.0) n = -n;
+    facing_away = !stand_in && dot(n, dir) <= 0.0;
+    if (facing_away) return 0.0;
+    Ray ray;
+    ray.origin = pos + (stand_in ? dir : n) * (0.01 + length(pos) * 1e-4);
+    ray.dir = dir;
+    velk_ray_blocker_t = 0.0;
+    float through = trace_visibility(ray, 1e30);
+    if (through < 1.0) blocker_t = velk_ray_blocker_t;
+    return through;
+}
+)"
+
 /**
  * The screen probes' gather, in two dispatches. The first, a thread a probe, decides what each
  * probe does with its cell (velk_probes_decide): those that read it are done, those that cast
@@ -3875,7 +3959,7 @@ uint velk_cell_find(uint table, uint key, uint check, out bool claimed)
  * cells, the frame everything last changed, this frame's change list and the probe list (bit 31
  * set for the trace).
  */
-inline constexpr string_view light_probes_main_src = R"(
+inline constexpr string_view light_probes_main_src = VELK_SUN_VISIBILITY_GLSL R"(
 layout(set = 1, binding = 16, std430) buffer ProbeWords { uint data[]; } probe_words;
 #define VELK_LIGHT_WORDS probe_words
 #define velk_light_cell_words probe_words
@@ -4086,12 +4170,59 @@ void velk_probe_ask(uint word)
     if ((value & (VELK_LIGHT_ONE_TRACED | VELK_LIGHT_ONE_ASKED)) == 0u) atomicOr(probe_words.data[word], VELK_LIGHT_ONE_ASKED);
 }
 
+// The light the sun pass shades (VELK_POOL_SUN_SKIP) when a hit's points leave it untraced, as
+// their trace does (velk_points_leave_sun): for a cluster of an opaque draw, or a hit with no
+// record. VELK_LIGHT_NONE where its points trace it: a blended draw's, a quad's, a whole mesh's,
+// or without the sun pass.
+uint velk_probe_own_sun(RayHit hit)
+{
+    uint pool = pc.shapes_base;
+    if (pool == 0xFFFFFFFFu) return VELK_LIGHT_NONE;
+    uint sun = probe_words.data[pool + VELK_POOL_SUN_SKIP];
+    if (sun == VELK_LIGHT_NONE || hit.record == VELK_NO_RECORD) return sun;
+    uint entry = probe_words.data[hit.record + VELK_RECORD_ENTRY];
+    if (velk_cut_light_only(entry)) entry &= ~VELK_CUT_LIGHT_ONLY;
+    if (entry >= VELK_CUT_RAY_QUAD) return VELK_LIGHT_NONE;
+    return (probe_words.data[entry + VELK_CLUSTER_ENTRY_FLAGS] & VELK_LOD_RAYS_ONLY) != 0u ? VELK_LIGHT_NONE : sun;
+}
+
+// The direct light of the sun `sun` (velk_probe_own_sun) at a hit at `at` facing `n`, by its own
+// ray: for a probe, toward a place on the sun's disc chosen by the ray `dir` that hit, so that a
+// probe's rays together cover it; for a reflection (VELK_REFLECT), toward its middle.
+vec3 velk_probe_sun(uint sun, RayHit hit, vec3 at, vec3 n, vec3 dir)
+{
+    if (sun == VELK_LIGHT_NONE) return vec3(0.0);
+    Light light = velk_light_at(pc.lights_base + sun);
+    vec3 l = -light.direction.xyz;
+#ifndef VELK_REFLECT
+    float size = max(light.params.w, 0.0);
+    if (size > 0.0) {
+        uvec3 q = floatBitsToUint(dir);
+        uint h = q.x ^ (q.y * 0x9e3779b9u) ^ (q.z * 0x85ebca6bu);
+        h ^= h >> 16; h *= 0x7feb352du;
+        h ^= h >> 15; h *= 0x846ca68bu;
+        h ^= h >> 16;
+        vec3 a = normalize(abs(l.y) < 0.9 ? cross(l, vec3(0.0, 1.0, 0.0)) : cross(l, vec3(1.0, 0.0, 0.0)));
+        vec3 b = cross(l, a);
+        float r = tan(size) * sqrt(float(h & 0xFFFFu) / 65535.0);
+        float turn = 6.2831853 * float(h >> 16u) / 65535.0;
+        l = normalize(l + (a * cos(turn) + b * sin(turn)) * r);
+    }
+#endif
+    bool two_sided = hit.draw != VELK_RAY_NONE && (velk_draw_data.data[hit.draw].flags & VELK_DRAW_DOUBLE_SIDED) != 0u;
+    float blocker_t;
+    bool facing_away;
+    float seen = velk_sun_visibility(at, n, two_sided, hit.stand_in >= 0.0, l, blocker_t, facing_away);
+    return seen > 0.0 ? velk_probe_light(sun, at, n, hit.stand_in, -dir) * seen : vec3(0.0);
+}
+
 // The direct light a surface at `at`, facing `n`, gets as its light points there say, for a hit
 // whose light is at `word`: its one value, its lights chosen at `center`, or its record's points:
 // down its triangle's pieces where the hit knows its triangle (RayHit::triangle,
 // velk_light_add_points), else at its triangle's corners; each light by how much of it gets
-// through. `to_viewer` points back along the ray that hit it, for a stand-in (RayHit::stand_in).
-vec3 velk_probe_direct(RayHit hit, uint word, vec3 center, vec3 at, vec3 n, vec3 to_viewer)
+// through, but for `own_sun`, which the hit shades by its own ray (velk_probe_sun). `to_viewer`
+// points back along the ray that hit it, for a stand-in (RayHit::stand_in).
+vec3 velk_probe_direct(RayHit hit, uint word, vec3 center, vec3 at, vec3 n, vec3 to_viewer, uint own_sun)
 {
     uint pool = pc.shapes_base;
     if (word == VELK_LIGHT_NONE || pool == 0xFFFFFFFFu) return vec3(0.0);
@@ -4119,7 +4250,7 @@ vec3 velk_probe_direct(RayHit hit, uint word, vec3 center, vec3 at, vec3 n, vec3
     }
     vec3 total = vec3(0.0);
     for (uint k = 0u; k < VELK_LIGHT_SLOTS; ++k) {
-        if (lights[k] == VELK_LIGHT_NONE) continue;
+        if (lights[k] == VELK_LIGHT_NONE || lights[k] == own_sun) continue;
         total += velk_probe_light(lights[k], at, n, hit.stand_in, to_viewer) * (sums[k].y / max(sums[k].x, 1e-6));
     }
     return total;
@@ -4346,7 +4477,10 @@ void velk_probes_trace(uint lane)
             // As the lighting pass lights a pixel: albedo times each light's N.L and strength, and
             // its indirect light.
             vec3 indirect = lit ? velk_probe_hit_indirect(pc.more.x, at, hn, radiance, radiance_dir, width, height, across) : vec3(0.0);
-            light = albedo * (velk_probe_direct(hit, light_word, center, at, hn, -dir) + indirect) + emission;
+            // The sun pass's light by the hit's own ray, where its points leave it untraced.
+            uint own_sun = velk_probe_own_sun(hit);
+            vec3 sun = lit ? velk_probe_sun(own_sun, hit, at, hn, dir) : vec3(0.0);
+            light = albedo * (velk_probe_direct(hit, light_word, center, at, hn, -dir, own_sun) + sun + indirect) + emission;
         } else {
             light = velk_probe_sky(dir);
         }
@@ -4480,8 +4614,11 @@ void velk_reflect_trace(uint lane)
         velk_probe_hit_words(hit, at, light_word, radiance, radiance_dir, center, ask);
         if (lit && ask && pc.shapes_base != 0xFFFFFFFFu) velk_probe_ask(light_word);
         vec3 indirect = lit ? velk_probe_hit_indirect(pc.more.w, at, hn, radiance, radiance_dir, width, height, across) : vec3(0.0);
+        // The sun pass's light by the hit's own ray, where its points leave it untraced.
+        uint own_sun = velk_probe_own_sun(hit);
+        vec3 sun = lit ? velk_probe_sun(own_sun, hit, at, hn, dir) : vec3(0.0);
         // Its metal: what it mirrors of the environment, half blurred, its own roughness not known.
-        light = albedo * (velk_probe_direct(hit, light_word, center, at, hn, -dir) + indirect) + emission
+        light = albedo * (velk_probe_direct(hit, light_word, center, at, hn, -dir, own_sun) + sun + indirect) + emission
               + metal * velk_probe_env(reflect(dir, hn), 0.5);
         // Within what half floats hold.
         t = clamp(hit.t, 1e-4, 65000.0);
@@ -5729,9 +5866,11 @@ void main()
         bool again = false;
         uint pages = light_words.data[pool + VELK_POOL_PAGES];
         uint draw = light_words.data[entry + VELK_CLUSTER_ENTRY_DRAW];
-        // Seen from both sides, its points and its records for light only take light from either.
-        uint two_sided = draw != 0xFFFFFFFFu && (velk_draw_data.data[draw].flags & VELK_DRAW_DOUBLE_SIDED) != 0u
-                       ? VELK_LIGHT_TWO_SIDED : 0u;
+        // Seen from both sides, its points and its records for light only take light from either;
+        // of a blended draw (its clusters for rays only), the sun pass does not shade it.
+        uint kind_flags = draw != 0xFFFFFFFFu && (velk_draw_data.data[draw].flags & VELK_DRAW_DOUBLE_SIDED) != 0u
+                        ? VELK_LIGHT_TWO_SIDED : 0u;
+        if ((light_words.data[entry + VELK_CLUSTER_ENTRY_FLAGS] & VELK_LOD_RAYS_ONLY) != 0u) kind_flags |= VELK_LIGHT_BLENDED;
         // The instance's records for light only, beside it: an instance's records are together,
         // in order within its partition's records.
         uint record_pool;
@@ -5765,7 +5904,7 @@ void main()
                     uint other_cluster = clusters + light_words.data[other + VELK_RECORD_CLUSTER] * VELK_LOD_CLUSTER_WORDS;
                     uint other_vertices = light_words.data[other_cluster + VELK_LOD_CLUSTER_VERTICES];
                     uint laid;
-                    if (!velk_light_lay_out(other_vertices, other_cluster, VELK_LIGHT_OWN | two_sided, 0u, 2u * other_vertices,
+                    if (!velk_light_lay_out(other_vertices, other_cluster, VELK_LIGHT_OWN | kind_flags, 0u, 2u * other_vertices,
                                             VELK_LIGHT_NONE, laid)) {
                         light_words.data[other + VELK_RECORD_LIGHT] = VELK_LIGHT_NONE;
                         again = true;
@@ -5803,7 +5942,7 @@ void main()
             uint counts = velk_patch_counts(cluster);
             uint triangles = min(counts != 0u ? counts >> 16u : light_words.data[cluster + VELK_LOD_CLUSTER_TRIANGLES], kMaxTriangles);
             uint table = index_base != VELK_LIGHT_NONE ? triangles : 0u;
-            uint kind = (table != 0u ? VELK_LIGHT_PIECED | triangles : VELK_LIGHT_OWN) | two_sided;
+            uint kind = (table != 0u ? VELK_LIGHT_PIECED | triangles : VELK_LIGHT_OWN) | kind_flags;
             uint laid;
             if (velk_light_lay_out(vertices, cluster, kind, table, 2u * vertices, index_base, laid)) {
                 s_page = laid;
@@ -6432,6 +6571,7 @@ inline bool ensure_light_pool(LightPool& pool, IGpuArena& arena, uint64_t device
     // A development aid: VELK_LIGHT_READ=x,y;x,y;... names up to kLightReadPixels pixels whose
     // lighting terms the lighting writes and the log prints.
     for (uint32_t k = 0; k < kLightReadPixels; ++k) initial[kLightPoolReadPixels + k] = kLightNone;
+    initial[kLightPoolSunSkip] = kLightNone;
     if (const char* read = std::getenv("VELK_LIGHT_READ")) {
         uint32_t k = 0;
         for (const char* at = read; at && *at && k < kLightReadPixels;) {
