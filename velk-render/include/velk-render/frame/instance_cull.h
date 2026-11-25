@@ -5639,12 +5639,11 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
                      static_cast<unsigned long long>(ctx.present_counter), counts[0], counts[3], counts[1], counts[2]);
             // One frame's counts (LAST_RAYS_CAST on), with the frame they are of (READ_STAMP as the
             // sweep copied it), the view by its state as `light submit` names it.
-            uint32_t last[6] = {};
+            uint32_t last[4] = {};
             arena->read_at(pool.header.offset() + uint64_t(kLightPoolLastRaysCast) * sizeof(uint32_t), last, sizeof(last));
-            VELK_LOG(I, "light frame %p,%u (now %llu): rays %u of the points, %u of the slot pass, %u of the sun pass; pending %u "
-                        "among the slot pass's lights, %u beyond them",
-                     static_cast<const void*>(&state), last[5], static_cast<unsigned long long>(ctx.present_counter), last[0],
-                     last[1], last[2], last[3], last[4]);
+            VELK_LOG(I, "light frame %p,%u (now %llu): rays %u of the points, %u of the sun pass; pending %u",
+                     static_cast<const void*>(&state), last[3], static_cast<unsigned long long>(ctx.present_counter), last[0],
+                     last[1], last[2]);
             for (uint32_t k = 0; k < kLightReadPixels; ++k) {
                 const uint32_t packed = r[k];
                 if (packed == kLightNone) continue;
@@ -5673,13 +5672,6 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
                                 "normal %.3f %.3f %.3f",
                              packed & 0xFFFFu, packed >> 16u, f[0] == kLightNone ? -1 : static_cast<int>(f[0]), through, n_dot_l, f[3],
                              lit[0], lit[1], lit[2], normal[0], normal[1], normal[2]);
-                    // The slot pass's lights (VELK_LIGHT_READ_SLOTS), -1 for none.
-                    float slot_through[2] = {};
-                    std::memcpy(&slot_through[0], f + 11, sizeof(float));
-                    std::memcpy(&slot_through[1], f + 13, sizeof(float));
-                    VELK_LOG(I, "light read %u,%u slot lights %d (through %.3f), %d (through %.3f)", packed & 0xFFFFu, packed >> 16u,
-                             f[10] == kLightNone ? -1 : static_cast<int>(f[10]), slot_through[0],
-                             f[12] == kLightNone ? -1 : static_cast<int>(f[12]), slot_through[1]);
                 }
                 // What it reads of its triangle's pieces (velk_light_explain): the first light's
                 // shade (0 lit to 15 blocked, - for none), traces and first slot's blocker code
@@ -5743,21 +5735,6 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
                      h[kLightPoolLastUntracedPoints], h[kLightPoolLastCoarsePoints], h[kLightPoolLastFinePoints],
                      h[kLightPoolLastWarmupPoints], h[kLightPoolLastRefinePoints],
                      h[kLightPoolSumChanged], written, took, h[kLightPoolLastUntracedPixels], h[kLightPoolRayBudget]);
-            // The rays of the last frame, all of one frame's (LAST_RAYS_CAST on): the points', the slot
-            // pass's and the sun pass's; and the most of a frame since the last log of the passes'.
-            const uint32_t* last = h + kLightPoolLastRaysCast;
-            const uint32_t* most_of = h + kLightPoolSlotPendingInsideMost;
-            VELK_LOG(I, "light rays: last frame %u of the points, %u of the slot pass, %u of the sun pass; the most of a frame "
-                        "since the last log %u of the slot pass, %u of the sun pass",
-                     last[0], last[1], last[2], most_of[2], most_of[3]);
-            // With the slot pass (VELK_LIGHT_SLOTS_K): the lit pixels' lights its points had not traced,
-            // among the pass's lights and beyond them.
-            if (std::getenv("VELK_LIGHT_SLOTS_K")) {
-                VELK_LOG(I, "light slots: last frame %u lit pixels' lights among the slot pass's whose points had not traced them "
-                            "yet, or a change made stale, and %u beyond them; the most of a frame since the last log %u and %u",
-                         last[3], last[4], most_of[0], most_of[1]);
-            }
-            clear(kLightPoolSlotPendingInsideMost, 4u);
             uint32_t longest = 0;
             uint32_t most = 0;
             for (const auto& c : state.cuts) {
