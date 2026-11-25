@@ -1333,8 +1333,8 @@ void DeferredPath::emit_light_changes_pass(ViewState& vs, const RenderView& rend
             all_lights = true;
             break;
         }
-        // Only moved, by less than its size: what points have of it is a good start for their
-        // next rays (kLightChangeSmall).
+        // Only moved, by less than its size: points keep what they have of it until their next
+        // rays, even where it is all the light a record has (kLightChangeSmall).
         const bool small = same_kind && b.params[3] > 0.f && moved < b.params[3] * b.params[3]
                         && std::abs(now - was) <= std::max(was, now) / 16.f;
         changed_lights.push_back(static_cast<uint32_t>(i) | (small ? kLightChangeSmall : 0u));
@@ -1555,17 +1555,13 @@ void DeferredPath::emit_light_claim_pass(ViewState& vs, const RenderView& render
     // The light's level, as the culling's error on screen, for the log.
     const float light_level = kLodMaxErrorPixels * kLightPixels / kLodElementPixels;
     std::memcpy(&trace_pc.spare5, &light_level, sizeof(float));
-    // The rays a first trace or restart casts and is charged (velk_points_trace_point): a ray a lit
-    // light, but at most four whatever the lights, so that what a point costs does not grow with
-    // them.
-    const uint32_t first_rays = std::min(std::max(lights, 1u), 4u);
-    trace_pc.spare6 = first_rays;
-    // The lanes a point traced from none spreads its rays over when the trace spreads them (while
-    // they would not fill the device), a ray each, rounded up to a power of two. Low byte the
-    // lanes, the next the rays.
+    // The lanes a point spreads its rays over when the trace spreads them (while they would not
+    // fill the device): a ray each of its lights at most (velk_points_trace_point), rounded up to
+    // a power of two, up to kLightSlots.
+    const uint32_t point_rays = std::min(std::max(lights, 1u), kLightSlots);
     uint32_t ray_lanes = 1u;
-    while (ray_lanes < first_rays) ray_lanes *= 2u;
-    trace_pc.spare1 = ray_lanes | (first_rays << 8u);
+    while (ray_lanes < point_rays) ray_lanes *= 2u;
+    trace_pc.spare1 = ray_lanes;
     // Recorded every frame: the trace follows the view's globals and lights.
     std::memcpy(vs.light_claim_recorded, &pc, sizeof(pc));
     const bool other = vs.instance_cull.chosen_by_other;

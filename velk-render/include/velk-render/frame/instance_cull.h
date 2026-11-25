@@ -5727,13 +5727,12 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             }
             clear(kLightPoolSumChanged, 1u);
             VELK_LOG(I, "light: %u pages, %u of them free; records %u paged (%u linked), %u one value; last frame %u searched, %u one values "
-                        "traced, points listed: %u untraced coarse, %u stale coarse, %u fine, %u warming up; "
+                        "traced, points listed: %u untraced coarse, %u due coarse, %u fine; "
                         "%u records changed since the last log, %u records "
                         "chosen again of which %u kept their light, %u lit pixels untraced; budget %u rays",
                      h[kLightPoolPages], h[kLightPoolFreePages], h[kLightPoolLastRecordsPaged], h[kLightPoolLastRecordsLinked],
                      h[kLightPoolLastRecordsOneValue], h[kLightPoolLastSearched], h[kLightPoolLastTraces],
                      h[kLightPoolLastUntracedPoints], h[kLightPoolLastCoarsePoints], h[kLightPoolLastFinePoints],
-                     h[kLightPoolLastWarmupPoints],
                      h[kLightPoolSumChanged], written, took, h[kLightPoolLastUntracedPixels], h[kLightPoolRayBudget]);
             uint32_t longest = 0;
             uint32_t most = 0;
