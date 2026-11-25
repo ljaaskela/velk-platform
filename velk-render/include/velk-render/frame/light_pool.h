@@ -339,11 +339,13 @@ inline constexpr uint32_t kLightPoolAheadEvery = 60;
     X(RefineGroups, REFINE_GROUPS, 200)          /* the point dispatch's groups for refines, after the spread ones */ \
     X(SunSkip, SUN_SKIP, 201)                    /* the light the sun pass shades this frame, which points of \
                                                     what is drawn opaque leave untraced; kLightNone for none */      \
-    X(ReadPixels, READ_PIXELS, 202)              /* VELK_LIGHT_READ's pixels, x | y << 16, kLightNone for none: \
+    X(Hard, HARD, 202)                           /* not 0 with VELK_LIGHT_HARD: a point casts a ray to each light's \
+                                                    centre, blocked or not, and settles once each light has had one */ \
+    X(ReadPixels, READ_PIXELS, 203)              /* VELK_LIGHT_READ's pixels, x | y << 16, kLightNone for none: \
                                                     kLightReadPixels words */                                        \
-    X(ReadTerms, READ_TERMS, 206)                /* the lighting's terms at them, kLightReadWords each \
+    X(ReadTerms, READ_TERMS, 207)                /* the lighting's terms at them, kLightReadWords each \
                                                     (VELK_LIGHT_READ_*) */                                           \
-    X(HeaderEnd, HEADER_END, 526)
+    X(HeaderEnd, HEADER_END, 527)
 
 #define VELK_LIGHT_POOL_CPP_WORD(cpp, glsl, word) inline constexpr uint32_t kLightPool##cpp = word;
 VELK_LIGHT_POOL_HEADER(VELK_LIGHT_POOL_CPP_WORD)
@@ -2126,10 +2128,13 @@ uint g_first_rays = 0u;  // of those, for lights traced for the first time
 // patches of small members on the way (VELK_CUT_RAY_QUAD). How far away what kept it was is in
 // velk_ray_blocker_t, 0 when the surface faces away. With `stratum` 0 to 3, the point is in that
 // quarter of the light's samples, so that four rays with each cover the light evenly; 16 to 31 in
-// that sixteenth of them, 32 to 39 in that eighth; 4 for anywhere.
+// that sixteenth of them, 32 to 39 in that eighth; 4 for anywhere; VELK_LIGHT_STRATUM_CENTRE for
+// the light's centre, its answer then 0 or 1.
+#define VELK_LIGHT_STRATUM_CENTRE 40u
 float velk_points_blocked(Light light, vec3 p, vec3 n, float lift, uint seed, uint stratum, bool two_sided)
 {
     velk_ray_blocker_t = 0.0;
+    bool centre = stratum == VELK_LIGHT_STRATUM_CENTRE;
     vec2 r = vec2(float(velk_points_hash(seed) & 0xFFFFu), float(velk_points_hash(seed ^ 0x9e3779b9u) & 0xFFFFu)) / 65535.0;
     if (stratum < 4u) r = (vec2(float(stratum & 1u), float(stratum >> 1u)) + r) * 0.5;
     // 16 to 31: in that sixteenth of a 4 by 4 grid over the light, and 32 to 39 in that eighth of
@@ -2142,17 +2147,17 @@ float velk_points_blocked(Light light, vec3 p, vec3 n, float lift, uint seed, ui
         vec3 l = -light.direction.xyz;
         vec3 a = normalize(abs(l.y) < 0.9 ? cross(l, vec3(0.0, 1.0, 0.0)) : cross(l, vec3(1.0, 0.0, 0.0)));
         vec3 b = cross(l, a);
-        float spread = tan(light.params.w) * sqrt(r.x);
+        float spread = centre ? 0.0 : tan(light.params.w) * sqrt(r.x);
         float turn = 6.2831853 * r.y;
         dir = normalize(l + (a * cos(turn) + b * sin(turn)) * spread);
     } else {
         vec3 target = light.position.xyz;
-        if (light.flags.x == 3u) {
+        if (!centre && light.flags.x == 3u) {
             vec3 a;
             vec3 b;
             velk_area_axes(light.direction.xyz, light.params.w, a, b);
             target += a * (2.0 * r.x - 1.0) + b * (2.0 * r.y - 1.0);
-        } else if (light.params.w > 0.0) {
+        } else if (!centre && light.params.w > 0.0) {
             float turn = 6.2831853 * r.y;
             float z = 2.0 * r.x - 1.0;
             target += light.params.w * vec3(sqrt(1.0 - z * z) * cos(turn), z, sqrt(1.0 - z * z) * sin(turn));
@@ -2172,7 +2177,10 @@ float velk_points_blocked(Light light, vec3 p, vec3 n, float lift, uint seed, ui
     ray.origin = p + (faces ? n : dir) * lift;
     ray.dir = dir;
     ++g_rays;
-    return 1.0 - trace_visibility(ray, max(t_max - lift, 0.0));
+    float blocked = 1.0 - trace_visibility(ray, max(t_max - lift, 0.0));
+    // From the centre, blocked or not: patches of small members on the way by more than half.
+    if (centre) blocked = blocked >= 0.5 ? 1.0 : 0.0;
+    return blocked;
 }
 
 // This thread's rays and their walks' steps, into the frame's counts (pool header 86 and 87).
@@ -2537,6 +2545,8 @@ void velk_points_trace_point(uint pool, uint i, uint frame, uint counts[VELK_LIG
     uint state = VELK_LIGHT_WORDS.data[pw + 1u];
     // Which trace this is, as its listing counted it.
     uint traces = state == VELK_LIGHT_NONE ? 0u : state >> 28u;
+    // VELK_LIGHT_HARD: a ray to each light's centre, blocked or not, its light then settled.
+    bool hard = VELK_LIGHT_WORDS.data[pool + VELK_POOL_HARD] != 0u;
     VelkPointPlace at;
     at.instance = instance;
     at.vertex_word = vertex_word;
@@ -2716,7 +2726,7 @@ void velk_points_trace_point(uint pool, uint i, uint frame, uint counts[VELK_LIG
         for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) {
             if (slots[s] == VELK_LIGHT_NONE) continue;
             Light l = velk_light_at(pc.lights_base + slots[s]);
-            uint f = l.params.w > 0.0 || l.flags.x == 3u ? 4u : 1u;
+            uint f = !hard && (l.params.w > 0.0 || l.flags.x == 3u) ? 4u : 1u;
             four = four || f == 4u;
             full |= f << (4u * s);
             capacity += f;
@@ -2782,7 +2792,8 @@ void velk_points_trace_point(uint pool, uint i, uint frame, uint counts[VELK_LIG
             float lj = lift;
             if (around && j > 0u) velk_point_place(at, j, pj, nj, lj);
             // A light's rays over its quarters: all four, or two opposite ones.
-            uint stratum = ((full >> (4u * s)) & 15u) == 4u ? (n_s == 4u ? j : n_s == 2u ? j * 3u : 4u) : 4u;
+            uint stratum = hard ? VELK_LIGHT_STRATUM_CENTRE
+                         : ((full >> (4u * s)) & 15u) == 4u ? (n_s == 4u ? j : n_s == 2u ? j * 3u : 4u) : 4u;
             float blocked = velk_points_blocked(velk_light_at(pc.lights_base + slots[s]), pj, nj, lj, seed + s * 4u + j, stratum,
                                                 (kind & VELK_LIGHT_TWO_SIDED) != 0u);
             if (spread) {
@@ -2844,8 +2855,10 @@ void velk_points_trace_point(uint pool, uint i, uint frame, uint counts[VELK_LIG
                 blockers |= (nearest < 1e29 ? velk_light_blocker_code(nearest) : VELK_LIGHT_BLOCKER_CLEAR) << (4u * s);
             }
         }
-        // Stored as one more. With no light left once the sun pass's is taken out, settled at once.
+        // Stored as one more. With no light left once the sun pass's is taken out, settled at once;
+        // VELK_LIGHT_HARD, settled once each light has had its ray.
         traces = sun_left && full == 0u ? VELK_LIGHT_WARM_TRACES - 1u
+               : hard && fully ? VELK_LIGHT_WARM_TRACES - 1u
                : fully && four ? (restart ? VELK_LIGHT_WARM_TRACES - 1u : 3u) : 0u;
         if (lane == 0u) {
             atomicAdd(VELK_LIGHT_WORDS.data[pool + (restart ? VELK_POOL_SUM_RETRACES : VELK_POOL_SUM_FIRST_TRACES)], 1u);
@@ -2864,13 +2877,15 @@ void velk_points_trace_point(uint pool, uint i, uint frame, uint counts[VELK_LIG
         blockers = VELK_LIGHT_WORDS.data[bw];
         uint s = velk_points_pick(slots, p, seed, blockers);
         if (slots[s] != VELK_LIGHT_NONE) {
-            float blocked = velk_points_blocked(velk_light_at(pc.lights_base + slots[s]), p, n, lift, seed + 7u, traces & 3u,
-                                                (kind & VELK_LIGHT_TWO_SIDED) != 0u);
+            float blocked = velk_points_blocked(velk_light_at(pc.lights_base + slots[s]), p, n, lift, seed + 7u,
+                                                hard ? VELK_LIGHT_STRATUM_CENTRE : traces & 3u, (kind & VELK_LIGHT_TWO_SIDED) != 0u);
             uint had = (blockers >> (4u * s)) & 15u;
             bool first_ray = had == VELK_LIGHT_BLOCKER_UNTRACED;
             if (first_ray) step = 1.0;
             if (had == VELK_LIGHT_BLOCKER_STALE) step = 1.0 / float(VELK_LIGHT_WARM_TRACES);
-            if (blocked > 0.0 || first_ray || had == VELK_LIGHT_BLOCKER_STALE) {
+            // VELK_LIGHT_HARD: the ray's answer replaces what the light had.
+            if (hard) step = 1.0;
+            if (blocked > 0.0 || first_ray || had == VELK_LIGHT_BLOCKER_STALE || hard) {
                 uint code = blocked > 0.0 ? velk_light_blocker_code(velk_ray_blocker_t) : VELK_LIGHT_BLOCKER_CLEAR;
                 blockers = (blockers & ~(15u << (4u * s))) | (code << (4u * s));
             }
@@ -2883,15 +2898,19 @@ void velk_points_trace_point(uint pool, uint i, uint frame, uint counts[VELK_LIG
         }
         // Not settled while a light that brings something here has had no ray, or is stale: it
         // warms on. One that brings nothing here (moved out of reach since a change) needs none.
+        // VELK_LIGHT_HARD: settled once none is left.
+        bool due_left = false;
         for (uint t = 0u; t < VELK_LIGHT_SLOTS; ++t) {
             uint code = (blockers >> (4u * t)) & 15u;
             if (slots[t] == VELK_LIGHT_NONE || (code != VELK_LIGHT_BLOCKER_UNTRACED && code != VELK_LIGHT_BLOCKER_STALE)) continue;
             if (velk_light_strength(velk_light_at(pc.lights_base + slots[t]), p) > 0.0) {
                 traces = min(traces, VELK_LIGHT_WARM_TRACES - 2u);
+                due_left = true;
             } else {
                 blockers |= VELK_LIGHT_BLOCKER_CLEAR << (4u * t);
             }
         }
+        if (hard && !due_left) traces = max(traces, VELK_LIGHT_WARM_TRACES - 1u);
         // With no light left once the sun pass's is taken out, settled.
         if (sun_left && slots[0] == VELK_LIGHT_NONE && velk_points_none_clear(slots) == 0xFFFFFFFFu) {
             traces = max(traces, VELK_LIGHT_WARM_TRACES - 1u);
@@ -6568,6 +6587,9 @@ inline bool ensure_light_pool(LightPool& pool, IGpuArena& arena, uint64_t device
     // A development aid: with VELK_PATCH_OUTSIDE set, the trace counts the flat patch points it
     // traces outside their patch's triangles, for the log.
     initial[kLightPoolPatchOutside] = std::getenv("VELK_PATCH_OUTSIDE") ? 1u : 0u;
+    // While it is being tried: with VELK_LIGHT_HARD set, a point casts a ray to each light's
+    // centre, blocked or not, and settles once each light has had one.
+    initial[kLightPoolHard] = std::getenv("VELK_LIGHT_HARD") ? 1u : 0u;
     // A development aid: VELK_LIGHT_READ=x,y;x,y;... names up to kLightReadPixels pixels whose
     // lighting terms the lighting writes and the log prints.
     for (uint32_t k = 0; k < kLightReadPixels; ++k) initial[kLightPoolReadPixels + k] = kLightNone;
