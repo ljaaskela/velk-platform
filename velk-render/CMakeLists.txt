@@ -226,6 +226,7 @@ set(VELK_RENDER_GLSL_SOURCES
     shaders/instance_tiny_unpack.glsl
     shaders/lbvh.glsl
     shaders/light_add.glsl
+    shaders/light_area.glsl
     shaders/light_changes_main_1.glsl
     shaders/light_changes_main_2.glsl
     shaders/light_claim.glsl

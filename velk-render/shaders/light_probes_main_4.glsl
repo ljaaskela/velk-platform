@@ -99,10 +99,15 @@ bool velk_cell_changed(uint changes, vec3 pos, int level)
 }
 
 // What light `index` brings a surface at `at` facing `n`, seen along `to_viewer`, unshadowed; a
-// stand-in's as velk_diffuse_response has it (`stand_in` its flatness, below 0 for none).
+// stand-in's as velk_diffuse_response has it (`stand_in` its flatness, below 0 for none). An area
+// light's in closed form, as the deferred lighting has it, stand-ins included.
 vec3 velk_probe_light(uint index, vec3 at, vec3 n, float stand_in, vec3 to_viewer)
 {
     Light light = velk_light_at(pc.lights_base + index);
+    if (light.flags.x == 3u) {
+        float diffuse = velk_area_diffuse(light.position.xyz, light.direction.xyz, max(light.params.w, 1e-4), at, n);
+        return light.color_intensity.rgb * light.color_intensity.a * diffuse;
+    }
     vec3 l;
     float atten;
     velk_light_delta(light, at, l, atten);

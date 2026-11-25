@@ -118,10 +118,11 @@ inline constexpr string_view light_changes_main_src = VELK_LIGHT_CHANGES_MAIN_1_
 #include <velk-render/glsl/light_probes_main_3.inc>
 #include <velk-render/glsl/light_probes_main_4.inc>
 #include <velk-render/glsl/light_eval.inc>
+#include <velk-render/glsl/light_area.inc>
 inline constexpr string_view light_probes_main_src = VELK_SUN_VISIBILITY_GLSL VELK_LIGHT_PROBES_MAIN_1_GLSL
     VELK_LIGHT_POOL_GLSL VELK_LIGHT_PROBES_MAIN_2_GLSL VELK_PROBE_GLSL VELK_PROBE_WRITE_GLSL VELK_PROBE_CELL_GLSL
     VELK_LIGHT_PROBES_MAIN_3_GLSL VELK_LIGHT_SLOTS_GLSL VELK_LIGHT_ADD_GLSL VELK_LIGHT_EVAL_GLSL
-    VELK_LIGHT_PROBES_MAIN_4_GLSL;
+    VELK_LIGHT_AREA_GLSL VELK_LIGHT_PROBES_MAIN_4_GLSL;
 
 /**
  * The reflections' resolve, after their trace (light_probes_main_src with VELK_REFLECT): a thread a
