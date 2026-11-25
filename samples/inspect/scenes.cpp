@@ -595,10 +595,10 @@ void build_moving_lights(SceneBuilder& b)
 }
 
 /// A row of posts lit by two sized point lights of equal strength, a white and a blue one, and a
-/// weaker green one low in front, under a dim sky. Still until frame 39; at frame 40 a box jumps
-/// across in one frame; from frame 50 the blue light moves toward the middle. Where the first two
-/// are equally strong moves across the posts' shadows, and the green one is the third strongest
-/// light of most of the ground.
+/// weaker green one low, off to the left and in front, under a dim sky. Still until frame 39; at
+/// frame 40 a box jumps across in one frame; from frame 50 the blue light moves toward the middle.
+/// Where the first two are equally strong moves across the posts' shadows, and the green one is
+/// the third strongest light where its posts' shadows fall.
 void build_rank_swap(SceneBuilder& b)
 {
     set_sky(b, "rank_swap", 0.03f, 0.035f, 0.045f);
@@ -613,7 +613,7 @@ void build_rank_swap(SceneBuilder& b)
     const velk::vec3 blue_from{160.f, -110.f, 60.f};
     b.out.movers.push_back({add_point(b, blue_from, velk::color{0.8f, 0.9f, 1.f, 1.f}, 0.8f, 700.f, 6.f), blue_from,
                             {40.f, -110.f, 60.f}, 50, 120});
-    add_point(b, {0.f, -40.f, 180.f}, velk::color{0.2f, 1.f, 0.2f, 1.f}, 0.5f, 700.f, 3.f);
+    add_point(b, {-250.f, -50.f, 150.f}, velk::color{0.2f, 1.f, 0.2f, 1.f}, 0.5f, 700.f, 3.f);
 }
 
 /// A row of posts on a plane under a sun of size 2, as wide as fluent's, and a box moving

@@ -258,14 +258,6 @@ uint32_t sun_pass_light(SunPass mode, const RenderView& render_view)
 // whose visibility it finds, 0 when not set, for no slot pass.
 uint32_t slot_ranks() { return env_uint("VELK_LIGHT_SLOTS_K", 1, 2); }
 
-// Whether the slot pass takes what the points keep (VELK_LIGHT_SLOT_SOURCE=cache) rather than a
-// ray a pixel.
-bool slot_from_cache()
-{
-    const char* v = std::getenv("VELK_LIGHT_SLOT_SOURCE");
-    return v && std::strcmp(v, "cache") == 0;
-}
-
 // Whether the slot pass softens what it finds (VELK_LIGHT_SLOTS_SOFT=1, slot_soften_main_src).
 bool slot_soft() { return env_uint("VELK_LIGHT_SLOTS_SOFT", 1, 1) != 0u; }
 
@@ -2481,7 +2473,7 @@ bool DeferredPath::prepare_sun_pass(ViewState& vs, const RenderView& render_view
     if (!vs.sun_rays) make(vs.sun_rays);
     if (soft && !vs.sun_soft) make(vs.sun_soft);
     if (!vs.sun_rays || (soft && !vs.sun_soft)) return false;
-    vs.sun_pipeline = compose_deferred_compute_pipeline(ctx, sun_rays_main_src, 0x5355'4e52'4159'0001ULL);
+    vs.sun_pipeline = compose_deferred_compute_pipeline(ctx, sun_rays_main_src, 0x5355'4e52'4159'0002ULL, false, 5u);
     if (soft) vs.sun_soften_pipeline = compose_deferred_compute_pipeline(ctx, sun_soften_main_src, 0x5355'4e53'4f46'0001ULL);
     if (!vs.sun_pipeline || (soft && !vs.sun_soften_pipeline)) {
         vs.sun_pipeline = {};
@@ -2517,6 +2509,10 @@ void DeferredPath::emit_sun_rays_pass(ViewState& vs, const RenderView& render_vi
     pc.height = height;
     pc.light_count = static_cast<uint32_t>(render_view.lights.size());
     pc.lights_base = render_view.lights_base;
+    // The pool, for the count of the rays (SUN_RAYS).
+    const LightPool& pool = vs.instance_cull.light_pool;
+    pc.spare3 = pool.segments.empty() || !vs.light_header.valid() ? kLightNone : pool.word();
+    pc.cells_header = vs.light_header.valid() ? static_cast<uint32_t>(vs.light_header.offset() / sizeof(uint32_t)) : 0u;
     DeferredComputePushC soften_pc = pc;
     if (soft) {
         soften_pc.output_image_id = handle(vs.sun_soft);
@@ -2566,7 +2562,6 @@ void DeferredPath::emit_slot_pass(ViewState& vs, const RenderView& render_view, 
     vs.slot_shaded[1] = {};
     const uint32_t ranks = slot_ranks();
     if (ranks == 0u || !vs.gbuffer || vs.gbuffer_size.x == 0 || vs.gbuffer_size.y == 0 || !vs.light_header.valid()) return;
-    const bool cache = slot_from_cache();
     const bool soft = slot_soft();
     const uint32_t width = vs.gbuffer_size.x;
     const uint32_t height = vs.gbuffer_size.y;
@@ -2625,8 +2620,8 @@ void DeferredPath::emit_slot_pass(ViewState& vs, const RenderView& render_view, 
     pc.spare4 = vs.pixel_words.valid() ? pixel_ids_word(vs) : 0u;
     pc.spare2 = vs.visibility_size.x;
     std::memcpy(&pc.spare5, &kLightPixels, sizeof(float));
-    // The ranks in the low two bits, and VELK_SLOT_CACHE.
-    pc.mode = ranks | (cache ? 4u : 0u);
+    // The ranks.
+    pc.mode = ranks;
     DeferredComputePushC soften_pc = pc;
     if (soft) {
         soften_pc.mode = ranks;
@@ -2636,14 +2631,18 @@ void DeferredPath::emit_slot_pass(ViewState& vs, const RenderView& render_view, 
         soften_pc.spare9 = ranks > 1u ? handle(vs.slot_soft[1]) : kLightNone;
     }
 
+    // Records a dispatch of `used` as `pass`; false when it could not be recorded, so that what it
+    // would have written is not taken.
     const auto emit = [&](IRenderPass::Ptr& pass, const char* name, const char* other_name, const char* label,
                           const IGpuPipeline::Ptr& used, const DeferredComputePushC& used_pc, const IRenderTarget::Ptr (&read)[2],
                           const IRenderTarget::Ptr (&written)[2]) {
         bool dirty = true;
+        bool recorded = false;
         emit_cached_view_pass(pass, dirty, view_pass_name(vs.instance_cull.chosen_by_other, name, other_name), graph,
                               [&](CachedPassRecording& rec) {
             auto cmd = ctx.backend->create_command_buffer();
             if (!cmd) return;
+            recorded = true;
             DispatchCall dc{};
             dc.pipeline = used.get();
             dc.groups_x = (width + 7u) / 8u;
@@ -2666,15 +2665,18 @@ void DeferredPath::emit_slot_pass(ViewState& vs, const RenderView& render_view, 
             }
             rec.held.push_back(used);
         });
+        return recorded;
     };
     const IRenderTarget::Ptr none[2] = {};
-    emit(vs.slot_rays_pass, "deferred.slot_rays", "other:deferred.slot_rays", "DeferredPath: slot rays", pipeline, pc, none,
-         vs.slot_rays);
-    if (soft) {
-        emit(vs.slot_soften_pass, "deferred.slot_soften", "other:deferred.slot_soften", "DeferredPath: slot soften", soften_pipeline,
-             soften_pc, vs.slot_rays, vs.slot_soft);
+    // Without the rays the lighting keeps what the points say; without the softening, the rays as
+    // they are.
+    if (!emit(vs.slot_rays_pass, "deferred.slot_rays", "other:deferred.slot_rays", "DeferredPath: slot rays", pipeline, pc, none,
+              vs.slot_rays)) {
+        return;
     }
-    for (uint32_t r = 0; r < ranks; ++r) vs.slot_shaded[r] = soft ? vs.slot_soft[r] : vs.slot_rays[r];
+    const bool softened = soft && emit(vs.slot_soften_pass, "deferred.slot_soften", "other:deferred.slot_soften", "DeferredPath: slot soften",
+                                       soften_pipeline, soften_pc, vs.slot_rays, vs.slot_soft);
+    for (uint32_t r = 0; r < ranks; ++r) vs.slot_shaded[r] = softened ? vs.slot_soft[r] : vs.slot_rays[r];
 }
 
 void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,

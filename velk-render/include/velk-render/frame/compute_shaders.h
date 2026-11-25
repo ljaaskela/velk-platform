@@ -2042,28 +2042,41 @@ void main()
 // the G-buffer's surface, for the lighting to take in place of what the sun's points keep. Writes
 // to pc.output_image_id the visibility in x and in y how far away what was in the way is: 0 where
 // nothing was, -1 where the surface faces away from the sun. Clear where there is no surface or
-// no sun. Built on the deferred prelude.
-[[maybe_unused]] constexpr string_view sun_rays_main_src = VELK_SUN_VISIBILITY_GLSL R"(
+// no sun. Adds the rays that walked to the pool's SUN_RAYS, the pool's word in pc.spare3
+// (VELK_LIGHT_NONE for none). Built on the deferred prelude with the light grid.
+[[maybe_unused]] constexpr string_view sun_rays_main_src = R"(
+#define VELK_LIGHT_WORDS velk_light_cell_words
+)" VELK_LIGHT_POOL_HEADER_GLSL VELK_SUN_VISIBILITY_GLSL R"(
+shared uint s_sun_rays;
+
 void main()
 {
     ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
-    if (coord.x >= int(pc.width) || coord.y >= int(pc.height)) return;
-    vec2 uv = (vec2(coord) + 0.5) / vec2(float(pc.width), float(pc.height));
-    vec3 n = velk_texture(pc.normal_tex_id, uv).xyz;
-    uint sun = velk_sun_index();
-    vec4 result = vec4(1.0, 0.0, 0.0, 1.0);
-    if (dot(n, n) >= 1e-6 && sun != 0xFFFFFFFFu) {
-        vec3 pos = velk_texture(pc.worldpos_tex_id, uv).xyz;
-        // A thin sheet passing light through is lit from the side the sun is on.
-        bool two_sided = velk_texture(pc.emissive_tex_id, uv).a > 0.0;
-        bool stand_in = velk_stand_in_unpack(velk_texture(pc.material_tex_id, uv).a) >= 0.0;
-        float blocker_t;
-        bool facing_away;
-        result.x = velk_sun_visibility(pos, normalize(n), two_sided, stand_in, -velk_light_at(pc.lights_base + sun).direction.xyz,
-                                       blocker_t, facing_away);
-        result.y = facing_away ? -1.0 : blocker_t;
+    if (gl_LocalInvocationIndex == 0u) s_sun_rays = 0u;
+    barrier();
+    if (coord.x < int(pc.width) && coord.y < int(pc.height)) {
+        vec2 uv = (vec2(coord) + 0.5) / vec2(float(pc.width), float(pc.height));
+        vec3 n = velk_texture(pc.normal_tex_id, uv).xyz;
+        uint sun = velk_sun_index();
+        vec4 result = vec4(1.0, 0.0, 0.0, 1.0);
+        if (dot(n, n) >= 1e-6 && sun != 0xFFFFFFFFu) {
+            vec3 pos = velk_texture(pc.worldpos_tex_id, uv).xyz;
+            // A thin sheet passing light through is lit from the side the sun is on.
+            bool two_sided = velk_texture(pc.emissive_tex_id, uv).a > 0.0;
+            bool stand_in = velk_stand_in_unpack(velk_texture(pc.material_tex_id, uv).a) >= 0.0;
+            float blocker_t;
+            bool facing_away;
+            result.x = velk_sun_visibility(pos, normalize(n), two_sided, stand_in,
+                                           -velk_light_at(pc.lights_base + sun).direction.xyz, blocker_t, facing_away);
+            result.y = facing_away ? -1.0 : blocker_t;
+            if (!facing_away) atomicAdd(s_sun_rays, 1u);
+        }
+        imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord, result);
     }
-    imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord, result);
+    barrier();
+    if (gl_LocalInvocationIndex == 0u && s_sun_rays != 0u && pc.spare3 != 0xFFFFFFFFu) {
+        atomicAdd(velk_light_cell_words.data[pc.spare3 + VELK_POOL_SUN_RAYS], s_sun_rays);
+    }
 }
 )";
 
@@ -2215,28 +2228,30 @@ void main()
 // first, ties to the lower index, and the visibility of each, which the lighting takes in place of
 // what the points keep of it. The candidates are the lights the lighting reads at the pixel: its
 // points' (velk_light_direct), or every light where none of its points is traced; lights from
-// VELK_SLOT_MOST_LIGHTS on are left to the points. With VELK_SLOT_CACHE in pc.mode
-// (VELK_LIGHT_SLOT_SOURCE=cache) the visibility is what the points keep, with the nearest blocker
-// they found; else a ray a pixel to the light's middle (velk_light_visibility). Writes rank 0 to
+// VELK_SLOT_MOST_LIGHTS on are left to the points. The visibility is a ray a pixel to the light's
+// middle, four to a square area light's quarters (velk_slot_visibility). Writes rank 0 to
 // pc.output_image_id and rank 1 to pc.spare7: x the visibility, y how far away what was in the
-// way is (-1 where nothing was found, or it is not known), z the light's index (-1 for none), w 1
-// where the surface faces away from the light, else 0. Adds the pixel's lights whose points have
-// not traced them yet, or a change made stale, to the pool's SLOT_PENDING. pc.spare3, spare4,
+// way is (-1 where nothing was found), z the light's index (-1 for none), w 1 where the surface
+// faces away from the light, else 0. Adds to the pool's header the pixel's lights whose points
+// have not traced them yet, or a change made stale, among its ranks' lights (SLOT_PENDING_INSIDE)
+// and beyond them (SLOT_PENDING_BEYOND), and the rays that walked (SLOT_RAYS). pc.spare3, spare4,
 // spare2 and spare5 as the lighting's. Built on the deferred prelude with the light grid.
 [[maybe_unused]] constexpr string_view slot_rays_main_src = R"(
 #define VELK_LIGHT_WORDS velk_light_cell_words
 )" VELK_LIGHT_POOL_GLSL VELK_LIGHT_SLOTS_GLSL VELK_LIGHT_READ_GLSL VELK_SUN_VISIBILITY_GLSL R"(
-#define VELK_SLOT_CACHE 4u
 #define VELK_SLOT_MOST_LIGHTS 2048u
 
-shared uint s_slot_pending;
+shared uint s_slot_pending_inside;
+shared uint s_slot_pending_beyond;
+shared uint s_slot_rays;
 
 // How much light `i` brings the surface at `p` facing `n` with nothing in the way: its strength
 // (velk_light_strength) by the way the surface faces it, as the lighting's diffuse term takes it.
 float velk_slot_rank(uint i, vec3 p, vec3 n, float transmission, bool stand_in)
 {
     Light light = velk_light_at(pc.lights_base + i);
-    vec3 L = light.flags.x == 0u ? -light.direction.xyz : normalize(light.position.xyz - p);
+    vec3 to = light.position.xyz - p;
+    vec3 L = light.flags.x == 0u ? -light.direction.xyz : to / max(length(to), 1e-6);
     float facing = stand_in ? 1.0 : mix(max(dot(n, L), 0.0), max(-dot(n, L), 0.0), transmission);
     return velk_light_strength(light, p) * facing;
 }
@@ -2267,15 +2282,65 @@ uint velk_slot_of(uint i)
     return VELK_LIGHT_SLOTS;
 }
 
-// Writes the pixel at `coord`'s ranks; returns how many of its lights its points have not traced
-// yet, or a change made stale.
-uint velk_slot_pixel(ivec2 coord)
+// How much of light `light` reaches `p` on a surface facing `n`, as velk_light_visibility finds it:
+// for a square area light the mean of four rays, to the middles of the light's quarters, with
+// `blocker_t` the mean distance of what was in the way of those blocked, and `facing_away` where
+// every one faces away; for any other light one ray, to its middle. Adds the rays that walked to
+// `rays`.
+float velk_slot_visibility(Light light, vec3 p, vec3 n, bool two_sided, bool stand_in, out float blocker_t,
+                           out bool facing_away, inout uint rays)
+{
+    blocker_t = 0.0;
+    facing_away = false;
+    if (light.flags.x == 0u) {
+        float seen = velk_light_visibility(p, n, two_sided, stand_in, -light.direction.xyz, 1e30, blocker_t, facing_away);
+        if (!facing_away) ++rays;
+        return seen;
+    }
+    if (light.flags.x != 3u) {
+        vec3 to = light.position.xyz - p;
+        float d = length(to);
+        float seen = velk_light_visibility(p, n, two_sided, stand_in, to / max(d, 1e-6), d * 0.999, blocker_t, facing_away);
+        if (!facing_away) ++rays;
+        return seen;
+    }
+    vec3 a;
+    vec3 b;
+    velk_area_axes(light.direction.xyz, light.params.w, a, b);
+    float seen = 0.0;
+    float blocked_t = 0.0;
+    float blocked = 0.0;
+    uint away = 0u;
+    for (uint k = 0u; k < 4u; ++k) {
+        vec3 to = light.position.xyz + a * ((k & 1u) != 0u ? 0.5 : -0.5) + b * ((k & 2u) != 0u ? 0.5 : -0.5) - p;
+        float d = length(to);
+        float t;
+        bool faces_away;
+        float through = velk_light_visibility(p, n, two_sided, stand_in, to / max(d, 1e-6), d * 0.999, t, faces_away);
+        seen += through;
+        if (faces_away) {
+            ++away;
+            continue;
+        }
+        ++rays;
+        if (t > 0.0) {
+            blocked_t += t;
+            blocked += 1.0;
+        }
+    }
+    facing_away = away == 4u;
+    if (blocked > 0.0) blocker_t = blocked_t / blocked;
+    return seen * 0.25;
+}
+
+// Writes the pixel at `coord`'s ranks. Adds to `pending_inside` and `pending_beyond` its lights
+// that its points have not traced yet, or a change made stale, among its ranks' lights and beyond
+// them, and to `rays` the rays that walked.
+void velk_slot_pixel(ivec2 coord, inout uint pending_inside, inout uint pending_beyond, inout uint rays)
 {
     uint ranks = pc.mode & 3u;
-    bool cache = (pc.mode & VELK_SLOT_CACHE) != 0u;
     vec4 none = vec4(1.0, -1.0, -1.0, 0.0);
     vec4 result[2] = vec4[2](none, none);
-    uint pending = 0u;
     vec2 uv = (vec2(coord) + 0.5) / vec2(float(pc.width), float(pc.height));
     vec3 n = velk_texture(pc.normal_tex_id, uv).xyz;
     vec4 mat = velk_texture(pc.material_tex_id, uv);
@@ -2303,13 +2368,18 @@ uint velk_slot_pixel(ivec2 coord)
         }
         uint best[2] = uint[2](VELK_LIGHT_NONE, VELK_LIGHT_NONE);
         float most[2] = float[2](0.0, 0.0);
+        // The lights bringing something that its points have not traced yet, or a change made
+        // stale, a bit a slot of point_lights; with no point traced, every light bringing
+        // something is, which is counted as it is ranked.
+        uint waiting = 0u;
+        uint waiting_all = 0u;
         if (points) {
             for (uint k = 0u; k < VELK_LIGHT_SLOTS; ++k) {
                 uint i = point_lights[k];
                 if (i == VELK_LIGHT_NONE || i == sun || i >= pc.light_count) continue;
                 float c = velk_slot_rank(i, p, n, transmission, stand_in);
                 uint s = velk_slot_of(i);
-                if (c > 0.0 && s < VELK_LIGHT_SLOTS && (g_light_pending_slots & (1u << s)) != 0u) ++pending;
+                if (c > 0.0 && s < VELK_LIGHT_SLOTS && (g_light_pending_slots & (1u << s)) != 0u) waiting |= 1u << k;
                 if (i < VELK_SLOT_MOST_LIGHTS) velk_slot_offer(i, c, best, most);
             }
         } else {
@@ -2318,61 +2388,65 @@ uint velk_slot_pixel(ivec2 coord)
             for (uint i = 0u; i < count; ++i) {
                 if (i == sun) continue;
                 float c = velk_slot_rank(i, p, n, transmission, stand_in);
-                if (c > 0.0 && pc.spare3 != VELK_LIGHT_NONE) ++pending;
-                if (!cache) velk_slot_offer(i, c, best, most);
+                if (c > 0.0 && pc.spare3 != VELK_LIGHT_NONE) ++waiting_all;
+                velk_slot_offer(i, c, best, most);
             }
+        }
+        // Those among the ranks' lights, and those beyond them.
+        uint chosen = 0u;
+        for (uint r = 0u; r < 2u; ++r) {
+            if (r < ranks && best[r] != VELK_LIGHT_NONE) ++chosen;
+        }
+        if (points) {
+            for (uint k = 0u; k < VELK_LIGHT_SLOTS; ++k) {
+                if ((waiting & (1u << k)) == 0u) continue;
+                uint i = point_lights[k];
+                bool inside = (ranks > 0u && i == best[0]) || (ranks > 1u && i == best[1]);
+                if (inside) {
+                    ++pending_inside;
+                } else {
+                    ++pending_beyond;
+                }
+            }
+        } else if (waiting_all != 0u) {
+            uint inside = min(chosen, waiting_all);
+            pending_inside += inside;
+            pending_beyond += waiting_all - inside;
         }
         for (uint r = 0u; r < 2u; ++r) {
             if (r >= ranks || best[r] == VELK_LIGHT_NONE) continue;
             uint i = best[r];
-            Light light = velk_light_at(pc.lights_base + i);
-            vec3 dir;
-            float t_max = 1e30;
-            if (light.flags.x == 0u) {
-                dir = -light.direction.xyz;
-            } else {
-                vec3 to = light.position.xyz - p;
-                float d = length(to);
-                dir = to / max(d, 1e-6);
-                t_max = d * 0.999;
-            }
-            float blocker_t = 0.0;
-            bool facing_away = false;
-            float seen = 1.0;
-            if (cache) {
-                vec3 fn = n;
-                if (two_sided && dot(fn, dir) < 0.0) fn = -fn;
-                facing_away = !stand_in && dot(fn, dir) <= 0.0;
-                for (uint k = 0u; k < VELK_LIGHT_SLOTS; ++k) {
-                    if (point_lights[k] == i) seen = point_through[k];
-                }
-                uint s = velk_slot_of(i);
-                if (s < VELK_LIGHT_SLOTS) {
-                    uint c = (g_light_nearest_codes >> (4u * s)) & 15u;
-                    if (c != VELK_LIGHT_BLOCKER_UNTRACED && c < VELK_LIGHT_BLOCKER_STALE) blocker_t = velk_light_blocker_distance(c);
-                }
-            } else {
-                seen = velk_light_visibility(p, n, two_sided, stand_in, dir, t_max, blocker_t, facing_away);
-            }
+            float blocker_t;
+            bool facing_away;
+            float seen = velk_slot_visibility(velk_light_at(pc.lights_base + i), p, n, two_sided, stand_in, blocker_t, facing_away, rays);
             result[r] = vec4(seen, blocker_t > 0.0 ? blocker_t : -1.0, float(i), facing_away ? 1.0 : 0.0);
         }
     }
     imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord, result[0]);
     if (ranks > 1u) imageStore(gStorageImagesF16[nonuniformEXT(pc.spare7)], coord, result[1]);
-    return pending;
 }
 
 void main()
 {
     ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
-    if (gl_LocalInvocationIndex == 0u) s_slot_pending = 0u;
+    if (gl_LocalInvocationIndex == 0u) {
+        s_slot_pending_inside = 0u;
+        s_slot_pending_beyond = 0u;
+        s_slot_rays = 0u;
+    }
     barrier();
-    uint pending = 0u;
-    if (coord.x < int(pc.width) && coord.y < int(pc.height)) pending = velk_slot_pixel(coord);
-    if (pending != 0u) atomicAdd(s_slot_pending, pending);
+    uint pending_inside = 0u;
+    uint pending_beyond = 0u;
+    uint rays = 0u;
+    if (coord.x < int(pc.width) && coord.y < int(pc.height)) velk_slot_pixel(coord, pending_inside, pending_beyond, rays);
+    if (pending_inside != 0u) atomicAdd(s_slot_pending_inside, pending_inside);
+    if (pending_beyond != 0u) atomicAdd(s_slot_pending_beyond, pending_beyond);
+    if (rays != 0u) atomicAdd(s_slot_rays, rays);
     barrier();
-    if (gl_LocalInvocationIndex == 0u && s_slot_pending != 0u && pc.spare3 != VELK_LIGHT_NONE) {
-        atomicAdd(velk_light_cell_words.data[pc.spare3 + VELK_POOL_SLOT_PENDING], s_slot_pending);
+    if (gl_LocalInvocationIndex == 0u && pc.spare3 != VELK_LIGHT_NONE) {
+        if (s_slot_pending_inside != 0u) atomicAdd(velk_light_cell_words.data[pc.spare3 + VELK_POOL_SLOT_PENDING_INSIDE], s_slot_pending_inside);
+        if (s_slot_pending_beyond != 0u) atomicAdd(velk_light_cell_words.data[pc.spare3 + VELK_POOL_SLOT_PENDING_BEYOND], s_slot_pending_beyond);
+        if (s_slot_rays != 0u) atomicAdd(velk_light_cell_words.data[pc.spare3 + VELK_POOL_SLOT_RAYS], s_slot_rays);
     }
 }
 )";
@@ -2453,7 +2527,10 @@ vec4 velk_slot_soften(ivec2 coord, vec4 hard, uint ranks)
         count += 1.0;
     }
     if (count == 0.0) return hard;
+    // The mean over pixels around, farther from a light with a place than this one may be, kept
+    // short of the way to it.
     float d = sum / count;
+    if (placed) d = min(d, d_light * 0.99);
     float world_radius = placed ? size * d / max(d_light - d, 1e-3) : size * d;
     // The penumbra on the receiver, as the sun pass's softening carries it there.
     float lean = dot(n, L);

@@ -341,14 +341,23 @@ inline constexpr uint32_t kLightPoolAheadEvery = 60;
                                                     what is drawn opaque leave untraced; kLightNone for none */      \
     X(Hard, HARD, 202)                           /* not 0 with VELK_LIGHT_HARD: a point casts a ray to each light's \
                                                     centre, blocked or not, and settles once each light has had one */ \
-    X(SlotPending, SLOT_PENDING, 203)            /* with VELK_LIGHT_SLOTS_K: the lit pixels' lights this frame \
-                                                    whose points have not traced them yet or a change made stale */ \
-    X(SlotPendingMost, SLOT_PENDING_MOST, 204)   /* the most SLOT_PENDING of a frame since the log */              \
-    X(ReadPixels, READ_PIXELS, 205)              /* VELK_LIGHT_READ's pixels, x | y << 16, kLightNone for none: \
+    X(SlotPendingInside, SLOT_PENDING_INSIDE, 203) /* with VELK_LIGHT_SLOTS_K: the lit pixels' lights this frame \
+                                                    among the slot pass's K whose points have not traced them yet \
+                                                    or a change made stale */                                       \
+    X(SlotPendingBeyond, SLOT_PENDING_BEYOND, 204) /* likewise for the lights beyond the K */                      \
+    X(SlotRays, SLOT_RAYS, 205)                  /* the slot pass's rays this frame that walked */                  \
+    X(SunRays, SUN_RAYS, 206)                    /* the sun pass's rays this frame that walked */                   \
+    X(SlotPendingInsideMost, SLOT_PENDING_INSIDE_MOST, 207) /* the most of a frame since the log: \
+                                                    SLOT_PENDING_INSIDE, SLOT_PENDING_BEYOND, SLOT_RAYS, SUN_RAYS, \
+                                                    four words, which the log clears */                             \
+    X(LastRaysCast, LAST_RAYS_CAST, 211)         /* the last frame's RAYS_CAST, SLOT_RAYS, SUN_RAYS, \
+                                                    SLOT_PENDING_INSIDE and SLOT_PENDING_BEYOND: five words, the \
+                                                    same frame's, which the sweep's begin copies */                 \
+    X(ReadPixels, READ_PIXELS, 216)              /* VELK_LIGHT_READ's pixels, x | y << 16, kLightNone for none: \
                                                     kLightReadPixels words */                                        \
-    X(ReadTerms, READ_TERMS, 209)                /* the lighting's terms at them, kLightReadWords each \
+    X(ReadTerms, READ_TERMS, 220)                /* the lighting's terms at them, kLightReadWords each \
                                                     (VELK_LIGHT_READ_*) */                                           \
-    X(HeaderEnd, HEADER_END, 545)
+    X(HeaderEnd, HEADER_END, 556)
 
 #define VELK_LIGHT_POOL_CPP_WORD(cpp, glsl, word) inline constexpr uint32_t kLightPool##cpp = word;
 VELK_LIGHT_POOL_HEADER(VELK_LIGHT_POOL_CPP_WORD)
@@ -1787,7 +1796,7 @@ bool velk_piece_light(uint pool, uint page, uint first, uvec3 corners, vec3 l, b
     }
     return full;
 }
-
+)" R"(
 // Whether the three points around weights `l` of level `page` (velk_way_around) are all traced
 // and none stale since a change.
 bool velk_way_fresh(uint pool, uint first, uvec3 corners, uint page, vec3 l)
@@ -6487,9 +6496,18 @@ void main()
             light_words.data[pool + VELK_POOL_TRACES] = 0u;
             light_words.data[pool + VELK_POOL_LAST_UNTRACED_PIXELS] = light_words.data[pool + VELK_POOL_UNTRACED_PIXELS];
             light_words.data[pool + VELK_POOL_UNTRACED_PIXELS] = 0u;
-            light_words.data[pool + VELK_POOL_SLOT_PENDING_MOST] =
-                max(light_words.data[pool + VELK_POOL_SLOT_PENDING_MOST], light_words.data[pool + VELK_POOL_SLOT_PENDING]);
-            light_words.data[pool + VELK_POOL_SLOT_PENDING] = 0u;
+            // The slot and sun passes' counts (SLOT_PENDING_INSIDE on, four words): the last frame's,
+            // the most of a frame, then cleared for this one.
+            light_words.data[pool + VELK_POOL_LAST_RAYS_CAST + 1u] = light_words.data[pool + VELK_POOL_SLOT_RAYS];
+            light_words.data[pool + VELK_POOL_LAST_RAYS_CAST + 2u] = light_words.data[pool + VELK_POOL_SUN_RAYS];
+            light_words.data[pool + VELK_POOL_LAST_RAYS_CAST + 3u] = light_words.data[pool + VELK_POOL_SLOT_PENDING_INSIDE];
+            light_words.data[pool + VELK_POOL_LAST_RAYS_CAST + 4u] = light_words.data[pool + VELK_POOL_SLOT_PENDING_BEYOND];
+            for (uint k = 0u; k < 4u; ++k) {
+                uint count = light_words.data[pool + VELK_POOL_SLOT_PENDING_INSIDE + k];
+                light_words.data[pool + VELK_POOL_SLOT_PENDING_INSIDE_MOST + k] =
+                    max(light_words.data[pool + VELK_POOL_SLOT_PENDING_INSIDE_MOST + k], count);
+                light_words.data[pool + VELK_POOL_SLOT_PENDING_INSIDE + k] = 0u;
+            }
             // What the frame's work was charged: the lights listed for tracing and the points.
             const uint charged = light_words.data[pool + VELK_POOL_RAYS_LISTED] + light_words.data[pool + VELK_POOL_POINT_RAYS_CHARGED];
             light_words.data[pool + VELK_POOL_RAYS_LISTED] = 0u;
@@ -6522,6 +6540,7 @@ void main()
                 light_words.data[pool + VELK_POOL_WORST_STEPS] = light_words.data[pool + VELK_POOL_STEPS];
                 light_words.data[pool + VELK_POOL_WORST_FIRST_RAYS] = light_words.data[pool + VELK_POOL_FIRST_RAYS];
             }
+            light_words.data[pool + VELK_POOL_LAST_RAYS_CAST] = light_words.data[pool + VELK_POOL_RAYS_CAST];
             light_words.data[pool + VELK_POOL_RAYS_CAST] = 0u;
             light_words.data[pool + VELK_POOL_STEPS] = 0u;
             light_words.data[pool + VELK_POOL_FIRST_RAYS] = 0u;
