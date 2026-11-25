@@ -1249,7 +1249,7 @@ vec3 fresnel_schlick_roughness(float cos_theta, vec3 F0, float F90, float roughn
 // blended surfaces' fragments. Follows VELK_SURFACE_LIGHT_GLSL and velk_area_irradiance, with
 // push constants `pc` with light_count, lights_base and ltc_magnitude_id.
 #define VELK_SURFACE_LIGHTS_GLSL R"(
-// The light the sun pass shades (VELK_SUN_PASS), with what of it gets through, in place of what
+// The light the sun pass shades (ICamera::sun_pass), with what of it gets through, in place of what
 // the points keep of it: VELK_LIGHT_NONE (all bits) for none.
 uint velk_sun_light = 0xFFFFFFFFu;
 float velk_sun_through = 1.0;
@@ -2002,7 +2002,7 @@ void main()
 }
 )";
 
-// The sun pass (VELK_SUN_PASS): a ray a pixel to the middle of the sun (velk_sun_visibility), from
+// The sun pass (ICamera::sun_pass): a ray a pixel to the middle of the sun (velk_sun_visibility), from
 // the G-buffer's surface, for the lighting to take in place of what the sun's points keep. Writes
 // to pc.output_image_id the visibility in x and in y how far away what was in the way is: 0 where
 // nothing was, -1 where the surface faces away from the sun. Clear where there is no surface or
@@ -2031,7 +2031,7 @@ void main()
 }
 )";
 
-// The sun pass's softening (VELK_SUN_PASS=soft): the hard visibility of the sun rays (pc.spare0,
+// The sun pass's softening (SunPass::Soft): the hard visibility of the sun rays (pc.spare0,
 // sun_rays_main_src) spread over the penumbra the sun's disk would give, as wide as the mean
 // distance to what is in the way says, in the same frame. First that distance, from the blocked
 // pixels around within kSunSearchPixels, the pixel's own too; then the visibility of the pixels

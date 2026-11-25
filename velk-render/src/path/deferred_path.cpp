@@ -223,16 +223,15 @@ bool test_diagnostics_enabled() { return std::getenv("VELK_TEST_DIAGNOSTICS") !=
 // Diagnostic: draws everything the frustum holds, to compare with occlusion culling.
 bool no_occlusion_culling() { return env_uint("VELK_NO_OCCLUSION", 1, 1) != 0u; }
 
-// How the sun's visibility is found, while the sun pass is being tried: VELK_SUN_PASS=hard for a
-// ray a pixel to its middle in place of what its points keep (sun_rays_main_src), soft for that
-// softened over its penumbra (sun_soften_main_src). kSunPoints when not set, the points as they are.
-enum SunPass : uint32_t { kSunPoints, kSunHard, kSunSoft };
-SunPass sun_pass_mode()
+// How the sun's visibility is found (ICamera::sun_pass), unless VELK_SUN_PASS=off|hard|soft
+// overrides it.
+SunPass sun_pass_mode(SunPass camera)
 {
     const char* v = std::getenv("VELK_SUN_PASS");
-    if (v && std::strcmp(v, "hard") == 0) return kSunHard;
-    if (v && std::strcmp(v, "soft") == 0) return kSunSoft;
-    return kSunPoints;
+    if (v && std::strcmp(v, "off") == 0) return SunPass::Off;
+    if (v && std::strcmp(v, "hard") == 0) return SunPass::Hard;
+    if (v && std::strcmp(v, "soft") == 0) return SunPass::Soft;
+    return camera;
 }
 
 // The sun the sun pass shades, as velk_sun_index finds it: the first lit directional light.
@@ -245,9 +244,9 @@ const GpuLight* sun_light(const RenderView& render_view)
 }
 
 // The index of the light the sun pass shades, kLightNone without the pass or a sun.
-uint32_t sun_pass_light(const RenderView& render_view)
+uint32_t sun_pass_light(SunPass mode, const RenderView& render_view)
 {
-    if (sun_pass_mode() == kSunPoints) return kLightNone;
+    if (mode == SunPass::Off) return kLightNone;
     const GpuLight* sun = sun_light(render_view);
     return sun ? static_cast<uint32_t>(sun - render_view.lights.data()) : kLightNone;
 }
@@ -938,8 +937,10 @@ void DeferredPath::build_passes(IViewEntry& entry,
     // them. When it changes, everything's light is traced again (emit_light_changes_pass).
     // Its targets and pipelines made first (prepare_sun_pass): a frame it cannot shade keeps the
     // sun on the points.
-    const uint32_t sun_skip = visibility_mode == 0 && prepare_sun_pass(vs, render_view, ctx, graph) ? sun_pass_light(render_view)
-                                                                                                   : kLightNone;
+    vs.sun_mode = sun_pass_mode(camera_state ? camera_state->sun_pass : SunPass::Soft);
+    const uint32_t sun_skip = visibility_mode == 0 && prepare_sun_pass(vs, render_view, ctx, graph)
+                            ? sun_pass_light(vs.sun_mode, render_view)
+                            : kLightNone;
     if (sun_skip != vs.sun_skip) {
         vs.sun_skip = sun_skip;
         vs.sun_skip_changed = true;
@@ -2434,10 +2435,10 @@ bool DeferredPath::prepare_sun_pass(ViewState& vs, const RenderView& render_view
 {
     vs.sun_pipeline = {};
     vs.sun_soften_pipeline = {};
-    const SunPass mode = sun_pass_mode();
+    const SunPass mode = vs.sun_mode;
     const GpuLight* sun = sun_light(render_view);
-    if (mode == kSunPoints || !sun || !vs.gbuffer || vs.gbuffer_size.x == 0 || vs.gbuffer_size.y == 0) return false;
-    const bool soft = mode == kSunSoft && sun->params[3] > 0.f;
+    if (mode == SunPass::Off || !sun || !vs.gbuffer || vs.gbuffer_size.x == 0 || vs.gbuffer_size.y == 0) return false;
+    const bool soft = mode == SunPass::Soft && sun->params[3] > 0.f;
     const uint32_t width = vs.gbuffer_size.x;
     const uint32_t height = vs.gbuffer_size.y;
     const auto make = [&](IRenderTarget::Ptr& target) {

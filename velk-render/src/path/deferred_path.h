@@ -8,6 +8,7 @@
 #include "path/deferred_gbuffer.h"
 #include <velk-render/frame/instance_cull.h>
 #include <velk-render/interface/intf_batch.h>
+#include <velk-render/interface/intf_camera.h>
 #include <velk-render/frustum.h>
 #include <velk-render/plugin.h>
 #include <velk-render/ext/render_path.h>
@@ -197,9 +198,11 @@ public:
         vec3 reflect_cam{};
         IRenderPass::Ptr reflect_trace_pass;
         IRenderPass::Ptr reflect_resolve_pass;
-        /// The sun pass (VELK_SUN_PASS): a ray a pixel to the sun's middle (sun_rays_main_src), and
-        /// that softened (sun_soften_main_src), which the lighting takes in place of what the sun's
-        /// points keep. `sun_shaded` is what the lighting takes this frame, none without the pass.
+        /// The sun pass (ICamera::sun_pass): a ray a pixel to the sun's middle (sun_rays_main_src),
+        /// and that softened (sun_soften_main_src), which the lighting takes in place of what the
+        /// sun's points keep. `sun_mode` is this frame's choice; `sun_shaded` is what the lighting
+        /// takes this frame, none without the pass.
+        SunPass sun_mode = SunPass::Soft;
         IRenderTarget::Ptr sun_rays;
         IRenderTarget::Ptr sun_soft;
         uvec2 sun_rays_size{};
@@ -347,10 +350,10 @@ private:
     /// VELK_REFLECT, reflect_resolve_src), after the probes and before the lighting.
     void emit_reflection_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
     /// Makes the sun pass's targets and pipelines for this frame; false when it cannot run (no
-    /// VELK_SUN_PASS, no lit directional light, no G-buffer, or a target or pipeline missing), so
+    /// SunPass::Off, no lit directional light, no G-buffer, or a target or pipeline missing), so
     /// that the light points keep tracing the sun.
     bool prepare_sun_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
-    /// The sun pass (VELK_SUN_PASS): casts a ray a pixel to the sun's middle (sun_rays_main_src),
+    /// The sun pass (ICamera::sun_pass): casts a ray a pixel to the sun's middle (sun_rays_main_src),
     /// and softens it (sun_soften_main_src) for soft, before the lighting. Nothing without a lit
     /// directional light; no softening for a sun without a size.
     void emit_sun_rays_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
