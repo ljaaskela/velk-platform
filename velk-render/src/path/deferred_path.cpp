@@ -1532,16 +1532,12 @@ void DeferredPath::emit_light_claim_pass(ViewState& vs, const RenderView& render
         uint32_t position_id;
     };
     // What a first trace casts a ray a point to: the scene's lit lights, as many as a point has
-    // slots. A dark light takes no slot (velk_light_slots_at), so no ray either. Whether one of
-    // them has a size, for the four rays a light such a trace then takes.
+    // slots. A dark light takes no slot (velk_light_slots_at), so no ray either.
     uint32_t lit = 0;
-    bool sized = false;
     for (const GpuLight& l : render_view.lights) {
         const float bright = (0.2126f * l.color_intensity[0] + 0.7152f * l.color_intensity[1] + 0.0722f * l.color_intensity[2])
                            * l.color_intensity[3];
-        if (bright <= 0.f) continue;
-        ++lit;
-        if (l.params[3] > 0.f || l.flags[0] == static_cast<uint32_t>(LightType::Area)) sized = true;
+        if (bright > 0.f) ++lit;
     }
     const uint32_t lights = std::min(lit, kLightSlots);
     const PushC pc{pixel_ids_word(vs), vs.visibility_size.x, vs.visibility_size.y, pool.word(), kLightPixels, lights, 0u,
@@ -1560,9 +1556,9 @@ void DeferredPath::emit_light_claim_pass(ViewState& vs, const RenderView& render
     const float light_level = kLodMaxErrorPixels * kLightPixels / kLodElementPixels;
     std::memcpy(&trace_pc.spare5, &light_level, sizeof(float));
     // The rays a first trace or restart casts and is charged (velk_points_trace_point): a ray a lit
-    // light, four with a size, but at most four whatever the lights, so that what a point costs
-    // does not grow with them.
-    const uint32_t first_rays = std::min(std::max(lights, 1u) * (sized ? 4u : 1u), 4u);
+    // light, but at most four whatever the lights, so that what a point costs does not grow with
+    // them.
+    const uint32_t first_rays = std::min(std::max(lights, 1u), 4u);
     trace_pc.spare6 = first_rays;
     // The lanes a point traced from none spreads its rays over when the trace spreads them (while
     // they would not fill the device), a ray each, rounded up to a power of two. Low byte the
