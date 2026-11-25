@@ -174,8 +174,6 @@ void MeshPrimitive::unload_lod_page(uint32_t group, IGpuResourceManager& resourc
         record.vertex_word = 0;
         record.uv1_word = kLodNoAttribute;
         record.color_word = kLodNoAttribute;
-        record.patch_word = kLodNoAttribute;
-        record.patch_counts = 0;
         if (!lod_headers_.empty()) {
             uint32_t* header = lod_headers_.data() + size_t(c) * kClusterHeaderWords;
             header[10] = kBlasLeafRef;
@@ -400,9 +398,6 @@ bool MeshPrimitive::load_lod_page(uint32_t page_index, IGpuResourceManager& reso
         if (source.color_word != kLodNoAttribute) {
             geometry_bytes += uint64_t(source.vertex_count) * sizeof(uint32_t);
         }
-        if (source.patch_word != kLodNoAttribute) {
-            geometry_bytes += lod_patch_words(source) * sizeof(uint32_t);
-        }
         if (rays) {
             node_count += lod_.blocks[c].node_count;
             word_count += lod_.blocks[c].word_count;
@@ -473,11 +468,6 @@ bool MeshPrimitive::load_lod_page(uint32_t page_index, IGpuResourceManager& reso
         record.index_word = geometry_word + static_cast<uint32_t>(geometry.size() / sizeof(uint32_t));
         record.triangle_count = source.triangle_count;
         append(lod_.indices.data() + source.index_word, size_t(source.triangle_count) * 3u * sizeof(uint32_t));
-        if (source.patch_word != kLodNoAttribute) {
-            record.patch_word = geometry_word + static_cast<uint32_t>(geometry.size() / sizeof(uint32_t));
-            record.patch_counts = source.patch_counts;
-            append(lod_.patch_words.data() + source.patch_word, size_t(lod_patch_words(source)) * sizeof(uint32_t));
-        }
 
         if (rays) {
             const MeshLod::Block& block = lod_.blocks[c];
@@ -723,8 +713,6 @@ bool MeshPrimitive::ensure_lod_data(IGpuResourceManager& resources, MeshLodInfo&
             record.vertex_word = 0;
             record.uv1_word = kLodNoAttribute;
             record.color_word = kLodNoAttribute;
-            record.patch_word = kLodNoAttribute;
-            record.patch_counts = 0;
             // Using it where its error as built is too large asks for the group it was made from.
             const uint32_t made_from = lod_.cluster_made_from[c];
             record.full_error = lod_.clusters[c].error;

@@ -60,13 +60,6 @@ struct MeshLodCluster
     /// The frame its errors last changed, plus one, as loading and dropping detail change them;
     /// 0 for never. A kept cut whose records have it chooses again when it chose before that.
     uint32_t changed = 0;
-    /// The word of its flat patches' data (VELK_LOD_PATCH), from the start of
-    /// MeshLod::patch_words as built and in the mesh-word arena once published, or
-    /// kLodNoAttribute when it has none.
-    uint32_t patch_word = 0xFFFFFFFFu;
-    /// Its patches in bits 0-15 and its light roots (patches and the triangles in none) in bits
-    /// 16-31; 0 when it has no patches.
-    uint32_t patch_counts = 0;
 };
 static_assert(sizeof(MeshLodCluster) == kLodClusterWords * sizeof(uint32_t), "Mirrors VELK_LOD_CLUSTER");
 #define VELK_LOD_CLUSTER_AT(field, word) \
@@ -91,8 +84,6 @@ VELK_LOD_CLUSTER_AT(mark_word, kLodClusterMark)
 VELK_LOD_CLUSTER_AT(own_mark_word, kLodClusterOwnMark)
 VELK_LOD_CLUSTER_AT(color_word, kLodClusterColor)
 VELK_LOD_CLUSTER_AT(changed, kLodClusterChanged)
-VELK_LOD_CLUSTER_AT(patch_word, kLodClusterPatches)
-VELK_LOD_CLUSTER_AT(patch_counts, kLodClusterPatchCounts)
 #undef VELK_LOD_CLUSTER_AT
 // velk_lod_pixels reads a sphere's error right after it.
 static_assert(kLodClusterError == kLodClusterSphere + 4 && kLodClusterParentError == kLodClusterParentSphere + 4,
@@ -126,9 +117,6 @@ struct MeshLod
     vector<float> uv1;         ///< Two floats for each of `vertices`, when the mesh has a second uv.
     vector<uint32_t> colors;   ///< A colour for each of `vertices`, when the mesh has colours.
     vector<uint32_t> indices;
-    /// Each cluster's flat patches' data (VELK_LOD_PATCH) for those with patches, one after
-    /// another. Built only with VELK_FLAT_PATCHES set, and never for a deforming mesh.
-    vector<uint32_t> patch_words;
     vector<MeshLodCluster> clusters;  ///< By level, level 0 first.
     uint32_t level0_clusters = 0;
     /// The tree over all clusters, each level's clusters by where they are and the levels
@@ -180,12 +168,6 @@ inline constexpr uint32_t kLodNoAttribute = 0xFFFFFFFFu;
 /// are of unit length.
 inline constexpr float kLodStandInShortest = 0.5f;
 inline constexpr float kLodStandInLongest = 0.98f;
-
-/// The words of @p cluster's patch data, when it has patches.
-inline uint32_t lod_patch_words(const MeshLodCluster& cluster)
-{
-    return kLodPatchBases + (cluster.patch_counts & 0xFFFFu) * kLodPatchBasisWords;
-}
 
 /// Builds the hierarchy over the clusters of @p blas, whose triangles are level 0, down to one
 /// quad. Surfaces are simplified; small separate pieces become quads that keep their area.

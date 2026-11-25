@@ -5806,12 +5806,6 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
                      h[kLightPoolSumPiecesFreed], h[kLightPoolSumPiecesUnread], h[kLightPoolSumPiecesMerged],
                      h[kLightPoolSumSplitsRefused]);
             clear(kLightPoolSumPiecesUnread, 2u);
-            if (h[kLightPoolPatchOutside] != 0u) {
-                VELK_LOG(I, "light patches (VELK_PATCH_OUTSIDE): since the last log %u points traced the first time, %u of "
-                            "them outside their patch's triangles",
-                         h[kLightPoolSumPatchPoints], h[kLightPoolSumPatchPoints + 1u]);
-                clear(kLightPoolSumPatchPoints, 2u);
-            }
             // What the culling arena holds: in use of its buffer, and this view's part of it.
             uint64_t cut_bytes = 0;
             for (const auto& c : state.cuts) cut_bytes += c.region.size();

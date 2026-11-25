@@ -860,10 +860,8 @@ vec3 light_color(uvec2 ids, ivec2 coord)
     // yellow, green, cyan, blue, purple, pink, again from red; dark grey its triangle's vertex
     // points), darker toward its points' places so that its grid shows; magenta as far as the
     // points it reads are not traced yet, cyan as far as they are stale since a change.
-    // A flat patch's pieces the same, its triangles reading its patch's.
     float tri_size = sqrt(max(max(d11, d22), dot(p[2] - p[1], p[2] - p[1])));
-    VelkLightRoot r = velk_light_root_of(first, triangle, corners, b, tri_size,
-                                         mat3(velk_sized_world(inst.world_matrix, inst.offset.xyz, inst.size.xyz)));
+    VelkLightRoot r = velk_light_root_of(first, triangle, b, tri_size);
     if (r.slot != VELK_LIGHT_NONE) {
         const vec3 kDepthColors[8] = vec3[8](
             vec3(1.0, 0.0, 0.0), vec3(1.0, 0.5, 0.0), vec3(1.0, 1.0, 0.0), vec3(0.0, 1.0, 0.0),
