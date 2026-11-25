@@ -349,8 +349,8 @@ private:
     /// Traces and resolves reflections of smooth surfaces (light_probes_main_src with
     /// VELK_REFLECT, reflect_resolve_src), after the probes and before the lighting.
     void emit_reflection_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
-    /// Makes the sun pass's targets and pipelines for this frame; false when it cannot run (no
-    /// SunPass::Off, no lit directional light, no G-buffer, or a target or pipeline missing), so
+    /// Makes the sun pass's targets and pipelines for this frame; false when it cannot run
+    /// (SunPass::Off, no lit directional light, no G-buffer, or a target or pipeline missing), so
     /// that the light points keep tracing the sun.
     bool prepare_sun_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
     /// The sun pass (ICamera::sun_pass): casts a ray a pixel to the sun's middle (sun_rays_main_src),
