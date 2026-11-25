@@ -1144,6 +1144,12 @@ uint velk_light_grid_at(uint first, uint k)
 /// light trace's, VELK_LIGHT_TRACE_MAIN_GLSL): see VELK_LIGHT_GRID_ONLY_GLSL.
 [[maybe_unused]] constexpr string_view light_grid_src = VELK_LIGHT_GRID_ONLY_GLSL VELK_LIGHT_AREA_GLSL VELK_LIGHT_GRID_GLSL;
 
+// The light terms the deferred lighting, the path tracer and the probes' hits share: GGX, Smith,
+// Schlick, a material's reflectance (velk_specular_f0) and a light's way and reach
+// (velk_light_delta). Its source is velk-render/shaders/light_eval.glsl; this defines
+// VELK_LIGHT_EVAL_GLSL. Follows a definition of Light.
+#include <velk-render/glsl/light_eval.inc>
+
 // What lighting a surface takes, for the deferred lighting and the blended surfaces' fragments:
 // the scene's lights, the environment, the highlight's terms. Follows VELK_GLOBALS and push
 // constants `pc` with env_texture_id and env_params.
@@ -1192,43 +1198,7 @@ vec3 env_miss_color_lod(vec3 rd, float lod)
 }
 
 vec3 env_miss_color(vec3 rd) { return env_miss_color_lod(rd, 0.0); }
-
-// GGX normal distribution, Smith geometry, Schlick Fresnel. Same forms
-// used by the RT path's velk_fill_standard.
-float ggx_d(float NdotH, float a)
-{
-    float a2 = a * a;
-    float denom = NdotH * NdotH * (a2 - 1.0) + 1.0;
-    return a2 / max(3.14159265358979323846 * denom * denom, 1e-6);
-}
-
-float smith_g1(float NdotX, float a)
-{
-    float k = (a + 1.0); k = k * k * 0.125; // (a+1)^2 / 8, Schlick-GGX for direct
-    return NdotX / max(NdotX * (1.0 - k) + k, 1e-6);
-}
-
-float smith_g(float NdotV, float NdotL, float a)
-{
-    return smith_g1(NdotV, a) * smith_g1(NdotL, a);
-}
-
-vec3 fresnel_schlick(float cos_theta, vec3 F0, float F90)
-{
-    return F0 + (vec3(F90) - F0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
-}
-
-// KHR_materials_specular, with the base colour, metalness and the material's specular colour
-// and strength (MaterialEval::specular_color_factor, specular_factor): reflectance at normal
-// incidence, and in `F90` at grazing. A dielectric's is the strength times 0.04 tinted by the
-// colour (capped at 1), and the strength; a metal's its base colour, and 1.
-vec3 velk_specular_f0(vec3 base, float metallic, vec3 specular_color, float specular, out float F90)
-{
-    specular = clamp(specular, 0.0, 1.0);
-    F90 = mix(specular, 1.0, metallic);
-    return mix(min(0.04 * max(specular_color, vec3(0.0)), vec3(1.0)) * specular, base, metallic);
-}
-
+)" VELK_LIGHT_EVAL_GLSL R"(
 // Roughness-aware Schlick for environment / IBL specular: scales the grazing
 // reflectance (F90) by (1 - roughness), so rough surfaces don't reflect the
 // full environment at glancing angles. Without this, rough geometry edges
@@ -1284,21 +1254,8 @@ void velk_surface_light(uint i, float through, vec3 world_pos, vec3 N, vec3 V, v
             return;
         }
         vec3 L;
-        float atten = 1.0;
-        if (light.flags.x == 0u) {
-            L = -light.direction.xyz;
-        } else {
-            vec3 to_light = light.position.xyz - world_pos;
-            float dist = length(to_light);
-            L = to_light / max(dist, 1e-6);
-            float range = max(light.params.x, 1e-6);
-            float t = clamp(1.0 - dist / range, 0.0, 1.0);
-            atten = t * t;
-            if (light.flags.x == 2u) {
-                float cos_a = dot(-L, light.direction.xyz);
-                atten *= smoothstep(light.params.z, light.params.y, cos_a);
-            }
-        }
+        float atten;
+        velk_light_delta(light, world_pos, L, atten);
         float NdotL = max(dot(N, L), 0.0);
         float diffuse = stand_in >= 0.0 ? mix(velk_ball_response(L, V), max(dot(face, L), 0.0), stand_in)
                                         : mix(NdotL, max(-dot(N, L), 0.0), transmission);
@@ -2471,7 +2428,7 @@ vec3 env_miss_color(vec3 rd) {
 // latter. Depends on pc.lights, pc.light_count, env_miss_color,
 // velk_eval_shadow, ggx_sample_half, rng_next_vec2 — all in scope at
 // that point.
-[[maybe_unused]] constexpr string_view rt_pbr_shade_src = R"(
+[[maybe_unused]] constexpr string_view rt_pbr_shade_src = VELK_LIGHT_EVAL_GLSL R"(
 // Set to a light index to shade against that light alone (see the loop bounds
 // below); -1 shades against all of them. Per-invocation, like any GLSL global.
 int velk_single_light = -1;
@@ -2486,10 +2443,7 @@ float velk_single_light_weight = 1.0;
 // then apply.
 void velk_light_sample(Light light, vec3 pos, out vec3 L, out float atten)
 {
-    atten = 1.0;
-    if (light.flags.x == 0u) {
-        L = -light.direction.xyz;
-    } else if (light.flags.x == 3u) {
+    if (light.flags.x == 3u) {
         // A square area light: one place on it, chosen evenly (velk_light_target, which its shadow
         // ray aims at), weighted so that over many its N.L times this is what the deferred
         // lighting's closed form gives (velk_area_irradiance's diffuse, times pi): the square's
@@ -2506,16 +2460,7 @@ void velk_light_sample(Light light, vec3 pos, out vec3 L, out float atten)
         L = to_light * inversesqrt(dist2);
         atten = 4.0 * hs * hs * abs(dot(ln, L)) / dist2;
     } else {
-        vec3 to_light = light.position.xyz - pos;
-        float dist = length(to_light);
-        L = to_light / max(dist, 1e-6);
-        float range = max(light.params.x, 1e-6);
-        float t = clamp(1.0 - dist / range, 0.0, 1.0);
-        atten = t * t;
-        if (light.flags.x == 2u) {
-            float cos_a = dot(-L, light.direction.xyz);
-            atten *= smoothstep(light.params.z, light.params.y, cos_a);
-        }
+        velk_light_delta(light, pos, L, atten);
     }
 }
 
@@ -2543,14 +2488,11 @@ BrdfSample velk_pbr_shade(MaterialEval eval, EvalContext ctx)
     float ao = clamp(eval.occlusion, 0.0, 1.0);
     float transmission = velk_hit_two_sided ? clamp(eval.transmission, 0.0, 1.0) : 0.0;
 
-    // KHR_materials_specular, as the deferred lighting's velk_specular_f0: a dielectric reflects
-    // its strength times 0.04 tinted by its colour (capped at 1) at normal incidence and its
-    // strength at grazing; a metal its base colour, and 1.
-    float specular = clamp(eval.specular_factor, 0.0, 1.0);
-    vec3 F0 = mix(min(0.04 * max(eval.specular_color_factor, vec3(0.0)), vec3(1.0)) * specular, base, metallic);
-    float F90 = mix(specular, 1.0, metallic);
+    // KHR_materials_specular, as the deferred lighting's.
+    float F90;
+    vec3 F0 = velk_specular_f0(base, metallic, eval.specular_color_factor, eval.specular_factor, F90);
     float VdotN = max(dot(V, N), 0.0);
-    vec3 F = F0 + (vec3(F90) - F0) * pow(1.0 - VdotN, 5.0);
+    vec3 F = fresnel_schlick(VdotN, F0, F90);
 
     // Direct lighting from scene lights. Each light contributes a
     // Lambertian diffuse term scaled by its distance / spot attenuation
@@ -2589,7 +2531,7 @@ BrdfSample velk_pbr_shade(MaterialEval eval, EvalContext ctx)
             float D = a2 / max(3.14159265 * dd * dd, 1e-6);
             float k = (roughness + 1.0) * (roughness + 1.0) * 0.125;
             float G = VdotN / max(VdotN * (1.0 - k) + k, 1e-6) * facing / max(facing * (1.0 - k) + k, 1e-6);
-            vec3 Fl = F0 + (vec3(F90) - F0) * pow(clamp(1.0 - VdotH, 0.0, 1.0), 5.0);
+            vec3 Fl = fresnel_schlick(VdotH, F0, F90);
             direct += D * G * Fl / max(4.0 * VdotN * facing, 1e-6) * facing * radiance * li_weight * 3.14159265;
         }
     }

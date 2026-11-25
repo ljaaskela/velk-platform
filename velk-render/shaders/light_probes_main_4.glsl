@@ -103,16 +103,9 @@ bool velk_cell_changed(uint changes, vec3 pos, int level)
 vec3 velk_probe_light(uint index, vec3 at, vec3 n, float stand_in, vec3 to_viewer)
 {
     Light light = velk_light_at(pc.lights_base + index);
-    vec3 l = -light.direction.xyz;
-    float atten = 1.0;
-    if (light.flags.x != 0u) {
-        vec3 to = light.position.xyz - at;
-        float dist = length(to);
-        l = to / max(dist, 1e-6);
-        float t = clamp(1.0 - dist / max(light.params.x, 1e-6), 0.0, 1.0);
-        atten = t * t;
-        if (light.flags.x == 2u) atten *= smoothstep(light.params.z, light.params.y, dot(-l, light.direction.xyz));
-    }
+    vec3 l;
+    float atten;
+    velk_light_delta(light, at, l, atten);
     return light.color_intensity.rgb * light.color_intensity.a * atten * velk_diffuse_response(n, l, to_viewer, stand_in);
 }
 

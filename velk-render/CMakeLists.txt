@@ -234,6 +234,7 @@ set(VELK_RENDER_GLSL_SOURCES
     shaders/light_claim_blended_1.glsl
     shaders/light_claim_blended_2.glsl
     shaders/light_claim_blended_3.glsl
+    shaders/light_eval.glsl
     shaders/light_list.glsl
     shaders/light_mark_1.glsl
     shaders/light_mark_2.glsl
