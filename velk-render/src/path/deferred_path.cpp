@@ -168,6 +168,9 @@ VELK_GPU_STRUCT DeferredComputePushC {
     uint32_t spare4;
     uint32_t spare2;
     uint32_t spare5;
+    uint32_t spare7;
+    uint32_t spare8;
+    uint32_t spare9;
 };
 static_assert(sizeof(DeferredComputePushC) == 128, "Deferred compute PushC layout mismatch");
 
@@ -250,6 +253,21 @@ uint32_t sun_pass_light(SunPass mode, const RenderView& render_view)
     const GpuLight* sun = sun_light(render_view);
     return sun ? static_cast<uint32_t>(sun - render_view.lights.data()) : kLightNone;
 }
+
+// While the slot pass is being tried (slot_rays_main_src): VELK_LIGHT_SLOTS_K=1 or 2 lights a pixel
+// whose visibility it finds, 0 when not set, for no slot pass.
+uint32_t slot_ranks() { return env_uint("VELK_LIGHT_SLOTS_K", 1, 2); }
+
+// Whether the slot pass takes what the points keep (VELK_LIGHT_SLOT_SOURCE=cache) rather than a
+// ray a pixel.
+bool slot_from_cache()
+{
+    const char* v = std::getenv("VELK_LIGHT_SLOT_SOURCE");
+    return v && std::strcmp(v, "cache") == 0;
+}
+
+// Whether the slot pass softens what it finds (VELK_LIGHT_SLOTS_SOFT=1, slot_soften_main_src).
+bool slot_soft() { return env_uint("VELK_LIGHT_SLOTS_SOFT", 1, 1) != 0u; }
 
 // A development aid, what to show in place of the lit image: VELK_SUN_VIEW=1 what the lighting
 // takes of the sun, 0 to 1; of the sun pass's softening, 2 the penumbra's width, 3 the blocked
@@ -955,6 +973,7 @@ void DeferredPath::build_passes(IViewEntry& entry,
         emit_light_probes_pass(vs, render_view, ctx, graph);
         emit_reflection_pass(vs, render_view, ctx, graph);
         emit_sun_rays_pass(vs, render_view, ctx, graph);
+        emit_slot_pass(vs, render_view, ctx, graph);
         emit_lighting_pass(entry, vs, render_view, color_target, ctx,
                            static_cast<int>(vs.gbuffer_size.x),
                            static_cast<int>(vs.gbuffer_size.y), graph);
@@ -2541,6 +2560,123 @@ void DeferredPath::emit_sun_rays_pass(ViewState& vs, const RenderView& render_vi
     vs.sun_shaded = soft ? vs.sun_soft : vs.sun_rays;
 }
 
+void DeferredPath::emit_slot_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph)
+{
+    vs.slot_shaded[0] = {};
+    vs.slot_shaded[1] = {};
+    const uint32_t ranks = slot_ranks();
+    if (ranks == 0u || !vs.gbuffer || vs.gbuffer_size.x == 0 || vs.gbuffer_size.y == 0 || !vs.light_header.valid()) return;
+    const bool cache = slot_from_cache();
+    const bool soft = slot_soft();
+    const uint32_t width = vs.gbuffer_size.x;
+    const uint32_t height = vs.gbuffer_size.y;
+    const auto make = [&](IRenderTarget::Ptr& target) {
+        TextureDesc td{};
+        td.width = static_cast<int>(width);
+        td.height = static_cast<int>(height);
+        td.format = PixelFormat::RGBA16F;
+        td.usage = TextureUsage::Storage;
+        td.sampler.wrap_s = SamplerAddressMode::ClampToEdge;
+        td.sampler.wrap_t = SamplerAddressMode::ClampToEdge;
+        td.sampler.mag_filter = SamplerFilter::Nearest;
+        td.sampler.min_filter = SamplerFilter::Nearest;
+        td.sampler.mipmap_mode = SamplerMipmapMode::Nearest;
+        target = graph.resources().create_render_texture(td);
+    };
+    if (vs.slot_size != vs.gbuffer_size) {
+        for (uint32_t r = 0; r < 2u; ++r) {
+            vs.slot_rays[r] = {};
+            vs.slot_soft[r] = {};
+        }
+        vs.slot_size = vs.gbuffer_size;
+    }
+    for (uint32_t r = 0; r < ranks; ++r) {
+        if (!vs.slot_rays[r]) make(vs.slot_rays[r]);
+        if (soft && !vs.slot_soft[r]) make(vs.slot_soft[r]);
+        if (!vs.slot_rays[r] || (soft && !vs.slot_soft[r])) return;
+    }
+    const IGpuPipeline::Ptr pipeline = compose_deferred_compute_pipeline(ctx, slot_rays_main_src, 0x534c'4f54'5241'0001ULL, false, 5u);
+    const IGpuPipeline::Ptr soften_pipeline =
+        soft ? compose_deferred_compute_pipeline(ctx, slot_soften_main_src, 0x534c'4f54'534f'0001ULL, false, 5u) : IGpuPipeline::Ptr{};
+    if (!pipeline || (soft && !soften_pipeline)) return;
+
+    const auto handle = [](const IRenderTarget::Ptr& t) { return static_cast<uint32_t>(t->get_gpu_handle(GpuResourceKey::Default)); };
+    DeferredComputePushC pc{};
+    pc.globals_base = render_view.view_globals_base;
+    pc.cam_pos[0] = render_view.cam_pos.x;
+    pc.cam_pos[1] = render_view.cam_pos.y;
+    pc.cam_pos[2] = render_view.cam_pos.z;
+    pc.output_image_id = handle(vs.slot_rays[0]);
+    pc.spare7 = ranks > 1u ? handle(vs.slot_rays[1]) : kLightNone;
+    pc.spare8 = kLightNone;
+    pc.spare9 = kLightNone;
+    pc.normal_tex_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Normal));
+    pc.worldpos_tex_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::WorldPos));
+    pc.material_tex_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::MaterialParams));
+    pc.emissive_tex_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Emissive));
+    pc.width = width;
+    pc.height = height;
+    pc.light_count = static_cast<uint32_t>(render_view.lights.size());
+    pc.lights_base = render_view.lights_base;
+    pc.cells_header = static_cast<uint32_t>(vs.light_header.offset() / sizeof(uint32_t));
+    // The pixels' points of light, as the lighting reads them: the pool, the pixel ids and kLightPixels.
+    const LightPool& pool = vs.instance_cull.light_pool;
+    pc.spare3 = pool.segments.empty() || !vs.pixel_words.valid() ? kLightNone : pool.word();
+    pc.spare4 = vs.pixel_words.valid() ? pixel_ids_word(vs) : 0u;
+    pc.spare2 = vs.visibility_size.x;
+    std::memcpy(&pc.spare5, &kLightPixels, sizeof(float));
+    // The ranks in the low two bits, and VELK_SLOT_CACHE.
+    pc.mode = ranks | (cache ? 4u : 0u);
+    DeferredComputePushC soften_pc = pc;
+    if (soft) {
+        soften_pc.mode = ranks;
+        soften_pc.output_image_id = handle(vs.slot_soft[0]);
+        soften_pc.spare7 = handle(vs.slot_rays[0]);
+        soften_pc.spare8 = ranks > 1u ? handle(vs.slot_rays[1]) : kLightNone;
+        soften_pc.spare9 = ranks > 1u ? handle(vs.slot_soft[1]) : kLightNone;
+    }
+
+    const auto emit = [&](IRenderPass::Ptr& pass, const char* name, const char* other_name, const char* label,
+                          const IGpuPipeline::Ptr& used, const DeferredComputePushC& used_pc, const IRenderTarget::Ptr (&read)[2],
+                          const IRenderTarget::Ptr (&written)[2]) {
+        bool dirty = true;
+        emit_cached_view_pass(pass, dirty, view_pass_name(vs.instance_cull.chosen_by_other, name, other_name), graph,
+                              [&](CachedPassRecording& rec) {
+            auto cmd = ctx.backend->create_command_buffer();
+            if (!cmd) return;
+            DispatchCall dc{};
+            dc.pipeline = used.get();
+            dc.groups_x = (width + 7u) / 8u;
+            dc.groups_y = (height + 7u) / 8u;
+            dc.groups_z = 1;
+            dc.root_constants_size = sizeof(used_pc);
+            std::memcpy(dc.root_constants, &used_pc, sizeof(used_pc));
+            cmd->begin_recording();
+            cmd->push_label(label);
+            cmd->record_global_barrier();
+            cmd->record_dispatch(dc);
+            cmd->record_global_barrier();
+            cmd->pop_label();
+            cmd->end_recording();
+            rec.cmd = std::move(cmd);
+            rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
+            for (uint32_t r = 0; r < ranks; ++r) {
+                if (read[r]) rec.reads.push_back(interface_pointer_cast<IGpuResource>(read[r]));
+                rec.writes.push_back(interface_pointer_cast<IGpuResource>(written[r]));
+            }
+            rec.held.push_back(used);
+        });
+    };
+    const IRenderTarget::Ptr none[2] = {};
+    emit(vs.slot_rays_pass, "deferred.slot_rays", "other:deferred.slot_rays", "DeferredPath: slot rays", pipeline, pc, none,
+         vs.slot_rays);
+    if (soft) {
+        emit(vs.slot_soften_pass, "deferred.slot_soften", "other:deferred.slot_soften", "DeferredPath: slot soften", soften_pipeline,
+             soften_pc, vs.slot_rays, vs.slot_soft);
+    }
+    for (uint32_t r = 0; r < ranks; ++r) vs.slot_shaded[r] = soft ? vs.slot_soft[r] : vs.slot_rays[r];
+}
+
 void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
                                       const RenderView& render_view,
                                       IRenderTarget::Ptr color_target,
@@ -2645,6 +2781,14 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
             | (sun_view() << 28u);
     if (pc.mode != vs.lighting_sun_mode) vs.lighting_dirty = true;
     vs.lighting_sun_mode = pc.mode;
+    // The slot pass's results (emit_slot_pass), a rank each.
+    const IRenderTarget::Ptr slot_shaded[2] = {vs.slot_shaded[0], vs.slot_shaded[1]};
+    pc.spare7 = slot_shaded[0] ? static_cast<uint32_t>(slot_shaded[0]->get_gpu_handle(GpuResourceKey::Default)) : kLightNone;
+    pc.spare8 = slot_shaded[1] ? static_cast<uint32_t>(slot_shaded[1]->get_gpu_handle(GpuResourceKey::Default)) : kLightNone;
+    pc.spare9 = kLightNone;
+    if (pc.spare7 != vs.lighting_slots[0] || pc.spare8 != vs.lighting_slots[1]) vs.lighting_dirty = true;
+    vs.lighting_slots[0] = pc.spare7;
+    vs.lighting_slots[1] = pc.spare8;
 
     // Writes the finished image and blits it to the target.
     emit_cached_view_pass(
@@ -2674,6 +2818,9 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
             rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
             if (reflections) rec.reads.push_back(interface_pointer_cast<IGpuResource>(reflections));
             if (sun_shaded) rec.reads.push_back(interface_pointer_cast<IGpuResource>(sun_shaded));
+            for (const auto& slot : slot_shaded) {
+                if (slot) rec.reads.push_back(interface_pointer_cast<IGpuResource>(slot));
+            }
             rec.writes.push_back(interface_pointer_cast<IGpuResource>(vs.deferred_output));
             if (color_target) {
                 rec.writes.push_back(interface_pointer_cast<IGpuResource>(color_target));

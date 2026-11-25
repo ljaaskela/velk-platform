@@ -5665,6 +5665,13 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
                                 "normal %.3f %.3f %.3f",
                              packed & 0xFFFFu, packed >> 16u, f[0] == kLightNone ? -1 : static_cast<int>(f[0]), through, n_dot_l, f[3],
                              lit[0], lit[1], lit[2], normal[0], normal[1], normal[2]);
+                    // The slot pass's lights (VELK_LIGHT_READ_SLOTS), -1 for none.
+                    float slot_through[2] = {};
+                    std::memcpy(&slot_through[0], f + 11, sizeof(float));
+                    std::memcpy(&slot_through[1], f + 13, sizeof(float));
+                    VELK_LOG(I, "light read %u,%u slot lights %d (through %.3f), %d (through %.3f)", packed & 0xFFFFu, packed >> 16u,
+                             f[10] == kLightNone ? -1 : static_cast<int>(f[10]), slot_through[0],
+                             f[12] == kLightNone ? -1 : static_cast<int>(f[12]), slot_through[1]);
                 }
                 // What it reads of its triangle's pieces (velk_light_explain): the first light's
                 // shade (0 lit to 15 blocked, - for none), traces and first slot's blocker code
@@ -5728,6 +5735,13 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
                      h[kLightPoolLastUntracedPoints], h[kLightPoolLastCoarsePoints], h[kLightPoolLastFinePoints],
                      h[kLightPoolLastWarmupPoints], h[kLightPoolLastRefinePoints],
                      h[kLightPoolSumChanged], written, took, h[kLightPoolLastUntracedPixels], h[kLightPoolRayBudget]);
+            // With the slot pass (VELK_LIGHT_SLOTS_K): the lit pixels' lights its points had not traced.
+            if (std::getenv("VELK_LIGHT_SLOTS_K")) {
+                clear(kLightPoolSlotPendingMost, 1u);
+                VELK_LOG(I, "light slots: at most %u lit pixels' lights a frame whose points had not traced them yet, or a change "
+                            "made stale, since the last log",
+                         h[kLightPoolSlotPendingMost]);
+            }
             uint32_t longest = 0;
             uint32_t most = 0;
             for (const auto& c : state.cuts) {

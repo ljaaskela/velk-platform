@@ -219,6 +219,18 @@ public:
         /// cannot run.
         IGpuPipeline::Ptr sun_pipeline;
         IGpuPipeline::Ptr sun_soften_pipeline;
+        /// The slot pass (VELK_LIGHT_SLOTS_K): the visibility of each pixel's strongest lights
+        /// other than the sun, a target a rank (slot_rays_main_src), and that softened
+        /// (slot_soften_main_src), which the lighting takes in place of what the points keep.
+        /// `slot_shaded` is what the lighting takes this frame, none without the pass, and
+        /// `lighting_slots` the images the lighting pass was recorded with.
+        IRenderTarget::Ptr slot_rays[2];
+        IRenderTarget::Ptr slot_soft[2];
+        uvec2 slot_size{};
+        IRenderTarget::Ptr slot_shaded[2];
+        uint32_t lighting_slots[2] = {0xFFFFFFFFu, 0xFFFFFFFFu};
+        IRenderPass::Ptr slot_rays_pass;
+        IRenderPass::Ptr slot_soften_pass;
         IRenderPass::Ptr visibility_debug_pass;
         IRenderPass::Ptr chooser_frustum_pass;
         IRenderPass::Ptr partition_bounds_pass;
@@ -357,6 +369,10 @@ private:
     /// and softens it (sun_soften_main_src) for soft, before the lighting. Nothing without a lit
     /// directional light; no softening for a sun without a size.
     void emit_sun_rays_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
+    /// The slot pass (VELK_LIGHT_SLOTS_K): finds the visibility of each pixel's strongest lights
+    /// other than the sun (slot_rays_main_src), and softens it (slot_soften_main_src) with
+    /// VELK_LIGHT_SLOTS_SOFT, before the lighting. Nothing when it is not set.
+    void emit_slot_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
     /// Replaces the final image with the visibility buffer as flat colours.
     void emit_visibility_debug_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,
                                     FrameContext& ctx, uint32_t mode, IRenderGraph& graph);

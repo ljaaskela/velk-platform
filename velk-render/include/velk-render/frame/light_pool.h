@@ -212,7 +212,7 @@ inline constexpr uint32_t kLightMaxSegments = 64;
 /// Pixels VELK_LIGHT_READ can name for the lighting to write its terms at (VELK_POOL_READ_TERMS),
 /// and the words of each one's terms (VELK_LIGHT_READ_WORDS).
 inline constexpr uint32_t kLightReadPixels = 4;
-inline constexpr uint32_t kLightReadWords = 80;
+inline constexpr uint32_t kLightReadWords = 84;
 inline constexpr uint32_t kLightPoolAheadFrames = 40;
 inline constexpr uint32_t kLightPoolAheadEvery = 60;
 
@@ -341,11 +341,14 @@ inline constexpr uint32_t kLightPoolAheadEvery = 60;
                                                     what is drawn opaque leave untraced; kLightNone for none */      \
     X(Hard, HARD, 202)                           /* not 0 with VELK_LIGHT_HARD: a point casts a ray to each light's \
                                                     centre, blocked or not, and settles once each light has had one */ \
-    X(ReadPixels, READ_PIXELS, 203)              /* VELK_LIGHT_READ's pixels, x | y << 16, kLightNone for none: \
+    X(SlotPending, SLOT_PENDING, 203)            /* with VELK_LIGHT_SLOTS_K: the lit pixels' lights this frame \
+                                                    whose points have not traced them yet or a change made stale */ \
+    X(SlotPendingMost, SLOT_PENDING_MOST, 204)   /* the most SLOT_PENDING of a frame since the log */              \
+    X(ReadPixels, READ_PIXELS, 205)              /* VELK_LIGHT_READ's pixels, x | y << 16, kLightNone for none: \
                                                     kLightReadPixels words */                                        \
-    X(ReadTerms, READ_TERMS, 207)                /* the lighting's terms at them, kLightReadWords each \
+    X(ReadTerms, READ_TERMS, 209)                /* the lighting's terms at them, kLightReadWords each \
                                                     (VELK_LIGHT_READ_*) */                                           \
-    X(HeaderEnd, HEADER_END, 527)
+    X(HeaderEnd, HEADER_END, 545)
 
 #define VELK_LIGHT_POOL_CPP_WORD(cpp, glsl, word) inline constexpr uint32_t kLightPool##cpp = word;
 VELK_LIGHT_POOL_HEADER(VELK_LIGHT_POOL_CPP_WORD)
@@ -489,14 +492,16 @@ bool velk_light_inherits(uint value)
 // light and the colour before tonemapping, three words each; then its metallic, whether its points
 // of light were traced and probes covered it (bits 0 and 1) with the frame that wrote them (the
 // bits from 8 on, its present counter), and how well the probes matched.
-#define VELK_LIGHT_READ_WORDS 80u
+#define VELK_LIGHT_READ_WORDS 84u
 // Then its first light: its index (VELK_LIGHT_NONE for none), how much of it gets through and the
 // cosine of its way to the normal, floats as their bits; and the pixel's ids' first word. Then the
 // lights' highlights alone, of all its specular light, three words; then the normal it is lit
-// with, three words.
+// with, three words. Then the slot pass's two lights (velk_slot_light0 and 1, VELK_LIGHT_NONE for
+// none), each with how much of it gets through as a float's bits.
 #define VELK_LIGHT_READ_FIRST_LIGHT 70u
 #define VELK_LIGHT_READ_HIGHLIGHTS 74u
 #define VELK_LIGHT_READ_NORMAL 77u
+#define VELK_LIGHT_READ_SLOTS 80u
 // Then what it reads of its triangle's pieces (velk_light_explain), from word 24: its record's
 // light word, its triangle, its record's triangles in pieces, its record's coarse light, its
 // triangle's root word, the level it reads (a page, or VELK_PIECE_VERTICES), that level's depth
@@ -538,6 +543,7 @@ bool velk_light_inherits(uint value)
 #define VELK_LIGHT_READ_FLAGS 22u
 #define VELK_LIGHT_READ_MATCH 23u
 
+)" R"(
 // An RGB9E5 colour (rgb9e5 in gpu_data.h).
 vec3 velk_rgb9e5(uint w)
 {
@@ -1655,6 +1661,16 @@ void velk_light_slots_at(vec3 at, out uint slots[VELK_LIGHT_SLOTS])
 // Adding up the lights the points of light give a pixel or a ray's hit: needs
 // VELK_LIGHT_POOL_GLSL and VELK_LIGHT_SLOTS_GLSL first.
 #define VELK_LIGHT_ADD_GLSL R"(
+// What the points a pixel read say of each of its record's lights, set by velk_light_add_points
+// when `g_light_codes_wanted` (the slot pass, slot_rays_main_src): the record's first page,
+// VELK_LIGHT_NONE where the pixel read no pieces' points; the nearest blocker any of the points
+// found, 4 bits a slot as velk_light_blocker_code (VELK_LIGHT_BLOCKER_CLEAR where none found one);
+// and a bit a slot whose light one of the points has not traced yet, or a change made stale.
+bool g_light_codes_wanted = false;
+uint g_light_codes_first = 0xFFFFFFFFu;
+uint g_light_nearest_codes = 0xFFFFFFFFu;
+uint g_light_pending_slots = 0u;
+
 // A pixel's or a hit's lights: up to VELK_LIGHT_SLOTS of them, filled in order, the rest
 // VELK_LIGHT_NONE, each with its weight and its weight times what of its light gets through.
 // Every loop over them goes over all the places, so that the compiler keeps them in registers
@@ -1868,6 +1884,32 @@ bool velk_light_add_points(uint pool, uint first, uint t, uvec3 corners, vec3 b,
             velk_piece_light(pool, way.piece, first, corners, way.at, sized, known, under, nearest);
         }
         if (!known) return false;
+        // For the slot pass: what the points of the level read say of each light.
+        if (g_light_codes_wanted) {
+            g_light_codes_first = first;
+            g_light_nearest_codes = 0xFFFFFFFFu;
+            g_light_pending_slots = 0u;
+            uint read_words[3];
+            vec3 read_w;
+            velk_way_around(pool, first, corners, way.piece, way.at, read_words, read_w);
+            for (uint k = 0u; k < 3u; ++k) {
+                if (read_w[k] <= 0.0) continue;
+                if (VELK_LIGHT_WORDS.data[read_words[k]] == VELK_LIGHT_NONE) {
+                    g_light_pending_slots = (1u << VELK_LIGHT_SLOTS) - 1u;
+                    continue;
+                }
+                uint codes = VELK_LIGHT_WORDS.data[velk_way_blocker(pool, first, corners, way.piece, k, read_words[k])];
+                for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) {
+                    uint c = (codes >> (4u * s)) & 15u;
+                    if (c == VELK_LIGHT_BLOCKER_UNTRACED || c == VELK_LIGHT_BLOCKER_STALE) {
+                        g_light_pending_slots |= 1u << s;
+                        continue;
+                    }
+                    uint had = (g_light_nearest_codes >> (4u * s)) & 15u;
+                    if (c < had) g_light_nearest_codes = (g_light_nearest_codes & ~(15u << (4u * s))) | (c << (4u * s));
+                }
+            }
+        }
         // Where a light's penumbra (velk_light_penumbra) is wider on screen than the points'
         // spacing, toward the coarse level, whose points are farther apart, so that a wide
         // penumbra's single rays do not show. Narrower, the points as they are: they cannot say
@@ -3941,19 +3983,27 @@ uint velk_sun_index()
 // faces every way: its ray starts off it toward the light, as a light point's does. `blocker_t` is
 // how far away what was in the way is, 0 where nothing was; `facing_away` is true where the surface
 // faces away from the light, which then is in its own way at no distance.
-float velk_sun_visibility(vec3 pos, vec3 n, bool two_sided, bool stand_in, vec3 dir, out float blocker_t, out bool facing_away)
+// As velk_sun_visibility, for a light `t_max` away along `dir` (1e30 for one with no place).
+float velk_light_visibility(vec3 pos, vec3 n, bool two_sided, bool stand_in, vec3 dir, float t_max, out float blocker_t,
+                            out bool facing_away)
 {
     blocker_t = 0.0;
     if (two_sided && dot(n, dir) < 0.0) n = -n;
     facing_away = !stand_in && dot(n, dir) <= 0.0;
     if (facing_away) return 0.0;
+    float lift = 0.01 + length(pos) * 1e-4;
     Ray ray;
-    ray.origin = pos + (stand_in ? dir : n) * (0.01 + length(pos) * 1e-4);
+    ray.origin = pos + (stand_in ? dir : n) * lift;
     ray.dir = dir;
     velk_ray_blocker_t = 0.0;
-    float through = trace_visibility(ray, 1e30);
+    float through = trace_visibility(ray, t_max >= 1e30 ? 1e30 : max(t_max - lift, 0.0));
     if (through < 1.0) blocker_t = velk_ray_blocker_t;
     return through;
+}
+
+float velk_sun_visibility(vec3 pos, vec3 n, bool two_sided, bool stand_in, vec3 dir, out float blocker_t, out bool facing_away)
+{
+    return velk_light_visibility(pos, n, two_sided, stand_in, dir, 1e30, blocker_t, facing_away);
 }
 )"
 
@@ -6437,6 +6487,9 @@ void main()
             light_words.data[pool + VELK_POOL_TRACES] = 0u;
             light_words.data[pool + VELK_POOL_LAST_UNTRACED_PIXELS] = light_words.data[pool + VELK_POOL_UNTRACED_PIXELS];
             light_words.data[pool + VELK_POOL_UNTRACED_PIXELS] = 0u;
+            light_words.data[pool + VELK_POOL_SLOT_PENDING_MOST] =
+                max(light_words.data[pool + VELK_POOL_SLOT_PENDING_MOST], light_words.data[pool + VELK_POOL_SLOT_PENDING]);
+            light_words.data[pool + VELK_POOL_SLOT_PENDING] = 0u;
             // What the frame's work was charged: the lights listed for tracing and the points.
             const uint charged = light_words.data[pool + VELK_POOL_RAYS_LISTED] + light_words.data[pool + VELK_POOL_POINT_RAYS_CHARGED];
             light_words.data[pool + VELK_POOL_RAYS_LISTED] = 0u;

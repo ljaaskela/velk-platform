@@ -49,12 +49,16 @@ Place motion_place(const ViewSpec& view, int k);
 /// Where the camera is at frame @p frame of @p view's smooth motion, 0 its start.
 Place glide_place(const ViewSpec& view, long frame);
 
-/// Something a scene moves: its transform, from `from` to `to`.
+/// Something a scene moves: its transform, from `from` to `to`, between frames `begin` and `end`
+/// of the scene's movement (`end` -1 for its last frame): at `from` until `begin`, at `to` from
+/// `end` on.
 struct Mover
 {
     velk::Trs trs;
     velk::vec3 from{};
     velk::vec3 to{};
+    long begin = 0;
+    long end = -1;
 };
 
 /// A light a scene's look switch sets: its intensity by day and by night.

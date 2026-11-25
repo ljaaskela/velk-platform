@@ -346,12 +346,14 @@ void add_sun(SceneBuilder& b, const velk::vec3& rotation, float intensity, float
     place(b, sun);
 }
 
-/// A point light of @p color at @p position, with the shadow technique the reference path
-/// traces. Returns its transform.
-velk::Trs add_point(SceneBuilder& b, const velk::vec3& position, const velk::color& color, float intensity, float range)
+/// A point light of @p color at @p position, @p size in radius (0 for a point), with the shadow
+/// technique the reference path traces. Returns its transform.
+velk::Trs add_point(SceneBuilder& b, const velk::vec3& position, const velk::color& color, float intensity, float range,
+                    float size = 0.f)
 {
     auto light = velk::trait::render::create_point_light(color, intensity, range);
     light.add_technique(velk::technique::create_rt_shadow());
+    if (size > 0.f) light.set_size(size);
     auto element = velk::create_element();
     auto trs = velk::trait::transform::create_trs();
     trs.set_translate(position);
@@ -590,6 +592,28 @@ void build_moving_lights(SceneBuilder& b)
     b.out.movers.push_back({add_point(b, red_from, velk::color{1.f, 0.15f, 0.1f, 1.f}, 1.5f, 700.f), red_from, {120.f, -60.f, 120.f}});
     b.out.movers.push_back({add_point(b, blue_from, velk::color{0.15f, 0.3f, 1.f, 1.f}, 1.5f, 700.f), blue_from,
                             {-120.f, -80.f, -120.f}});
+}
+
+/// A row of posts lit by two sized point lights of equal strength, a white and a blue one, and a
+/// weaker green one low in front, under a dim sky. Still until frame 39; at frame 40 a box jumps
+/// across in one frame; from frame 50 the blue light moves toward the middle. Where the first two
+/// are equally strong moves across the posts' shadows, and the green one is the third strongest
+/// light of most of the ground.
+void build_rank_swap(SceneBuilder& b)
+{
+    set_sky(b, "rank_swap", 0.03f, 0.035f, 0.045f);
+    add_mesh(b, build_ground(raw(b), 1200.f, 64, standard(0.5f, 0.5f, 0.5f)), {});
+    const velk::IMesh::Ptr post = build_box(raw(b), {12.f, 90.f, 12.f}, 4, standard(0.75f, 0.75f, 0.75f));
+    for (int i = 0; i < 5; ++i) add_mesh(b, post, {-120.f + static_cast<float>(i) * 60.f, 0.f, -40.f});
+    b.out.frames = 120;
+    const velk::vec3 box_from{-100.f, 0.f, 60.f};
+    b.out.movers.push_back({add_mesh(b, build_box(raw(b), {50.f, 50.f, 50.f}, 8, standard(0.75f, 0.75f, 0.75f)), box_from),
+                            box_from, {40.f, 0.f, 60.f}, 39, 40});
+    add_point(b, {-160.f, -110.f, 60.f}, velk::color{1.f, 0.9f, 0.8f, 1.f}, 0.8f, 700.f, 6.f);
+    const velk::vec3 blue_from{160.f, -110.f, 60.f};
+    b.out.movers.push_back({add_point(b, blue_from, velk::color{0.8f, 0.9f, 1.f, 1.f}, 0.8f, 700.f, 6.f), blue_from,
+                            {40.f, -110.f, 60.f}, 50, 120});
+    add_point(b, {0.f, -40.f, 180.f}, velk::color{0.2f, 1.f, 0.2f, 1.f}, 0.5f, 700.f, 3.f);
 }
 
 /// A row of posts on a plane under a sun of size 2, as wide as fluent's, and a box moving
@@ -1021,6 +1045,9 @@ const velk::vector<SceneSpec>& scenes()
         {"moving_lights", "the moving box, lit by a red and a blue point light moving past each other: light following both",
          {{"front", {{0.f, -120.f, 320.f}, 0.f, -15.f}}},
          build_moving_lights},
+        {"rank_swap", "posts lit by two equal sized point lights, one moving, and a weaker third, a box jumping across: lights changing rank",
+         {{"front", {{0.f, -120.f, 320.f}, 0.f, -15.f}}},
+         build_rank_swap, nullptr, false},
         {"soft", "a row of posts and a box moving through their shadows under a wide sun: soft shadows following a mover",
          {{"front", {{0.f, -120.f, 320.f}, 0.f, -15.f}}},
          build_soft},
@@ -1090,10 +1117,21 @@ BuiltScene build_scene(const SceneSpec& spec, velk::Scene& scene, velk::Element&
 
 namespace {
 
-// Each of @p built's movers @p t of the way, 0 to 1.
+// Each of @p built's movers where it is @p t of the way through the scene's movement, 0 to 1:
+// the share of its own frames (Mover::begin, Mover::end) that has passed.
 void place_movers_along(BuiltScene& built, float t)
 {
-    for (Mover& m : built.movers) m.trs.set_translate(m.from + (m.to - m.from) * t);
+    const float frames = static_cast<float>(built.frames);
+    for (Mover& m : built.movers) {
+        float along = t;
+        if (built.frames > 0) {
+            const float now = t * frames;
+            const float begin = static_cast<float>(m.begin);
+            const float end = m.end < 0 ? frames : static_cast<float>(m.end);
+            along = end > begin ? std::clamp((now - begin) / (end - begin), 0.f, 1.f) : (now >= end ? 1.f : 0.f);
+        }
+        m.trs.set_translate(m.from + (m.to - m.from) * along);
+    }
 }
 
 } // namespace
