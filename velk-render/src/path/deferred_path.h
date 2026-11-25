@@ -202,7 +202,7 @@ public:
         /// and that softened (sun_soften_main_src), which the lighting takes in place of what the
         /// sun's points keep. `sun_mode` is this frame's choice; `sun_shaded` is what the lighting
         /// takes this frame, none without the pass.
-        SunPass sun_mode = SunPass::Soft;
+        SunPass sun_mode = SunPass::Off;
         IRenderTarget::Ptr sun_rays;
         IRenderTarget::Ptr sun_soft;
         uvec2 sun_rays_size{};

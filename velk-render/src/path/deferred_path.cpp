@@ -950,7 +950,7 @@ void DeferredPath::build_passes(IViewEntry& entry,
     // them. When it changes, everything's light is traced again (emit_light_changes_pass).
     // Its targets and pipelines made first (prepare_sun_pass): a frame it cannot shade keeps the
     // sun on the points.
-    vs.sun_mode = sun_pass_mode(camera_state ? camera_state->sun_pass : SunPass::Soft);
+    vs.sun_mode = sun_pass_mode(camera_state ? camera_state->sun_pass : SunPass::Off);
     const uint32_t sun_skip = visibility_mode == 0 && prepare_sun_pass(vs, render_view, ctx, graph)
                             ? sun_pass_light(vs.sun_mode, render_view)
                             : kLightNone;

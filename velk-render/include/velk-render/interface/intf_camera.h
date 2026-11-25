@@ -96,7 +96,7 @@ public:
         (PROP, float, light_trace_ms, 4.f),
         /// How the deferred path finds the sun's shadow. See SunPass. VELK_SUN_PASS=off|hard|soft
         /// overrides it.
-        (PROP, SunPass, sun_pass, SunPass::Soft),
+        (PROP, SunPass, sun_pass, SunPass::Off),
         (PROP, ObjectRef, environment, {}), ///< Optional IEnvironment for skybox/background.
         /// What the deferred path shows in place of the lit image. VELK_VISIBILITY_DEBUG overrides it.
         (PROP, DebugView, debug_view, DebugView::None),
