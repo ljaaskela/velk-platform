@@ -12,8 +12,9 @@
 float velk_shadow_weight(Light l, vec3 p, vec3 N, float stand_in, float transmission)
 {
     vec3 L = l.flags.x == 0u ? -l.direction.xyz : l.position.xyz - p;
-    L = normalize(L);
-    float facing = stand_in >= 0.0 ? 1.0 : max(mix(dot(N, L), -dot(N, L), transmission), 0.0);
+    L = L / max(length(L), 1e-6);
+    float d = dot(N, L);
+    float facing = stand_in >= 0.0 ? 1.0 : mix(max(d, 0.0), max(-d, 0.0), transmission);
     return velk_light_strength(l, p) * facing;
 }
 
