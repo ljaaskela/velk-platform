@@ -1,0 +1,2 @@
+#define VELK_PROBE_PIXELS 16u
+#define VELK_PROBE_RAYS 4u

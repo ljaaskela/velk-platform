@@ -186,6 +186,41 @@ target_include_directories(velk_render
 # GLSL built into the library: each source in shaders/ becomes a header defining it as a string
 # literal macro, VELK_<NAME>_GLSL, which the frame headers include as <velk-render/glsl/<name>.inc>.
 set(VELK_RENDER_GLSL_SOURCES
+    shaders/fragment_triangle.glsl
+    shaders/light_add.glsl
+    shaders/light_changes_main_1.glsl
+    shaders/light_changes_main_2.glsl
+    shaders/light_claim.glsl
+    shaders/light_claim_1.glsl
+    shaders/light_claim_2.glsl
+    shaders/light_claim_blended_1.glsl
+    shaders/light_claim_blended_2.glsl
+    shaders/light_claim_blended_3.glsl
+    shaders/light_list.glsl
+    shaders/light_mark_1.glsl
+    shaders/light_mark_2.glsl
+    shaders/light_pieces_1.glsl
+    shaders/light_pieces_2.glsl
+    shaders/light_pool_body.glsl
+    shaders/light_probes_filter_1.glsl
+    shaders/light_probes_filter_2.glsl
+    shaders/light_probes_main_1.glsl
+    shaders/light_probes_main_2.glsl
+    shaders/light_probes_main_3.glsl
+    shaders/light_probes_main_4.glsl
+    shaders/light_read_body.glsl
+    shaders/light_search_1.glsl
+    shaders/light_search_2.glsl
+    shaders/light_slots.glsl
+    shaders/light_sweep_1.glsl
+    shaders/light_sweep_2.glsl
+    shaders/light_trace_main_1.glsl
+    shaders/light_trace_main_2.glsl
+    shaders/light_trace_main_tail.glsl
+    shaders/probe.glsl
+    shaders/probe_cell.glsl
+    shaders/probe_write.glsl
+    shaders/reflect_resolve.glsl
     shaders/sun_visibility.glsl
 )
 set(VELK_RENDER_GLSL_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
