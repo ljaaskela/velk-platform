@@ -11,21 +11,25 @@ uint velk_points_hash(uint x)
 uint g_rays = 0u;        // the rays this thread cast
 uint g_rays_charged = 0u; // the rays its point was charged against the budget, cast or not
 uint g_first_rays = 0u;  // of those, for lights traced for the first time
+// The blocker code (velk_light_blocker_code) of the last ray velk_points_blocked found blocked.
+uint g_points_code = VELK_LIGHT_BLOCKER_CLEAR;
 
 // Whether the light of `light` is kept from `p` (facing `n`, `lift` off its surface): 1 where
 // something is in the way of a ray to its centre (along its direction for a directional light),
 // patches of small members on the way (VELK_CUT_RAY_QUAD) counting when they block more than
-// half; 0 where nothing is.
+// half; 0 where nothing is. Where 1, g_points_code says how far away what was in the way is.
 float velk_points_blocked(Light light, vec3 p, vec3 n, float lift, bool two_sided)
 {
     velk_ray_blocker_t = 0.0;
+    g_points_code = VELK_LIGHT_BLOCKER_NEAREST;
     vec3 dir;
     float t_max = 1e30;
+    float dist = 0.0;
     if (light.flags.x == 0u) {
         dir = normalize(-light.direction.xyz);
     } else {
         vec3 to = light.position.xyz - p;
-        float dist = length(to);
+        dist = length(to);
         dir = to / max(dist, 1e-6);
         t_max = dist * 0.999;
     }
@@ -39,7 +43,12 @@ float velk_points_blocked(Light light, vec3 p, vec3 n, float lift, bool two_side
     ray.origin = p + (faces ? n : dir) * lift;
     ray.dir = dir;
     ++g_rays;
-    return trace_visibility(ray, max(t_max - lift, 0.0)) <= 0.5 ? 1.0 : 0.0;
+    if (trace_visibility(ray, max(t_max - lift, 0.0)) > 0.5) {
+        g_points_code = VELK_LIGHT_BLOCKER_CLEAR;
+        return 0.0;
+    }
+    g_points_code = velk_light_blocker_code(velk_ray_blocker_t + lift, dist);
+    return 1.0;
 }
 
 // This thread's rays and their walks' steps, into the frame's counts (pool header 86 and 87).
@@ -216,6 +225,8 @@ shared uint s_point_state[VELK_LIGHT_SPREAD_POINTS];
 shared uint s_point_kept[VELK_LIGHT_SPREAD_POINTS];
 shared uint s_point_kept_blockers[VELK_LIGHT_SPREAD_POINTS];
 shared uint s_slot_blocked[VELK_LIGHT_SPREAD_POINTS * VELK_LIGHT_SLOTS];
+// And of those, the nearest blocker code (velk_light_blocker_code), VELK_LIGHT_BLOCKER_CLEAR for none.
+shared uint s_slot_code[VELK_LIGHT_SPREAD_POINTS * VELK_LIGHT_SLOTS];
 shared uint s_slot_rays[VELK_LIGHT_SPREAD_POINTS * VELK_LIGHT_SLOTS];
 
 
@@ -389,10 +400,13 @@ void velk_points_trace_point(uint pool, uint i, uint frame, uint counts[VELK_LIG
         bool blocked = velk_points_blocked(velk_light_at(pc.lights_base + slots[s]), p, n, lift, (kind & VELK_LIGHT_TWO_SIDED) != 0u) > 0.0;
         if (spread) {
             atomicAdd(s_slot_rays[slot_base + s], 1u);
-            if (blocked) atomicAdd(s_slot_blocked[slot_base + s], 1u);
+            if (blocked) {
+                atomicAdd(s_slot_blocked[slot_base + s], 1u);
+                atomicMin(s_slot_code[slot_base + s], g_points_code);
+            }
         } else {
             value |= (blocked ? 15u : 0u) << (4u * s);
-            blockers |= (blocked ? VELK_LIGHT_BLOCKER_BLOCKED : VELK_LIGHT_BLOCKER_CLEAR) << (4u * s);
+            blockers |= (blocked ? g_points_code : VELK_LIGHT_BLOCKER_CLEAR) << (4u * s);
         }
     }
     if (lane == 0u) {

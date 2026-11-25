@@ -17,7 +17,8 @@ void velk_points_store_spread(uint point)
         }
         bool blocked = s_slot_blocked[at] != 0u;
         value |= (blocked ? 15u : 0u) << (4u * s);
-        blockers |= (blocked ? VELK_LIGHT_BLOCKER_BLOCKED : VELK_LIGHT_BLOCKER_CLEAR) << (4u * s);
+        blockers |= (blocked ? clamp(s_slot_code[at], VELK_LIGHT_BLOCKER_NEAREST, VELK_LIGHT_BLOCKER_FARTHEST)
+                             : VELK_LIGHT_BLOCKER_CLEAR) << (4u * s);
     }
     if (value == VELK_LIGHT_NONE) value = 0xEFFFFFFFu;
     VELK_LIGHT_WORDS.data[pw] = value;
@@ -99,6 +100,7 @@ void main()
                 for (uint u = lane; u < VELK_LIGHT_SPREAD_POINTS * VELK_LIGHT_SLOTS; u += VELK_LIGHT_TRACE_THREADS) {
                     s_slot_blocked[u] = 0u;
                     s_slot_rays[u] = 0u;
+                    s_slot_code[u] = VELK_LIGHT_BLOCKER_CLEAR;
                 }
                 memoryBarrierShared();
                 barrier();

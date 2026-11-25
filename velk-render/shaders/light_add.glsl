@@ -1,10 +1,14 @@
-#ifdef VELK_LIGHT_CODES
+#if defined(VELK_LIGHT_CODES) || defined(VELK_LIGHT_BLOCKERS)
 // What the points a pixel read say of its record's lights, set by velk_light_add_points in the
-// shaders that define VELK_LIGHT_CODES (the lighting while VELK_LIGHT_READ is set): the record's
-// first page, VELK_LIGHT_NONE where the pixel read no pieces' points; and a bit a slot whose light
-// one of the points has not traced yet, or a change made stale.
+// shaders that define VELK_LIGHT_CODES (the lighting while VELK_LIGHT_READ is set) or
+// VELK_LIGHT_BLOCKERS (the shadow pack): the record's first page, VELK_LIGHT_NONE where the pixel
+// read no pieces' points; a bit a slot whose light one of the points has not traced yet, or a
+// change made stale; and 4 bits a slot, how far away what kept its light from the points that
+// found it blocked is (velk_light_blocker_code, the nearest of theirs), VELK_LIGHT_BLOCKER_CLEAR
+// where none did.
 uint g_light_codes_first = 0xFFFFFFFFu;
 uint g_light_pending_slots = 0u;
+uint g_light_slot_codes = 0xFFFFFFFFu;
 
 // The slot of the record velk_light_add_points read (g_light_codes_first) that holds light `i`,
 // VELK_LIGHT_SLOTS for none.
@@ -200,10 +204,12 @@ bool velk_light_add_points(uint pool, uint first, uint t, uvec3 corners, vec3 b,
             velk_piece_light(pool, way.piece, first, corners, way.at, known, under);
         }
         if (!known) return false;
-#ifdef VELK_LIGHT_CODES
-        // What the points of the level read say of each light: which have not traced it yet.
+#if defined(VELK_LIGHT_CODES) || defined(VELK_LIGHT_BLOCKERS)
+        // What the points of the level read say of each light: which have not traced it yet, and
+        // how far away what kept it from those that found it blocked is.
         g_light_codes_first = first;
         g_light_pending_slots = 0u;
+        g_light_slot_codes = 0xFFFFFFFFu;
         {
             uint read_words[3];
             vec3 read_w;
@@ -218,6 +224,10 @@ bool velk_light_add_points(uint pool, uint first, uint t, uvec3 corners, vec3 b,
                 for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) {
                     uint c = (codes >> (4u * s)) & 15u;
                     if (c == VELK_LIGHT_BLOCKER_DUE) g_light_pending_slots |= 1u << s;
+                    uint had = (g_light_slot_codes >> (4u * s)) & 15u;
+                    if (velk_light_code_blocked(c) && c < had) {
+                        g_light_slot_codes = (g_light_slot_codes & ~(15u << (4u * s))) | (c << (4u * s));
+                    }
                 }
             }
         }

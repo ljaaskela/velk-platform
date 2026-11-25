@@ -264,6 +264,11 @@ set(VELK_RENDER_GLSL_SOURCES
     shaders/probe_cell.glsl
     shaders/probe_write.glsl
     shaders/reflect_resolve.glsl
+    shaders/shadow_apply.glsl
+    shaders/shadow_pack_main.glsl
+    shaders/shadow_soft.glsl
+    shaders/shadow_soften_main.glsl
+    shaders/shadow_tiles_main.glsl
     shaders/sort.glsl
     shaders/sun_visibility.glsl
     shaders/tiny_add.glsl

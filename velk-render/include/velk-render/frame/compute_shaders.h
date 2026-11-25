@@ -1054,6 +1054,16 @@ layout(set = 1, binding = 16, std430) buffer VelkLightCellWords { uint data[]; }
 // is velk-render/shaders/light_area.glsl; this defines VELK_LIGHT_AREA_GLSL.
 #include <velk-render/glsl/light_area.inc>
 
+// The softening of shadows, for the sun pass's and the soft shadows' passes, and the soft
+// shadows' words the lighting reads (velk-render/shaders/shadow_soft.glsl, VELK_SHADOW_SOFT_GLSL;
+// shadow_apply.glsl, VELK_SHADOW_APPLY_GLSL; shadow_pack_main.glsl, shadow_tiles_main.glsl and
+// shadow_soften_main.glsl, the soft shadows' passes).
+#include <velk-render/glsl/shadow_soft.inc>
+#include <velk-render/glsl/shadow_apply.inc>
+#include <velk-render/glsl/shadow_pack_main.inc>
+#include <velk-render/glsl/shadow_tiles_main.inc>
+#include <velk-render/glsl/shadow_soften_main.inc>
+
 // The lights by where they reach, rebuilt each frame (DeferredPath::build_light_grid), in the
 // culling arena at the light header's word 18, 0xFFFFFFFF if there is none. Its words: how many
 // buckets, a power of two; the size of its cubes, a float; how many lights are listed
@@ -1652,7 +1662,8 @@ void main()
 
 [[maybe_unused]] constexpr string_view deferred_lighting_main_src = R"(
 #define VELK_LIGHT_WORDS velk_light_cell_words
-)" VELK_LIGHT_POOL_GLSL VELK_LIGHT_SLOTS_GLSL VELK_LIGHT_READ_GLSL VELK_PROBE_GLSL VELK_SURFACE_LIGHTS_GLSL VELK_SUN_VISIBILITY_GLSL R"(
+)" VELK_LIGHT_POOL_GLSL VELK_LIGHT_SLOTS_GLSL VELK_LIGHT_READ_GLSL VELK_PROBE_GLSL VELK_SURFACE_LIGHTS_GLSL VELK_SUN_VISIBILITY_GLSL
+    VELK_SHADOW_SOFT_GLSL VELK_SHADOW_APPLY_GLSL R"(
 // The sun pass's terms in pc.mode: its image plus one in the low bits, 0 for none (sun_rays_main_src,
 // or sun_soften_main_src softened), and in the top four (VELK_SUN_VIEW) what to show in place of
 // the lit image: 0 the lit image, 1 what the lighting takes of the sun, and of the softening 2
@@ -1799,6 +1810,10 @@ void main()
             velk_sun_light = velk_sun_index();
             velk_sun_through = texelFetch(velk_textures[nonuniformEXT(sun_rays - 1u)], coord, 0).x;
         }
+        // The soft shadows (their first word plus one in pc.cam_pos.w's bits, 0 for none): what of
+        // each light their softening spread over its penumbra, in place of what the points keep.
+        uint shadow_base = floatBitsToUint(pc.cam_pos.w);
+        if (points && shadow_base != 0u) velk_shadow_apply(shadow_base - 1u, coord, point_lights, point_through);
 #ifdef VELK_LIGHT_CODES
         // For the log, while VELK_LIGHT_READ is set: this pixel's lights that bring it light and
         // whose points have not traced them yet, or a change made stale; before its points are
@@ -2030,41 +2045,7 @@ void main()
 // pc.output_image_id, its y as the sun rays', and for VELK_SUN_VIEW the penumbra's width in pixels
 // before the cap in z, 0 where there is none, and in w the blocked pixels the search found times
 // 32 plus the pixels the filter took. Built on the deferred prelude.
-[[maybe_unused]] constexpr string_view sun_soften_main_src = VELK_SUN_VISIBILITY_GLSL R"(
-const uint kSunTaps = 16u;
-const float kSunSearchPixels = 32.0;
-const float kSunPenumbraPixels = 64.0;
-
-// Whether the pixel at `q` is on a surface like the one at `p` facing `n`.
-bool velk_sun_alike(ivec2 q, vec3 p, vec3 n, out vec3 pq)
-{
-    vec3 nq = texelFetch(velk_textures[nonuniformEXT(pc.normal_tex_id)], q, 0).xyz;
-    pq = texelFetch(velk_textures[nonuniformEXT(pc.worldpos_tex_id)], q, 0).xyz;
-    if (dot(nq, nq) < 1e-6) return false;
-    if (dot(normalize(nq), n) < 0.7) return false;
-    return abs(dot(n, pq - p)) < 0.05 * length(pq - p) + 0.002 * length(p);
-}
-
-// Tap `k` of kSunTaps of a disk `radius` pixels wide around `c`, turned by `turn`.
-ivec2 velk_sun_tap(ivec2 c, uint k, float radius, float turn)
-{
-    float r = sqrt((float(k) + 0.5) / float(kSunTaps)) * radius;
-    float a = float(k) * 2.39996323 + turn;
-    return c + ivec2(round(vec2(cos(a), sin(a)) * r));
-}
-
-// Where in the screen, in pixels, the point `u` off `p` perpendicular to the light `L` lands when
-// carried along the light onto the plane through `p` facing `n` (`lean` its N.L, away from zero):
-// false behind the camera.
-bool velk_sun_land(vec3 p, vec3 n, vec3 L, float lean, vec3 u, mat4 vp, out vec2 px)
-{
-    vec4 clip = vp * vec4(p + u - L * (dot(n, u) / lean), 1.0);
-    px = vec2(0.0);
-    if (!(clip.w > 1e-6)) return false;
-    px = (clip.xy / clip.w * 0.5 + 0.5) * vec2(float(pc.width), float(pc.height));
-    return true;
-}
-
+[[maybe_unused]] constexpr string_view sun_soften_main_src = VELK_SUN_VISIBILITY_GLSL VELK_SHADOW_SOFT_GLSL R"(
 void main()
 {
     ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
@@ -2157,6 +2138,22 @@ void main()
     imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord, vec4(seen / weight, hard.y, wide, count * 32.0 + weight));
 }
 )";
+
+// The soft shadows from the points of light (DeferredPath::emit_shadow_soft_passes), three passes
+// built on the deferred prelude with the light grid: what each pixel's lights with a size are
+// (shadow_pack_main.glsl), the tiles near an edge to soften (shadow_tiles_main.glsl), and the
+// softening of those (shadow_soften_main.glsl), which the lighting then takes (velk_shadow_apply).
+[[maybe_unused]] constexpr string_view shadow_pack_main_src = R"(
+#define VELK_LIGHT_WORDS velk_light_cell_words
+#define VELK_LIGHT_BLOCKERS
+)" VELK_LIGHT_POOL_GLSL VELK_LIGHT_SLOTS_GLSL VELK_LIGHT_READ_GLSL VELK_SUN_VISIBILITY_GLSL VELK_SHADOW_SOFT_GLSL
+    VELK_SHADOW_PACK_MAIN_GLSL;
+[[maybe_unused]] constexpr string_view shadow_tiles_main_src = R"(
+#define VELK_LIGHT_WORDS velk_light_cell_words
+)" VELK_LIGHT_POOL_GLSL VELK_SHADOW_SOFT_GLSL VELK_SHADOW_TILES_MAIN_GLSL;
+[[maybe_unused]] constexpr string_view shadow_soften_main_src = R"(
+#define VELK_LIGHT_WORDS velk_light_cell_words
+)" VELK_LIGHT_POOL_GLSL VELK_SHADOW_SOFT_GLSL VELK_SHADOW_SOFTEN_MAIN_GLSL;
 
 // Compute ray tracer prelude. Fixed header that precedes all material
 // snippets. Declares extensions, storage-image binding, shape struct,

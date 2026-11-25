@@ -257,6 +257,15 @@ uint32_t sun_pass_light(SunPass mode, const RenderView& render_view)
 // (VELK_SUN_SHOW_SHIFT). 0 when not set.
 uint32_t sun_view() { return env_uint("VELK_SUN_VIEW", 1, 5); }
 
+// The soft shadows' words (VELK_SHADOW_SOFT_GLSL): a header of kShadowHeaderWords, whose words are
+// the pixels a row, the rows, the softening's dispatch (three words from kShadowArgs) and the
+// tiles listed; kShadowLights words and one more a pixel; and two words a tile of kShadowTile by
+// kShadowTile pixels, its edge flags and the list of tiles.
+constexpr uint32_t kShadowHeaderWords = 8;
+constexpr uint32_t kShadowArgs = 2;
+constexpr uint32_t kShadowLights = 4;
+constexpr uint32_t kShadowTile = 8;
+
 // Composes a deferred-family compute pipeline: the shared prelude
 // (deferred_compute_prelude_src) + the given main() + the intersect_shape
 // and velk_eval_shadow switches built from the frame's snippet set. The
@@ -968,6 +977,7 @@ void DeferredPath::build_passes(IViewEntry& entry,
         emit_light_probes_pass(vs, render_view, ctx, graph);
         emit_reflection_pass(vs, render_view, ctx, graph);
         emit_sun_rays_pass(vs, render_view, ctx, graph);
+        emit_shadow_soft_passes(vs, render_view, ctx, graph);
         emit_lighting_pass(entry, vs, render_view, color_target, ctx,
                            static_cast<int>(vs.gbuffer_size.x),
                            static_cast<int>(vs.gbuffer_size.y), graph);
@@ -2551,6 +2561,133 @@ void DeferredPath::emit_sun_rays_pass(ViewState& vs, const RenderView& render_vi
     vs.sun_shaded = soft ? vs.sun_soft : vs.sun_rays;
 }
 
+void DeferredPath::emit_shadow_soft_passes(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph)
+{
+    vs.shadow_soft_word = kLightNone;
+    const LightPool& pool = vs.instance_cull.light_pool;
+    if (!vs.gbuffer || vs.gbuffer_size.x == 0 || vs.gbuffer_size.y == 0 || pool.segments.empty() || !vs.pixel_words.valid()
+        || !vs.light_header.valid()) {
+        return;
+    }
+    // A light with a size (a directional light's angle, a point or spot light's radius, an area
+    // light's half side), other than the one the sun pass shades.
+    const bool sun_shaded = static_cast<bool>(vs.sun_shaded);
+    bool sized = false;
+    for (size_t i = 0; i < render_view.lights.size() && !sized; ++i) {
+        const GpuLight& l = render_view.lights[i];
+        if (sun_shaded && i == vs.sun_skip) continue;
+        sized = l.flags[0] <= static_cast<uint32_t>(LightType::Area) && l.params[3] > 0.f;
+    }
+    if (!sized) return;
+    auto arena = ctx.resources->shared_arena(IRenderBackend::kGlobalCulling, sizeof(uint32_t));
+    if (!arena) return;
+
+    const uint32_t width = vs.gbuffer_size.x;
+    const uint32_t height = vs.gbuffer_size.y;
+    const uint32_t tiles_x = (width + kShadowTile - 1u) / kShadowTile;
+    const uint32_t tiles_y = (height + kShadowTile - 1u) / kShadowTile;
+    const uint64_t pixels = uint64_t(width) * height;
+    const uint64_t tiles = uint64_t(tiles_x) * tiles_y;
+    if (!vs.shadow_soft.valid() || vs.shadow_soft_size != vs.gbuffer_size) {
+        vs.shadow_soft = arena->alloc((kShadowHeaderWords + pixels * (kShadowLights + 1u) + 2u * tiles) * sizeof(uint32_t));
+        vs.shadow_soft_size = vs.gbuffer_size;
+        if (vs.shadow_soft.valid()) {
+            const uint32_t header[kShadowHeaderWords] = {width, height, 0u, 1u, 1u, 0u, 0u, 0u};
+            arena->write_at(vs.shadow_soft.offset(), header, sizeof(header));
+        }
+    }
+    if (!vs.shadow_soft.valid()) return;
+
+    auto pack_pipeline = compose_deferred_compute_pipeline(ctx, shadow_pack_main_src, 0x5348'4450'4143'4b01ULL, false, 5u);
+    auto tiles_pipeline = compose_deferred_compute_pipeline(ctx, shadow_tiles_main_src, 0x5348'4454'494c'4501ULL, false, 5u);
+    auto soften_pipeline = compose_deferred_compute_pipeline(ctx, shadow_soften_main_src, 0x5348'4453'4f46'5401ULL, false, 5u);
+    if (!pack_pipeline || !tiles_pipeline || !soften_pipeline) return;
+
+    const auto base = static_cast<uint32_t>(vs.shadow_soft.offset() / sizeof(uint32_t));
+    DeferredComputePushC pc{};
+    pc.globals_base = render_view.view_globals_base;
+    pc.spare0 = base;
+    pc.cam_pos[0] = render_view.cam_pos.x;
+    pc.cam_pos[1] = render_view.cam_pos.y;
+    pc.cam_pos[2] = render_view.cam_pos.z;
+    pc.normal_tex_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Normal));
+    pc.worldpos_tex_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::WorldPos));
+    pc.material_tex_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::MaterialParams));
+    pc.emissive_tex_id = vs.gbuffer->attachment(static_cast<uint32_t>(GBufferAttachment::Emissive));
+    pc.width = width;
+    pc.height = height;
+    pc.light_count = static_cast<uint32_t>(render_view.lights.size());
+    pc.lights_base = render_view.lights_base;
+    pc.cells_header = static_cast<uint32_t>(vs.light_header.offset() / sizeof(uint32_t));
+    // As the lighting reads the points of light: the pool, the pixel ids and kLightPixels.
+    pc.spare3 = pool.word();
+    pc.spare4 = pixel_ids_word(vs);
+    pc.spare2 = vs.visibility_size.x;
+    std::memcpy(&pc.spare5, &kLightPixels, sizeof(float));
+    // The sun the sun pass shades is not taken.
+    pc.mode = sun_shaded ? 1u : 0u;
+
+    const auto dispatch = [&](IGpuCommandBuffer& cmd, const IGpuPipeline::Ptr& pipeline, uint32_t groups_x, uint32_t groups_y) {
+        DispatchCall dc{};
+        dc.pipeline = pipeline.get();
+        dc.groups_x = groups_x;
+        dc.groups_y = groups_y;
+        dc.groups_z = 1;
+        dc.root_constants_size = sizeof(pc);
+        std::memcpy(dc.root_constants, &pc, sizeof(pc));
+        cmd.record_dispatch(dc);
+        cmd.record_global_barrier();
+    };
+    // The arena's buffer after the allocation above, which may have replaced it.
+    IGpuBuffer* arena_buffer = arena->buffer();
+    if (!arena_buffer) return;
+    bool packed = false;
+    bool softened = false;
+    bool dirty = true;
+    emit_cached_view_pass(vs.shadow_pack_pass, dirty,
+                          view_pass_name(vs.instance_cull.chosen_by_other, "deferred.shadow_pack", "other:deferred.shadow_pack"), graph,
+                          [&](CachedPassRecording& rec) {
+        auto cmd = ctx.backend->create_command_buffer();
+        if (!cmd) return;
+        cmd->begin_recording();
+        cmd->push_label("DeferredPath: soft shadows' lights and tiles");
+        cmd->record_global_barrier();
+        dispatch(*cmd, pack_pipeline, tiles_x, tiles_y);
+        dispatch(*cmd, tiles_pipeline, (tiles_x + 7u) / 8u, (tiles_y + 7u) / 8u);
+        cmd->pop_label();
+        cmd->end_recording();
+        rec.cmd = std::move(cmd);
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
+        rec.held.push_back(pack_pipeline);
+        rec.held.push_back(tiles_pipeline);
+        packed = true;
+    });
+    dirty = true;
+    emit_cached_view_pass(vs.shadow_soften_pass, dirty,
+                          view_pass_name(vs.instance_cull.chosen_by_other, "deferred.shadow_soften", "other:deferred.shadow_soften"), graph,
+                          [&](CachedPassRecording& rec) {
+        auto cmd = ctx.backend->create_command_buffer();
+        if (!cmd) return;
+        cmd->begin_recording();
+        cmd->push_label("DeferredPath: soft shadows' softening");
+        cmd->record_global_barrier();
+        DispatchCall dc{};
+        dc.pipeline = soften_pipeline.get();
+        dc.root_constants_size = sizeof(pc);
+        std::memcpy(dc.root_constants, &pc, sizeof(pc));
+        cmd->record_dispatch_indirect(dc, arena_buffer, uint64_t(base + kShadowArgs) * sizeof(uint32_t));
+        cmd->record_global_barrier();
+        cmd->pop_label();
+        cmd->end_recording();
+        rec.cmd = std::move(cmd);
+        rec.reads.push_back(interface_pointer_cast<IGpuResource>(vs.gbuffer));
+        rec.held.push_back(soften_pipeline);
+        softened = true;
+    });
+    // The lighting reads the softened shadows only if both passes were recorded; else the cache's.
+    if (packed && softened) vs.shadow_soft_word = base;
+}
+
 void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
                                       const RenderView& render_view,
                                       IRenderTarget::Ptr color_target,
@@ -2655,6 +2792,12 @@ void DeferredPath::emit_lighting_pass(IViewEntry& /*entry*/, ViewState& vs,
             | (sun_view() << 28u);
     if (pc.mode != vs.lighting_sun_mode) vs.lighting_dirty = true;
     vs.lighting_sun_mode = pc.mode;
+    // The soft shadows (emit_shadow_soft_passes), their first word plus one in cam_pos.w's bits,
+    // 0 for none this frame.
+    const uint32_t shadow_word = vs.shadow_soft_word != kLightNone ? vs.shadow_soft_word + 1u : 0u;
+    std::memcpy(&pc.cam_pos[3], &shadow_word, sizeof(shadow_word));
+    if (shadow_word != vs.lighting_shadow_word) vs.lighting_dirty = true;
+    vs.lighting_shadow_word = shadow_word;
 
     // Writes the finished image and blits it to the target.
     emit_cached_view_pass(
