@@ -186,7 +186,45 @@ target_include_directories(velk_render
 # GLSL built into the library: each source in shaders/ becomes a header defining it as a string
 # literal macro, VELK_<NAME>_GLSL, which the frame headers include as <velk-render/glsl/<name>.inc>.
 set(VELK_RENDER_GLSL_SOURCES
+    shaders/cut.glsl
+    shaders/cut_box.glsl
+    shaders/depth_pyramid_compute.glsl
     shaders/fragment_triangle.glsl
+    shaders/instance_cluster_fill.glsl
+    shaders/instance_cluster_runs.glsl
+    shaders/instance_cull_compute_1.glsl
+    shaders/instance_cull_compute_2.glsl
+    shaders/instance_cull_compute_3.glsl
+    shaders/instance_cut_begin.glsl
+    shaders/instance_cut_choose_1.glsl
+    shaders/instance_cut_choose_2.glsl
+    shaders/instance_cut_choose_3.glsl
+    shaders/instance_cut_draw_1.glsl
+    shaders/instance_cut_draw_2.glsl
+    shaders/instance_cut_draw_3.glsl
+    shaders/instance_cut_pages_1.glsl
+    shaders/instance_cut_pages_2.glsl
+    shaders/instance_cut_place_1.glsl
+    shaders/instance_cut_place_2.glsl
+    shaders/instance_cut_rename_1.glsl
+    shaders/instance_cut_rename_2.glsl
+    shaders/instance_cut_stale_1.glsl
+    shaders/instance_cut_stale_2.glsl
+    shaders/instance_cut_top_1.glsl
+    shaders/instance_cut_top_2.glsl
+    shaders/instance_cut_tree_1.glsl
+    shaders/instance_cut_tree_2.glsl
+    shaders/instance_cut_visible_1.glsl
+    shaders/instance_cut_visible_2.glsl
+    shaders/instance_items.glsl
+    shaders/instance_partition_cull_1.glsl
+    shaders/instance_partition_cull_2.glsl
+    shaders/instance_retest_compute_1.glsl
+    shaders/instance_retest_compute_2.glsl
+    shaders/instance_retest_compute_3.glsl
+    shaders/instance_tiny_args.glsl
+    shaders/instance_tiny_unpack.glsl
+    shaders/lbvh.glsl
     shaders/light_add.glsl
     shaders/light_changes_main_1.glsl
     shaders/light_changes_main_2.glsl
@@ -217,11 +255,18 @@ set(VELK_RENDER_GLSL_SOURCES
     shaders/light_trace_main_1.glsl
     shaders/light_trace_main_2.glsl
     shaders/light_trace_main_tail.glsl
+    shaders/lod_select.glsl
+    shaders/lod_take.glsl
+    shaders/occlusion.glsl
     shaders/probe.glsl
     shaders/probe_cell.glsl
     shaders/probe_write.glsl
     shaders/reflect_resolve.glsl
+    shaders/sort.glsl
     shaders/sun_visibility.glsl
+    shaders/tiny_add.glsl
+    shaders/tiny_draw.glsl
+    shaders/trace.glsl
 )
 set(VELK_RENDER_GLSL_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
 set(velk_render_glsl_outputs "")
