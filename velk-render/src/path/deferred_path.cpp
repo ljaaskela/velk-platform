@@ -863,6 +863,12 @@ void DeferredPath::build_passes(IViewEntry& entry,
 
     auto* gbuffer_handle = ensure_gbuffer(vs, render_view.width, render_view.height, ctx, graph);
     if (!gbuffer_handle) return;
+    // While VELK_LIGHT_READ is set: the frame recorded for this view, the view by its state as the
+    // light log's `light frame` lines name it.
+    if (std::getenv("VELK_LIGHT_READ")) {
+        VELK_LOG(I, "light submit %p,%llu", static_cast<const void*>(&vs.instance_cull),
+                 static_cast<unsigned long long>(ctx.present_counter));
+    }
 
     // Draws by cluster name the culling arena's buffer, which growing it replaces.
     const uint32_t culling_generation = vs.instance_cull.arena_generation;
@@ -2473,7 +2479,10 @@ bool DeferredPath::prepare_sun_pass(ViewState& vs, const RenderView& render_view
     if (!vs.sun_rays) make(vs.sun_rays);
     if (soft && !vs.sun_soft) make(vs.sun_soft);
     if (!vs.sun_rays || (soft && !vs.sun_soft)) return false;
-    vs.sun_pipeline = compose_deferred_compute_pipeline(ctx, sun_rays_main_src, 0x5355'4e52'4159'0002ULL, false, 5u);
+    // While VELK_LIGHT_READ names pixels, the sun pass that also counts its rays (SUN_RAYS) for the log.
+    vs.sun_pipeline = vs.instance_cull.light_pool.reads
+        ? compose_deferred_compute_pipeline(ctx, sun_rays_count_main_src, 0x5355'4e52'4159'0002ULL, false, 5u)
+        : compose_deferred_compute_pipeline(ctx, sun_rays_main_src, 0x5355'4e52'4159'0001ULL);
     if (soft) vs.sun_soften_pipeline = compose_deferred_compute_pipeline(ctx, sun_soften_main_src, 0x5355'4e53'4f46'0001ULL);
     if (!vs.sun_pipeline || (soft && !vs.sun_soften_pipeline)) {
         vs.sun_pipeline = {};
@@ -2509,7 +2518,7 @@ void DeferredPath::emit_sun_rays_pass(ViewState& vs, const RenderView& render_vi
     pc.height = height;
     pc.light_count = static_cast<uint32_t>(render_view.lights.size());
     pc.lights_base = render_view.lights_base;
-    // The pool, for the count of the rays (SUN_RAYS).
+    // The pool, for the count of the rays (SUN_RAYS) of the sun pass that counts them.
     const LightPool& pool = vs.instance_cull.light_pool;
     pc.spare3 = pool.segments.empty() || !vs.light_header.valid() ? kLightNone : pool.word();
     pc.cells_header = vs.light_header.valid() ? static_cast<uint32_t>(vs.light_header.offset() / sizeof(uint32_t)) : 0u;

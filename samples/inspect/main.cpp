@@ -577,6 +577,8 @@ int main(int argc, char* argv[])
             double peak_cull_mb = 0.0;
             char peak_at[64] = "";
 
+            // Whether the renderer logs VELK_LIGHT_READ's pixels and the light counts every frame.
+            const bool light_read = std::getenv("VELK_LIGHT_READ") != nullptr;
             // One frame of the run. False when the window closed.
             const auto frame = [&]() {
                 if (!app.poll()) {
@@ -810,7 +812,11 @@ int main(int argc, char* argv[])
                 bool have_first = false;
                 for (long f = 0; f < settle_from + settle_frames; ++f) {
                     inspect::place_movers(built, f);
+                    // With VELK_LIGHT_READ, the frame's bounds in the log, so that the renderer's
+                    // `light submit` line between them names the frame it records for frame f.
+                    if (light_read) VELK_LOG(I, "inspect: %s frame %ld begin", name, f);
                     if (!frame()) return 1;
+                    if (light_read) VELK_LOG(I, "inspect: %s frame %ld end", name, f);
                     if (!built.movers.empty() && f >= kSettleFrom && f < built.frames) {
                         motion_ms.push_back(frame_ms(*backend));
                         add_passes(motion_passes);

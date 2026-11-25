@@ -346,18 +346,21 @@ inline constexpr uint32_t kLightPoolAheadEvery = 60;
                                                     or a change made stale */                                       \
     X(SlotPendingBeyond, SLOT_PENDING_BEYOND, 204) /* likewise for the lights beyond the K */                      \
     X(SlotRays, SLOT_RAYS, 205)                  /* the slot pass's rays this frame that walked */                  \
-    X(SunRays, SUN_RAYS, 206)                    /* the sun pass's rays this frame that walked */                   \
+    X(SunRays, SUN_RAYS, 206)                    /* the sun pass's rays this frame that walked; counted only \
+                                                    with VELK_LIGHT_READ, else 0 */                                  \
     X(SlotPendingInsideMost, SLOT_PENDING_INSIDE_MOST, 207) /* the most of a frame since the log: \
                                                     SLOT_PENDING_INSIDE, SLOT_PENDING_BEYOND, SLOT_RAYS, SUN_RAYS, \
                                                     four words, which the log clears */                             \
     X(LastRaysCast, LAST_RAYS_CAST, 211)         /* the last frame's RAYS_CAST, SLOT_RAYS, SUN_RAYS, \
-                                                    SLOT_PENDING_INSIDE and SLOT_PENDING_BEYOND: five words, the \
-                                                    same frame's, which the sweep's begin copies */                 \
-    X(ReadPixels, READ_PIXELS, 216)              /* VELK_LIGHT_READ's pixels, x | y << 16, kLightNone for none: \
+                                                    SLOT_PENDING_INSIDE, SLOT_PENDING_BEYOND and READ_STAMP: six \
+                                                    words, the same frame's, which the sweep's begin copies */      \
+    X(ReadStamp, READ_STAMP, 217)                /* with VELK_LIGHT_READ: the frame the lighting last ran in \
+                                                    (present_counter), so that the copy above says its frame */     \
+    X(ReadPixels, READ_PIXELS, 218)              /* VELK_LIGHT_READ's pixels, x | y << 16, kLightNone for none: \
                                                     kLightReadPixels words */                                        \
-    X(ReadTerms, READ_TERMS, 220)                /* the lighting's terms at them, kLightReadWords each \
+    X(ReadTerms, READ_TERMS, 222)                /* the lighting's terms at them, kLightReadWords each \
                                                     (VELK_LIGHT_READ_*) */                                           \
-    X(HeaderEnd, HEADER_END, 556)
+    X(HeaderEnd, HEADER_END, 558)
 
 #define VELK_LIGHT_POOL_CPP_WORD(cpp, glsl, word) inline constexpr uint32_t kLightPool##cpp = word;
 VELK_LIGHT_POOL_HEADER(VELK_LIGHT_POOL_CPP_WORD)
@@ -6502,6 +6505,9 @@ void main()
             light_words.data[pool + VELK_POOL_LAST_RAYS_CAST + 2u] = light_words.data[pool + VELK_POOL_SUN_RAYS];
             light_words.data[pool + VELK_POOL_LAST_RAYS_CAST + 3u] = light_words.data[pool + VELK_POOL_SLOT_PENDING_INSIDE];
             light_words.data[pool + VELK_POOL_LAST_RAYS_CAST + 4u] = light_words.data[pool + VELK_POOL_SLOT_PENDING_BEYOND];
+            // And the frame these counts are of: the lighting writes it last in a frame
+            // (VELK_LIGHT_READ only), so this begin of the next one finds it still that frame's.
+            light_words.data[pool + VELK_POOL_LAST_RAYS_CAST + 5u] = light_words.data[pool + VELK_POOL_READ_STAMP];
             for (uint k = 0u; k < 4u; ++k) {
                 uint count = light_words.data[pool + VELK_POOL_SLOT_PENDING_INSIDE + k];
                 light_words.data[pool + VELK_POOL_SLOT_PENDING_INSIDE_MOST + k] =

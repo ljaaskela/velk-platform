@@ -5637,6 +5637,14 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             VELK_LOG(I, "light read pool (now %llu): last frame %u asks for pieces, %u untraced points listed; summed %u pieces made, "
                         "%u asks not made",
                      static_cast<unsigned long long>(ctx.present_counter), counts[0], counts[3], counts[1], counts[2]);
+            // One frame's counts (LAST_RAYS_CAST on), with the frame they are of (READ_STAMP as the
+            // sweep copied it), the view by its state as `light submit` names it.
+            uint32_t last[6] = {};
+            arena->read_at(pool.header.offset() + uint64_t(kLightPoolLastRaysCast) * sizeof(uint32_t), last, sizeof(last));
+            VELK_LOG(I, "light frame %p,%u (now %llu): rays %u of the points, %u of the slot pass, %u of the sun pass; pending %u "
+                        "among the slot pass's lights, %u beyond them",
+                     static_cast<const void*>(&state), last[5], static_cast<unsigned long long>(ctx.present_counter), last[0],
+                     last[1], last[2], last[3], last[4]);
             for (uint32_t k = 0; k < kLightReadPixels; ++k) {
                 const uint32_t packed = r[k];
                 if (packed == kLightNone) continue;

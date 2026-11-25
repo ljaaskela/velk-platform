@@ -1815,6 +1815,12 @@ void main()
 {
     ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
     if (coord.x >= int(pc.width) || coord.y >= int(pc.height)) return;
+    // While VELK_LIGHT_READ names pixels: the frame the lighting ran in (VELK_POOL_READ_STAMP),
+    // which the next frame's sweep copies with this frame's counts.
+    if (coord.x == 0 && coord.y == 0 && pc.spare3 != VELK_LIGHT_NONE
+        && velk_light_cell_words.data[pc.spare3 + VELK_POOL_READ_PIXELS] != VELK_LIGHT_NONE) {
+        velk_light_cell_words.data[pc.spare3 + VELK_POOL_READ_STAMP] = VELK_GLOBALS.present_counter;
+    }
 
     vec2 uv = (vec2(coord) + 0.5) / vec2(float(pc.width), float(pc.height));
     vec4 albedo = velk_texture(pc.albedo_tex_id, uv);
@@ -2042,9 +2048,36 @@ void main()
 // the G-buffer's surface, for the lighting to take in place of what the sun's points keep. Writes
 // to pc.output_image_id the visibility in x and in y how far away what was in the way is: 0 where
 // nothing was, -1 where the surface faces away from the sun. Clear where there is no surface or
-// no sun. Adds the rays that walked to the pool's SUN_RAYS, the pool's word in pc.spare3
-// (VELK_LIGHT_NONE for none). Built on the deferred prelude with the light grid.
-[[maybe_unused]] constexpr string_view sun_rays_main_src = R"(
+// no sun. Built on the deferred prelude.
+[[maybe_unused]] constexpr string_view sun_rays_main_src = VELK_SUN_VISIBILITY_GLSL R"(
+void main()
+{
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= int(pc.width) || coord.y >= int(pc.height)) return;
+    vec2 uv = (vec2(coord) + 0.5) / vec2(float(pc.width), float(pc.height));
+    vec3 n = velk_texture(pc.normal_tex_id, uv).xyz;
+    uint sun = velk_sun_index();
+    vec4 result = vec4(1.0, 0.0, 0.0, 1.0);
+    if (dot(n, n) >= 1e-6 && sun != 0xFFFFFFFFu) {
+        vec3 pos = velk_texture(pc.worldpos_tex_id, uv).xyz;
+        // A thin sheet passing light through is lit from the side the sun is on.
+        bool two_sided = velk_texture(pc.emissive_tex_id, uv).a > 0.0;
+        bool stand_in = velk_stand_in_unpack(velk_texture(pc.material_tex_id, uv).a) >= 0.0;
+        float blocker_t;
+        bool facing_away;
+        result.x = velk_sun_visibility(pos, normalize(n), two_sided, stand_in, -velk_light_at(pc.lights_base + sun).direction.xyz,
+                                       blocker_t, facing_away);
+        result.y = facing_away ? -1.0 : blocker_t;
+    }
+    imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord, result);
+}
+)";
+
+// The sun pass as sun_rays_main_src, which also adds the rays that walked to the pool's SUN_RAYS,
+// the pool's word in pc.spare3 (VELK_LIGHT_NONE for none), for the log: used only while
+// VELK_LIGHT_READ is set, so that the sun pass otherwise carries no count. Built on the deferred
+// prelude with the light grid.
+[[maybe_unused]] constexpr string_view sun_rays_count_main_src = R"(
 #define VELK_LIGHT_WORDS velk_light_cell_words
 )" VELK_LIGHT_POOL_HEADER_GLSL VELK_SUN_VISIBILITY_GLSL R"(
 shared uint s_sun_rays;
