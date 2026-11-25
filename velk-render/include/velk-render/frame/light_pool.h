@@ -339,8 +339,6 @@ inline constexpr uint32_t kLightPoolAheadEvery = 60;
     X(RefineGroups, REFINE_GROUPS, 200)          /* the point dispatch's groups for refines, after the spread ones */ \
     X(SunSkip, SUN_SKIP, 201)                    /* the light the sun pass shades this frame, which points of \
                                                     what is drawn opaque leave untraced; kLightNone for none */      \
-    X(Hard, HARD, 202)                           /* not 0 with VELK_LIGHT_HARD: a point casts a ray to each light's \
-                                                    centre, blocked or not, and settles once each light has had one */ \
     X(Pending, PENDING, 203)                     /* with VELK_LIGHT_READ: the lit pixels' lights this frame that \
                                                     bring them light and whose points have not traced them yet, or \
                                                     a change made stale; else 0 */                                   \
@@ -2597,8 +2595,8 @@ void velk_points_trace_point(uint pool, uint i, uint frame, uint counts[VELK_LIG
     uint state = VELK_LIGHT_WORDS.data[pw + 1u];
     // Which trace this is, as its listing counted it.
     uint traces = state == VELK_LIGHT_NONE ? 0u : state >> 28u;
-    // VELK_LIGHT_HARD: a ray to each light's centre, blocked or not, its light then settled.
-    bool hard = VELK_LIGHT_WORDS.data[pool + VELK_POOL_HARD] != 0u;
+    // A ray to each light's centre, blocked or not, its light then settled.
+    const bool hard = true;
     VelkPointPlace at;
     at.instance = instance;
     at.vertex_word = vertex_word;
@@ -2908,7 +2906,7 @@ void velk_points_trace_point(uint pool, uint i, uint frame, uint counts[VELK_LIG
             }
         }
         // Stored as one more. With no light left once the sun pass's is taken out, settled at once;
-        // VELK_LIGHT_HARD, settled once each light has had its ray.
+        // Hard, settled once each light has had its ray.
         traces = sun_left && full == 0u ? VELK_LIGHT_WARM_TRACES - 1u
                : hard && fully ? VELK_LIGHT_WARM_TRACES - 1u
                : fully && four ? (restart ? VELK_LIGHT_WARM_TRACES - 1u : 3u) : 0u;
@@ -2935,7 +2933,7 @@ void velk_points_trace_point(uint pool, uint i, uint frame, uint counts[VELK_LIG
             bool first_ray = had == VELK_LIGHT_BLOCKER_UNTRACED;
             if (first_ray) step = 1.0;
             if (had == VELK_LIGHT_BLOCKER_STALE) step = 1.0 / float(VELK_LIGHT_WARM_TRACES);
-            // VELK_LIGHT_HARD: the ray's answer replaces what the light had.
+            // Hard: the ray's answer replaces what the light had.
             if (hard) step = 1.0;
             if (blocked > 0.0 || first_ray || had == VELK_LIGHT_BLOCKER_STALE || hard) {
                 uint code = blocked > 0.0 ? velk_light_blocker_code(velk_ray_blocker_t) : VELK_LIGHT_BLOCKER_CLEAR;
@@ -2950,7 +2948,7 @@ void velk_points_trace_point(uint pool, uint i, uint frame, uint counts[VELK_LIG
         }
         // Not settled while a light that brings something here has had no ray, or is stale: it
         // warms on. One that brings nothing here (moved out of reach since a change) needs none.
-        // VELK_LIGHT_HARD: settled once none is left.
+        // Hard: settled once none is left.
         bool due_left = false;
         for (uint t = 0u; t < VELK_LIGHT_SLOTS; ++t) {
             uint code = (blockers >> (4u * t)) & 15u;
@@ -6649,9 +6647,6 @@ inline bool ensure_light_pool(LightPool& pool, IGpuArena& arena, uint64_t device
     // A development aid: with VELK_PATCH_OUTSIDE set, the trace counts the flat patch points it
     // traces outside their patch's triangles, for the log.
     initial[kLightPoolPatchOutside] = std::getenv("VELK_PATCH_OUTSIDE") ? 1u : 0u;
-    // While it is being tried: with VELK_LIGHT_HARD set, a point casts a ray to each light's
-    // centre, blocked or not, and settles once each light has had one.
-    initial[kLightPoolHard] = std::getenv("VELK_LIGHT_HARD") ? 1u : 0u;
     // A development aid: VELK_LIGHT_READ=x,y;x,y;... names up to kLightReadPixels pixels whose
     // lighting terms the lighting writes and the log prints.
     for (uint32_t k = 0; k < kLightReadPixels; ++k) initial[kLightPoolReadPixels + k] = kLightNone;
