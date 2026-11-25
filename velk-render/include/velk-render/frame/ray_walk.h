@@ -91,9 +91,10 @@ int velk_ray_deepest = 0;
 // light. For the shader to clear before tracing and read after.
 float velk_ray_blocker_t = 0.0;
 
-// The walk's stack: a slice of VELK_TRACE_STACK_SIZE for each thread of the work group, which
-// has VELK_RT_GROUP_THREADS (64 unless the shader says), in shared memory, since as an array of
-// its own it would be in scratch memory.
+// The walk's stack: VELK_TRACE_STACK_SIZE entries for each thread of the work group, which has
+// VELK_RT_GROUP_THREADS (64 unless the shader says), in shared memory, since as an array of its
+// own it would be in scratch memory. Entry `i` of every thread is in one row, the threads side by
+// side, so that threads at the same depth read neighbouring words.
 #ifndef VELK_RT_GROUP_THREADS
 #define VELK_RT_GROUP_THREADS 64
 #endif
@@ -226,10 +227,12 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
     const uint kPartition = 1u;
     const uint kMesh = 2u;
     const int kStack = VELK_TRACE_STACK_SIZE;
-    // This thread's slice of the work group's stack (s_walk_stack).
-    uint stack_base = gl_LocalInvocationIndex * uint(VELK_TRACE_STACK_SIZE);
+    // This thread's column of the work group's stack (s_walk_stack): entry `i` at
+    // i * kStackRow + stack_lane.
+    const uint kStackRow = uint(VELK_RT_GROUP_THREADS);
+    uint stack_lane = gl_LocalInvocationIndex;
     int sp = 0;
-    s_walk_stack[stack_base + uint(sp++)] = velk_culling.data[top + VELK_RAY_TOP_ROOT];
+    s_walk_stack[uint(sp++) * kStackRow + stack_lane] = velk_culling.data[top + VELK_RAY_TOP_ROOT];
     uint level = kTop;
     int partition_scope = 0;
     int mesh_scope = 0;
@@ -385,7 +388,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                 level = kPartition;
                 continue;
             }
-            uint ref = s_walk_stack[stack_base + uint(--sp)];
+            uint ref = s_walk_stack[uint(--sp) * kStackRow + stack_lane];
             if ((ref & VELK_BLAS_LEAF) != 0u) {
                 uint leaf = word_base + (ref & ~VELK_BLAS_LEAF);
                 triangle_at = word_base + velk_cluster_words.data[leaf];
@@ -406,8 +409,8 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
             bool left_first = h_l && (!h_r || t_l <= t_r);
             uint near_ref = left_first ? node.refs.x : node.refs.y;
             uint far_ref = left_first ? node.refs.y : node.refs.x;
-            if (h_l && h_r && sp < kStack) s_walk_stack[stack_base + uint(sp++)] = far_ref;
-            if ((h_l || h_r) && sp < kStack) s_walk_stack[stack_base + uint(sp++)] = near_ref;
+            if (h_l && h_r && sp < kStack) s_walk_stack[uint(sp++) * kStackRow + stack_lane] = far_ref;
+            if ((h_l || h_r) && sp < kStack) s_walk_stack[uint(sp++) * kStackRow + stack_lane] = near_ref;
         } else if (records_left > 0u) {
             ++velk_ray_records;
             uint ray_entry = record_at;
@@ -531,7 +534,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                     word_base = velk_cluster_words.data[header + 14u];
                     level = kMesh;
                     mesh_scope = sp;
-                    if (sp < kStack) s_walk_stack[stack_base + uint(sp++)] = root;
+                    if (sp < kStack) s_walk_stack[uint(sp++) * kStackRow + stack_lane] = root;
                 } else {
                     // Without a tree, such as a deforming mesh's whose tree was built again, its
                     // triangles are tested as they are drawn.
@@ -566,7 +569,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                 word_base = st.cluster_word_base;
                 level = kMesh;
                 mesh_scope = sp;
-                if (sp < kStack) s_walk_stack[stack_base + uint(sp++)] = st.blas_root;
+                if (sp < kStack) s_walk_stack[uint(sp++) * kStackRow + stack_lane] = st.blas_root;
             } else {
                 // An analytic shape, over the instance's extent.
                 float scale;
@@ -600,7 +603,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                 level = kTop;
                 continue;
             }
-            uint ref = s_walk_stack[stack_base + uint(--sp)];
+            uint ref = s_walk_stack[uint(--sp) * kStackRow + stack_lane];
             if ((ref & VELK_RAY_LEAF) != 0u) {
                 uint first = (ref & ~VELK_RAY_LEAF) >> 2u;
                 record_at = ray_list + first * VELK_CUT_RAY_WORDS;
@@ -617,11 +620,11 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
             bool left_first = h_l && (!h_r || t_l <= t_r);
             uint near_ref = velk_culling.data[node + (left_first ? VELK_CUT_NODE_LEFT_REF : VELK_CUT_NODE_RIGHT_REF)];
             uint far_ref = velk_culling.data[node + (left_first ? VELK_CUT_NODE_RIGHT_REF : VELK_CUT_NODE_LEFT_REF)];
-            if (h_l && h_r && far_ref != VELK_RAY_NONE && sp < kStack) s_walk_stack[stack_base + uint(sp++)] = far_ref;
-            if ((h_l || h_r) && near_ref != VELK_RAY_NONE && sp < kStack) s_walk_stack[stack_base + uint(sp++)] = near_ref;
+            if (h_l && h_r && far_ref != VELK_RAY_NONE && sp < kStack) s_walk_stack[uint(sp++) * kStackRow + stack_lane] = far_ref;
+            if ((h_l || h_r) && near_ref != VELK_RAY_NONE && sp < kStack) s_walk_stack[uint(sp++) * kStackRow + stack_lane] = near_ref;
         } else {
             if (sp == 0) break;
-            uint ref = s_walk_stack[stack_base + uint(--sp)];
+            uint ref = s_walk_stack[uint(--sp) * kStackRow + stack_lane];
             if ((ref & VELK_RAY_LEAF) != 0u) {
                 ++velk_ray_partitions;
                 // A partition: its tree, whose root's box its leaf here already has.
@@ -642,7 +645,7 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                 if (velk_culling.data[cut_entry + VELK_RAY_TOP_CUT_MOVES] != 0u) velk_ray_met_motion = true;
                 level = kPartition;
                 partition_scope = sp;
-                if (sp < kStack) s_walk_stack[stack_base + uint(sp++)] = velk_culling.data[state + VELK_PART_ROOT];
+                if (sp < kStack) s_walk_stack[uint(sp++) * kStackRow + stack_lane] = velk_culling.data[state + VELK_PART_ROOT];
                 continue;
             }
             ++velk_ray_top_nodes;
@@ -655,8 +658,8 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
             bool left_first = h_l && (!h_r || t_l <= t_r);
             uint near_ref = velk_culling.data[node + (left_first ? VELK_CUT_NODE_LEFT_REF : VELK_CUT_NODE_RIGHT_REF)];
             uint far_ref = velk_culling.data[node + (left_first ? VELK_CUT_NODE_RIGHT_REF : VELK_CUT_NODE_LEFT_REF)];
-            if (h_l && h_r && far_ref != VELK_RAY_NONE && sp < kStack) s_walk_stack[stack_base + uint(sp++)] = far_ref;
-            if ((h_l || h_r) && near_ref != VELK_RAY_NONE && sp < kStack) s_walk_stack[stack_base + uint(sp++)] = near_ref;
+            if (h_l && h_r && far_ref != VELK_RAY_NONE && sp < kStack) s_walk_stack[uint(sp++) * kStackRow + stack_lane] = far_ref;
+            if ((h_l || h_r) && near_ref != VELK_RAY_NONE && sp < kStack) s_walk_stack[uint(sp++) * kStackRow + stack_lane] = near_ref;
         }
     }
 
