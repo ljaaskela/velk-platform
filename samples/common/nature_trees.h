@@ -117,6 +117,12 @@ public:
         return state ? state->roughness : 1.f;
     }
 
+    float get_average_transmission() const override
+    {
+        auto state = velk::read_state<ITreeMaterial>(this);
+        return state ? state->transmission : 0.f;
+    }
+
     velk::string_view get_source(velk::string_view role) const override
     {
         if (role == velk::shader_role::kEval) return kTreeEvalSrc;

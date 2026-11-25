@@ -58,6 +58,10 @@ public:
     /// Roughly what light its surface gives off, in linear colour, for the same uses.
     virtual color get_average_emission() const = 0;
 
+    /// Roughly what share of its diffuse light a thin sheet of it passes to its other side, 0 to
+    /// 1, as its eval's MaterialEval::transmission. Only a double-sided draw passes any.
+    virtual float get_average_transmission() const = 0;
+
     /// Whether light falls on its surface. An unlit surface shows its colour as it is, so
     /// light bouncing off it takes that colour as given off, not reflected.
     virtual bool is_lit() const = 0;

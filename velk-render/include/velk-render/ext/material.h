@@ -78,6 +78,7 @@ public:
     float get_average_metallic() const override { return 0.f; }
     float get_average_roughness() const override { return 1.f; }
     color get_average_emission() const override { return color::black(); }
+    float get_average_transmission() const override { return 0.f; }
     /// Unlit, as a material's eval is unless it says otherwise (velk_default_material_eval).
     bool is_lit() const override { return false; }
     /// Untinted, as velk_default_material_eval is: its colour does not take EvalContext::base.

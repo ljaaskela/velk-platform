@@ -8,6 +8,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 
 namespace velk {
 
@@ -165,12 +166,14 @@ inline constexpr uint32_t kDrawOpacityTextureShift = 16;
 /// at its draw record's index: what a ray that hits it sees without its material's code. The
 /// first word its material's average albedo (IMaterial::get_average_albedo) as sRGB bytes, red
 /// lowest, with kDrawShadeUnlit and kDrawShadeTinted above them and its average metallic in the
-/// top 6 bits (kDrawShadeMetallicShift); the second its average emission as RGB9E5. With
+/// top 6 bits (kDrawShadeMetallicShift); the second its average emission as RGB9E5; the third
+/// its average transmission (IMaterial::get_average_transmission) as float bits, 0 unlit. With
 /// kDrawShadeTinted a hit multiplies the albedo by its instance's colour and, with
 /// kDrawFlagColor, its vertex colours; a quad's always by its quad's colour. Lit, a hit reflects
 /// the albedo less its metallic diffusely, and the albedo tints what its metal reflects; unlit,
-/// it gives the albedo off. Mirrors VELK_DRAW_SHADE_*.
-inline constexpr uint32_t kDrawShadeWords = 2;
+/// it gives the albedo off. A lit hit on a double-sided draw (kDrawFlagDoubleSided) takes the
+/// transmission's share of its diffuse light from behind it. Mirrors VELK_DRAW_SHADE_*.
+inline constexpr uint32_t kDrawShadeWords = 3;
 /// The draw's material is unlit (IMaterial::is_lit false).
 inline constexpr uint32_t kDrawShadeUnlit = 1u << 24;
 /// The draw's material takes its instance and vertex colours (IMaterial::is_tinted).
@@ -216,12 +219,16 @@ inline uint32_t rgb9e5(float r, float g, float b)
 
 /// Packs a draw's shading summary (kDrawShadeWords) into @p out.
 inline void pack_draw_shade(float albedo_r, float albedo_g, float albedo_b, bool lit, bool tinted, float metallic,
-                            float emission_r, float emission_g, float emission_b, uint32_t out[kDrawShadeWords])
+                            float emission_r, float emission_g, float emission_b, float transmission,
+                            uint32_t out[kDrawShadeWords])
 {
     const float m = metallic < 0.f ? 0.f : metallic > 1.f ? 1.f : metallic;
     out[0] = srgb_byte(albedo_r) | (srgb_byte(albedo_g) << 8) | (srgb_byte(albedo_b) << 16) | (lit ? 0u : kDrawShadeUnlit)
            | (tinted ? kDrawShadeTinted : 0u) | (static_cast<uint32_t>(m * 63.f + 0.5f) << kDrawShadeMetallicShift);
     out[1] = rgb9e5(emission_r, emission_g, emission_b);
+    // Clamped as the deferred lighting clamps it; the test also turns NaN to 0.
+    const float t = !lit || !(transmission > 0.f) ? 0.f : transmission > 1.f ? 1.f : transmission;
+    std::memcpy(&out[2], &t, sizeof(t));
 }
 
 /// Words before the quads in a view's quad list: VELK_QUAD_LIST (frame/cull_layout.h).

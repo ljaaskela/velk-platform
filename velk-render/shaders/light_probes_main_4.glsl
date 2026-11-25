@@ -1,6 +1,6 @@
 // Each draw record's shading summary (kDrawShadeWords, gpu_data.h), at the record's index.
 layout(set = 1, binding = 6, std430) readonly buffer VelkDrawShade { uint data[]; } velk_draw_shade;
-#define VELK_DRAW_SHADE_WORDS 2u
+#define VELK_DRAW_SHADE_WORDS 3u
 #define VELK_DRAW_SHADE_UNLIT 0x01000000u
 #define VELK_DRAW_SHADE_TINTED 0x02000000u
 #define VELK_DRAW_SHADE_METALLIC_SHIFT 26u
@@ -15,21 +15,27 @@ vec3 velk_srgb_to_linear(vec3 s)
 // colours, and on a quad the quad's colour. A lit surface reflects that albedo less its metallic
 // diffusely (`albedo`), and its metal reflects the rest tinted by it (`metal`, for what it
 // reflects from the way a ray would mirror off it); an unlit one gives it off, on top of its
-// emission. White, lit and not metal where the hit names no draw.
-void velk_probe_surface(RayHit hit, out vec3 albedo, out vec3 metal, out vec3 emission, out bool lit)
+// emission. A lit surface of a double-sided draw passes `transmission` of its diffuse light from
+// behind it, as the deferred lighting has it; 0 otherwise. White, lit, not metal and passing
+// nothing where the hit names no draw.
+void velk_probe_surface(RayHit hit, out vec3 albedo, out vec3 metal, out vec3 emission, out bool lit, out float transmission)
 {
     albedo = vec3(1.0);
     metal = vec3(0.0);
     emission = vec3(0.0);
     lit = true;
+    transmission = 0.0;
     if (hit.draw == 0xFFFFFFFFu || hit.instance == 0xFFFFFFFFu) return;
     uint at = hit.draw * VELK_DRAW_SHADE_WORDS;
     uint look = 0x00FFFFFFu | VELK_DRAW_SHADE_TINTED;
     uint glow = 0u;
-    if (at + 1u < uint(velk_draw_shade.data.length())) {
+    if (at + 2u < uint(velk_draw_shade.data.length())) {
         look = velk_draw_shade.data[at];
         glow = velk_draw_shade.data[at + 1u];
+        transmission = clamp(uintBitsToFloat(velk_draw_shade.data[at + 2u]), 0.0, 1.0);
     }
+    // The draw record only where something passes: only a double-sided draw lets it through.
+    if (transmission > 0.0 && (velk_draw_data.data[hit.draw].flags & VELK_DRAW_DOUBLE_SIDED) == 0u) transmission = 0.0;
     // The draw record only where the tint is taken: quads have no material, so they are tinted.
     vec4 tint = vec4(1.0);
     if ((look & VELK_DRAW_SHADE_TINTED) != 0u) {
@@ -49,6 +55,7 @@ void velk_probe_surface(RayHit hit, out vec3 albedo, out vec3 metal, out vec3 em
     }
     vec3 surface = velk_srgb_to_linear(unpackUnorm4x8(look).rgb) * tint.rgb;
     lit = (look & VELK_DRAW_SHADE_UNLIT) == 0u;
+    if (!lit) transmission = 0.0;
     float metallic = float(look >> VELK_DRAW_SHADE_METALLIC_SHIFT) / 63.0;
     albedo = lit ? surface * (1.0 - metallic) : vec3(0.0);
     // As F0 is, the dielectric base reflecting 4% of what is not metal.
@@ -100,18 +107,26 @@ bool velk_cell_changed(uint changes, vec3 pos, int level)
 
 // What light `index` brings a surface at `at` facing `n`, seen along `to_viewer`, unshadowed; a
 // stand-in's as velk_diffuse_response has it (`stand_in` its flatness, below 0 for none). An area
-// light's in closed form, as the deferred lighting has it, stand-ins included.
-vec3 velk_probe_light(uint index, vec3 at, vec3 n, float stand_in, vec3 to_viewer)
+// light's in closed form, as the deferred lighting has it, stand-ins included. A thin sheet passing
+// `transmission` of its diffuse light takes that share from behind it, as the deferred lighting
+// has it: a stand-in's delta lights none.
+vec3 velk_probe_light(uint index, vec3 at, vec3 n, float stand_in, vec3 to_viewer, float transmission)
 {
     Light light = velk_light_at(pc.lights_base + index);
     if (light.flags.x == 3u) {
-        float diffuse = velk_area_diffuse(light.position.xyz, light.direction.xyz, max(light.params.w, 1e-4), at, n);
+        float half_size = max(light.params.w, 1e-4);
+        float diffuse = velk_area_diffuse(light.position.xyz, light.direction.xyz, half_size, at, n) * (1.0 - transmission);
+        if (transmission > 0.0) {
+            diffuse += velk_area_diffuse(light.position.xyz, light.direction.xyz, half_size, at, -n) * transmission;
+        }
         return light.color_intensity.rgb * light.color_intensity.a * diffuse;
     }
     vec3 l;
     float atten;
     velk_light_delta(light, at, l, atten);
-    return light.color_intensity.rgb * light.color_intensity.a * atten * velk_diffuse_response(n, l, to_viewer, stand_in);
+    float diffuse = stand_in < 0.0 && transmission > 0.0 ? mix(max(dot(n, l), 0.0), max(-dot(n, l), 0.0), transmission)
+                                                         : velk_diffuse_response(n, l, to_viewer, stand_in);
+    return light.color_intensity.rgb * light.color_intensity.a * atten * diffuse;
 }
 
 // Where a hit at `at` keeps its light: the word of its light, of its radiance and of the way the
@@ -187,8 +202,9 @@ uint velk_probe_own_sun(RayHit hit)
 
 // The direct light of the sun `sun` (velk_probe_own_sun) at a hit at `at` facing `n`, by its own
 // ray: for a probe, toward a place on the sun's disc chosen by the ray `dir` that hit, so that a
-// probe's rays together cover it; for a reflection (VELK_REFLECT), toward its middle.
-vec3 velk_probe_sun(uint sun, RayHit hit, vec3 at, vec3 n, vec3 dir)
+// probe's rays together cover it; for a reflection (VELK_REFLECT), toward its middle. A thin sheet
+// passing `transmission` takes that share from behind it (velk_probe_light).
+vec3 velk_probe_sun(uint sun, RayHit hit, vec3 at, vec3 n, vec3 dir, float transmission)
 {
     if (sun == VELK_LIGHT_NONE) return vec3(0.0);
     Light light = velk_light_at(pc.lights_base + sun);
@@ -212,7 +228,7 @@ vec3 velk_probe_sun(uint sun, RayHit hit, vec3 at, vec3 n, vec3 dir)
     float blocker_t;
     bool facing_away;
     float seen = velk_sun_visibility(at, n, two_sided, hit.stand_in >= 0.0, l, blocker_t, facing_away);
-    return seen > 0.0 ? velk_probe_light(sun, at, n, hit.stand_in, -dir) * seen : vec3(0.0);
+    return seen > 0.0 ? velk_probe_light(sun, at, n, hit.stand_in, -dir, transmission) * seen : vec3(0.0);
 }
 
 // The direct light a surface at `at`, facing `n`, gets as its light points there say, for a hit
@@ -220,8 +236,9 @@ vec3 velk_probe_sun(uint sun, RayHit hit, vec3 at, vec3 n, vec3 dir)
 // down its triangle's pieces where the hit knows its triangle (RayHit::triangle,
 // velk_light_add_points), else at its triangle's corners; each light by how much of it gets
 // through, but for `own_sun`, which the hit shades by its own ray (velk_probe_sun). `to_viewer`
-// points back along the ray that hit it, for a stand-in (RayHit::stand_in).
-vec3 velk_probe_direct(RayHit hit, uint word, vec3 center, vec3 at, vec3 n, vec3 to_viewer, uint own_sun)
+// points back along the ray that hit it, for a stand-in (RayHit::stand_in). A thin sheet passing
+// `transmission` takes that share from behind it (velk_probe_light).
+vec3 velk_probe_direct(RayHit hit, uint word, vec3 center, vec3 at, vec3 n, vec3 to_viewer, uint own_sun, float transmission)
 {
     uint pool = pc.shapes_base;
     if (word == VELK_LIGHT_NONE || pool == 0xFFFFFFFFu) return vec3(0.0);
@@ -250,7 +267,7 @@ vec3 velk_probe_direct(RayHit hit, uint word, vec3 center, vec3 at, vec3 n, vec3
     vec3 total = vec3(0.0);
     for (uint k = 0u; k < VELK_LIGHT_SLOTS; ++k) {
         if (lights[k] == VELK_LIGHT_NONE || lights[k] == own_sun) continue;
-        total += velk_probe_light(lights[k], at, n, hit.stand_in, to_viewer) * (sums[k].y / max(sums[k].x, 1e-6));
+        total += velk_probe_light(lights[k], at, n, hit.stand_in, to_viewer, transmission) * (sums[k].y / max(sums[k].x, 1e-6));
     }
     return total;
 }
@@ -465,7 +482,8 @@ void velk_probes_trace(uint lane)
             vec3 metal;
             vec3 emission;
             bool lit;
-            velk_probe_surface(hit, albedo, metal, emission, lit);
+            float transmission;
+            velk_probe_surface(hit, albedo, metal, emission, lit, transmission);
             uint light_word;
             uint radiance;
             uint radiance_dir;
@@ -478,8 +496,9 @@ void velk_probes_trace(uint lane)
             vec3 indirect = lit ? velk_probe_hit_indirect(pc.more.x, at, hn, radiance, radiance_dir, width, height, across) : vec3(0.0);
             // The sun pass's light by the hit's own ray, where its points leave it untraced.
             uint own_sun = velk_probe_own_sun(hit);
-            vec3 sun = lit ? velk_probe_sun(own_sun, hit, at, hn, dir) : vec3(0.0);
-            light = albedo * (velk_probe_direct(hit, light_word, center, at, hn, -dir, own_sun) + sun + indirect) + emission;
+            vec3 sun = lit ? velk_probe_sun(own_sun, hit, at, hn, dir, transmission) : vec3(0.0);
+            light = albedo * (velk_probe_direct(hit, light_word, center, at, hn, -dir, own_sun, transmission) + sun + indirect)
+                  + emission;
         } else {
             light = velk_probe_sky(dir);
         }
@@ -604,7 +623,8 @@ void velk_reflect_trace(uint lane)
         vec3 metal;
         vec3 emission;
         bool lit;
-        velk_probe_surface(hit, albedo, metal, emission, lit);
+        float transmission;
+        velk_probe_surface(hit, albedo, metal, emission, lit, transmission);
         uint light_word;
         uint radiance;
         uint radiance_dir;
@@ -615,9 +635,10 @@ void velk_reflect_trace(uint lane)
         vec3 indirect = lit ? velk_probe_hit_indirect(pc.more.w, at, hn, radiance, radiance_dir, width, height, across) : vec3(0.0);
         // The sun pass's light by the hit's own ray, where its points leave it untraced.
         uint own_sun = velk_probe_own_sun(hit);
-        vec3 sun = lit ? velk_probe_sun(own_sun, hit, at, hn, dir) : vec3(0.0);
+        vec3 sun = lit ? velk_probe_sun(own_sun, hit, at, hn, dir, transmission) : vec3(0.0);
         // Its metal: what it mirrors of the environment, half blurred, its own roughness not known.
-        light = albedo * (velk_probe_direct(hit, light_word, center, at, hn, -dir, own_sun) + sun + indirect) + emission
+        light = albedo * (velk_probe_direct(hit, light_word, center, at, hn, -dir, own_sun, transmission) + sun + indirect)
+              + emission
               + metal * velk_probe_env(reflect(dir, hn), 0.5);
         // Within what half floats hold.
         t = clamp(hit.t, 1e-4, 65000.0);
