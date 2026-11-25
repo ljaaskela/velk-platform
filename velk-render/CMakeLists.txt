@@ -183,6 +183,30 @@ target_include_directories(velk_render
             ${CMAKE_CURRENT_SOURCE_DIR}/third_party/meshoptimizer
 )
 
+# GLSL built into the library: each source in shaders/ becomes a header defining it as a string
+# literal macro, VELK_<NAME>_GLSL, which the frame headers include as <velk-render/glsl/<name>.inc>.
+set(VELK_RENDER_GLSL_SOURCES
+    shaders/sun_visibility.glsl
+)
+set(VELK_RENDER_GLSL_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
+set(velk_render_glsl_outputs "")
+foreach(source IN LISTS VELK_RENDER_GLSL_SOURCES)
+    get_filename_component(stem ${source} NAME_WE)
+    string(TOUPPER ${stem} upper)
+    set(output ${VELK_RENDER_GLSL_DIR}/velk-render/glsl/${stem}.inc)
+    add_custom_command(
+        OUTPUT ${output}
+        COMMAND ${CMAKE_COMMAND} -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/${source} -DOUTPUT=${output}
+                -DNAME=VELK_${upper}_GLSL -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_glsl.cmake
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${source} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_glsl.cmake
+        COMMENT "Embedding ${source}"
+        VERBATIM)
+    list(APPEND velk_render_glsl_outputs ${output})
+endforeach()
+add_custom_target(velk_render_glsl DEPENDS ${velk_render_glsl_outputs} SOURCES ${VELK_RENDER_GLSL_SOURCES})
+add_dependencies(velk_render velk_render_glsl)
+target_include_directories(velk_render PUBLIC $<BUILD_INTERFACE:${VELK_RENDER_GLSL_DIR}>)
+
 option(VELK_RENDER_DEBUG "Enable verbose render logging" OFF)
 
 target_compile_definitions(velk_render PRIVATE VELK_EXPORTS)
