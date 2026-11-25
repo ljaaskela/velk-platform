@@ -199,7 +199,7 @@ inline constexpr uint32_t kLightMaxSegments = 64;
 /// The pool grows a quarter ahead of a frame asking when it stayed under a sixteenth free this
 /// many frames, at most once every kLightPoolAheadEvery: past a full keep of the sweep's shortest
 /// (VELK_PIECE_KEEP_FRAMES), so that pieces out of view were let go of first.
-/// Pixels VELK_LIGHT_READ can name for the lighting to write its terms at (VELK_POOL_READ_TERMS),
+/// Pixels VELK_LIGHT_READ can name for the lighting to write its terms at (VELK_DEBUG_READ_TERMS),
 /// and the words of each one's terms (VELK_LIGHT_READ_WORDS).
 inline constexpr uint32_t kLightReadPixels = 4;
 inline constexpr uint32_t kLightReadWords = 80;
@@ -313,32 +313,43 @@ inline constexpr uint32_t kLightPoolAheadEvery = 60;
                                                     room too: three words (velk_light_list_at) */                    \
     X(SunSkip, SUN_SKIP, 201)                    /* the light the sun pass shades this frame, which points of \
                                                     what is drawn opaque leave untraced; kLightNone for none */      \
-    X(Pending, PENDING, 203)                     /* with VELK_LIGHT_READ: the lit pixels' lights this frame that \
-                                                    bring them light and whose points have not traced them yet, or \
-                                                    a change made stale; else 0 */                                   \
-    X(SunRays, SUN_RAYS, 204)                    /* the sun pass's rays this frame that walked; counted only \
-                                                    with VELK_LIGHT_READ, else 0 */                                  \
-    X(LastRaysCast, LAST_RAYS_CAST, 205)         /* the last frame's RAYS_CAST, SUN_RAYS, PENDING and READ_STAMP: \
+    X(Debug, DEBUG, 203)                         /* the word of the debug block (VELK_LIGHT_DEBUG_BLOCK) while \
+                                                    VELK_LIGHT_READ names pixels, kLightNone otherwise */            \
+    X(HeaderEnd, HEADER_END, 204)
+
+/// The debug block, a region of its own made only while VELK_LIGHT_READ names pixels (its word in
+/// the pool's DEBUG): each word's name in C++ (kLightDebug, then the first name) and in the shaders
+/// (VELK_DEBUG_, then the second), and its place in the block.
+#define VELK_LIGHT_DEBUG_BLOCK(X)                                                                                    \
+    X(Pending, PENDING, 0)                       /* the lit pixels' lights this frame that bring them light and \
+                                                    whose points have not traced them yet, or a change made stale */ \
+    X(SunRays, SUN_RAYS, 1)                      /* the sun pass's rays this frame that walked */                    \
+    X(LastRaysCast, LAST_RAYS_CAST, 2)           /* the last frame's RAYS_CAST, SUN_RAYS, PENDING and READ_STAMP: \
                                                     four words, the same frame's, which the sweep's begin copies */  \
-    X(ReadStamp, READ_STAMP, 209)                /* with VELK_LIGHT_READ: the frame the lighting last ran in \
-                                                    (present_counter), so that the copy above says its frame */     \
-    X(ReadPixels, READ_PIXELS, 210)              /* VELK_LIGHT_READ's pixels, x | y << 16, kLightNone for none: \
+    X(ReadStamp, READ_STAMP, 6)                  /* the frame the lighting last ran in (present_counter), so that \
+                                                    the copy above says its frame */                                 \
+    X(ReadPixels, READ_PIXELS, 7)                /* VELK_LIGHT_READ's pixels, x | y << 16, kLightNone for none: \
                                                     kLightReadPixels words */                                        \
-    X(ReadTerms, READ_TERMS, 214)                /* the lighting's terms at them, kLightReadWords each \
+    X(ReadTerms, READ_TERMS, 11)                 /* the lighting's terms at them, kLightReadWords each \
                                                     (VELK_LIGHT_READ_*) */                                           \
-    X(HeaderEnd, HEADER_END, 534)
+    X(End, END, 331)
 
 #define VELK_LIGHT_POOL_CPP_WORD(cpp, glsl, word) inline constexpr uint32_t kLightPool##cpp = word;
 VELK_LIGHT_POOL_HEADER(VELK_LIGHT_POOL_CPP_WORD)
 #undef VELK_LIGHT_POOL_CPP_WORD
-/// The header's words, for the shaders: a #define VELK_POOL_ each.
 #define VELK_LIGHT_POOL_GLSL_WORD(cpp, glsl, word) "#define VELK_POOL_" #glsl " " #word "u\n"
-#define VELK_LIGHT_POOL_HEADER_GLSL VELK_LIGHT_POOL_HEADER(VELK_LIGHT_POOL_GLSL_WORD)
+#define VELK_LIGHT_DEBUG_CPP_WORD(cpp, glsl, word) inline constexpr uint32_t kLightDebug##cpp = word;
+VELK_LIGHT_DEBUG_BLOCK(VELK_LIGHT_DEBUG_CPP_WORD)
+#undef VELK_LIGHT_DEBUG_CPP_WORD
+/// The header's and the debug block's words, for the shaders: a #define VELK_POOL_ or VELK_DEBUG_ each.
+#define VELK_LIGHT_DEBUG_GLSL_WORD(cpp, glsl, word) "#define VELK_DEBUG_" #glsl " " #word "u\n"
+#define VELK_LIGHT_POOL_HEADER_GLSL                                                                                  \
+    VELK_LIGHT_POOL_HEADER(VELK_LIGHT_POOL_GLSL_WORD) VELK_LIGHT_DEBUG_BLOCK(VELK_LIGHT_DEBUG_GLSL_WORD)
 inline constexpr uint32_t kLightPoolHeaderWords = kLightPoolHeaderEnd;
 static_assert(kLightPoolTraces == kLightPoolSegmentWords + kLightMaxSegments, "the segments' words end where the trace's begin");
-static_assert(kLightPoolReadTerms == kLightPoolReadPixels + kLightReadPixels
-                  && kLightPoolHeaderEnd == kLightPoolReadTerms + kLightReadPixels * kLightReadWords,
-              "the read pixels' words, then their terms, end the header");
+static_assert(kLightDebugReadTerms == kLightDebugReadPixels + kLightReadPixels
+                  && kLightDebugEnd == kLightDebugReadTerms + kLightReadPixels * kLightReadWords,
+              "the read pixels' words, then their terms, end the debug block");
 /// Records the search list takes a frame; more wait for the next.
 inline constexpr uint32_t kLightSearchCapacity = 1024;  ///< Mirrors VELK_LIGHT_SEARCH_CAPACITY.
 inline constexpr uint32_t kLightSearchWords = kSearchEntryWords;
@@ -447,7 +458,7 @@ bool velk_light_inherits(uint value)
 // kLightPixels.
 #define VELK_LIGHT_PIXELS 4.0
 )" R"(
-// A read pixel's terms (VELK_POOL_READ_TERMS), floats as their bits: its albedo, direct light,
+// A read pixel's terms (VELK_DEBUG_READ_TERMS), floats as their bits: its albedo, direct light,
 // indirect light, the environment's diffuse light, specular light in all, area lights' diffuse
 // light and the colour before tonemapping, three words each; then its metallic, whether its points
 // of light were traced and probes covered it (bits 0 and 1) with the frame that wrote them (the
@@ -5410,15 +5421,19 @@ void main()
             light_words.data[pool + VELK_POOL_TRACES] = 0u;
             light_words.data[pool + VELK_POOL_LAST_UNTRACED_PIXELS] = light_words.data[pool + VELK_POOL_UNTRACED_PIXELS];
             light_words.data[pool + VELK_POOL_UNTRACED_PIXELS] = 0u;
-            // The sun pass's rays and the pending lights (VELK_LIGHT_READ only): the last frame's, then
-            // cleared for this one.
-            light_words.data[pool + VELK_POOL_LAST_RAYS_CAST + 1u] = light_words.data[pool + VELK_POOL_SUN_RAYS];
-            light_words.data[pool + VELK_POOL_LAST_RAYS_CAST + 2u] = light_words.data[pool + VELK_POOL_PENDING];
-            // And the frame these counts are of: the lighting writes it last in a frame
-            // (VELK_LIGHT_READ only), so this begin of the next one finds it still that frame's.
-            light_words.data[pool + VELK_POOL_LAST_RAYS_CAST + 3u] = light_words.data[pool + VELK_POOL_READ_STAMP];
-            light_words.data[pool + VELK_POOL_SUN_RAYS] = 0u;
-            light_words.data[pool + VELK_POOL_PENDING] = 0u;
+            // While VELK_LIGHT_READ names pixels, its debug block: the last frame's rays of the points
+            // and the sun pass and its pending lights, then those cleared for this one; and the frame
+            // they are of, which the lighting writes last in a frame, so that this begin of the next
+            // one finds it still that frame's.
+            const uint light_debug = light_words.data[pool + VELK_POOL_DEBUG];
+            if (light_debug != 0xFFFFFFFFu) {
+                light_words.data[light_debug + VELK_DEBUG_LAST_RAYS_CAST] = light_words.data[pool + VELK_POOL_RAYS_CAST];
+                light_words.data[light_debug + VELK_DEBUG_LAST_RAYS_CAST + 1u] = light_words.data[light_debug + VELK_DEBUG_SUN_RAYS];
+                light_words.data[light_debug + VELK_DEBUG_LAST_RAYS_CAST + 2u] = light_words.data[light_debug + VELK_DEBUG_PENDING];
+                light_words.data[light_debug + VELK_DEBUG_LAST_RAYS_CAST + 3u] = light_words.data[light_debug + VELK_DEBUG_READ_STAMP];
+                light_words.data[light_debug + VELK_DEBUG_SUN_RAYS] = 0u;
+                light_words.data[light_debug + VELK_DEBUG_PENDING] = 0u;
+            }
             // What the frame's work was charged: the lights listed for tracing and the points.
             const uint charged = light_words.data[pool + VELK_POOL_RAYS_LISTED] + light_words.data[pool + VELK_POOL_POINT_RAYS_CHARGED];
             light_words.data[pool + VELK_POOL_RAYS_LISTED] = 0u;
@@ -5450,7 +5465,6 @@ void main()
                 light_words.data[pool + VELK_POOL_WORST_STEPS] = light_words.data[pool + VELK_POOL_STEPS];
                 light_words.data[pool + VELK_POOL_WORST_FIRST_RAYS] = light_words.data[pool + VELK_POOL_FIRST_RAYS];
             }
-            light_words.data[pool + VELK_POOL_LAST_RAYS_CAST] = light_words.data[pool + VELK_POOL_RAYS_CAST];
             light_words.data[pool + VELK_POOL_RAYS_CAST] = 0u;
             light_words.data[pool + VELK_POOL_STEPS] = 0u;
             light_words.data[pool + VELK_POOL_FIRST_RAYS] = 0u;
@@ -5501,6 +5515,7 @@ struct LightPool
     uint32_t short_checks = 0;     ///< Checks in a row that found pages asked for and not there.
     uint64_t grew_frame = 0;       ///< When it last grew for pages asked for.
     bool reads = false;            ///< Whether VELK_LIGHT_READ named pixels, logged every frame.
+    ArenaRegion debug;             ///< Its debug block (VELK_LIGHT_DEBUG_BLOCK), made only with reads.
     uint64_t log_frame = 0;        ///< When its counts were last logged.
     uint32_t recorded_pages = 0;   ///< What the culling recording sweeps.
     float rays = kLightTraceRays;  ///< The trace's budget in rays a frame (adjust_light_rays).
@@ -5563,10 +5578,13 @@ inline bool ensure_light_pool(LightPool& pool, IGpuArena& arena, uint64_t device
     initial[kLightPoolUntracedPointsWord] = base + static_cast<uint32_t>(points_word);
     initial[kLightPoolCoarsePointsWord] = base + static_cast<uint32_t>(points_word + point_list_words);
     initial[kLightPoolFinePointsWord] = base + static_cast<uint32_t>(points_word + 2u * point_list_words);
-    // A development aid: VELK_LIGHT_READ=x,y;x,y;... names up to kLightReadPixels pixels whose
-    // lighting terms the lighting writes and the log prints.
-    for (uint32_t k = 0; k < kLightReadPixels; ++k) initial[kLightPoolReadPixels + k] = kLightNone;
     initial[kLightPoolSunSkip] = kLightNone;
+    // A development aid: VELK_LIGHT_READ=x,y;x,y;... names up to kLightReadPixels pixels whose
+    // lighting terms the lighting writes and the log prints, in a debug block of its own made only
+    // then (kLightPoolDebug).
+    initial[kLightPoolDebug] = kLightNone;
+    uint32_t read_pixels[kLightReadPixels];
+    for (uint32_t k = 0; k < kLightReadPixels; ++k) read_pixels[k] = kLightNone;
     if (const char* read = std::getenv("VELK_LIGHT_READ")) {
         uint32_t k = 0;
         for (const char* at = read; at && *at && k < kLightReadPixels;) {
@@ -5575,12 +5593,24 @@ inline bool ensure_light_pool(LightPool& pool, IGpuArena& arena, uint64_t device
             if (end && *end == ',') {
                 const unsigned long y = std::strtoul(end + 1, &end, 10);
                 if (x < 65536u && y < 65536u) {
-                    initial[kLightPoolReadPixels + k++] = uint32_t(x) | (uint32_t(y) << 16u);
+                    read_pixels[k++] = uint32_t(x) | (uint32_t(y) << 16u);
                     pool.reads = true;
                 }
             }
             at = std::strchr(at, ';');
             if (at) ++at;
+        }
+    }
+    if (pool.reads) {
+        pool.debug = arena.alloc(uint64_t(kLightDebugEnd) * sizeof(uint32_t));
+        if (pool.debug.valid()) {
+            vector<uint32_t> block;
+            block.resize(kLightDebugEnd, 0u);
+            for (uint32_t k = 0; k < kLightReadPixels; ++k) block[kLightDebugReadPixels + k] = read_pixels[k];
+            arena.write_at(pool.debug.offset(), block.data(), uint64_t(kLightDebugEnd) * sizeof(uint32_t));
+            initial[kLightPoolDebug] = static_cast<uint32_t>(pool.debug.offset() / sizeof(uint32_t));
+        } else {
+            pool.reads = false;
         }
     }
     // The header, then the marks and the piece bits, all clear.

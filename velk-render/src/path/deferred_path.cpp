@@ -381,7 +381,7 @@ IGpuPipeline::Ptr compose_deferred_compute_pipeline(FrameContext& ctx,
 IGpuPipeline::Ptr DeferredPath::ensure_pipeline(FrameContext& ctx, bool with_area_lights, bool reads)
 {
     // While VELK_LIGHT_READ names pixels, the lighting that also counts the pixels' lights still
-    // waiting for their points' rays (VELK_LIGHT_CODES, the pool's PENDING); otherwise none of it is
+    // waiting for their points' rays (VELK_LIGHT_CODES, the debug block's PENDING); otherwise none of it is
     // built in.
     if (reads) {
         return compose_deferred_compute_pipeline(ctx, "#define VELK_LIGHT_CODES\n", 0x4c52'4541'4400'0001ULL, with_area_lights, 5u,

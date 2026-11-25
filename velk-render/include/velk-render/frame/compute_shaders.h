@@ -1797,11 +1797,12 @@ void main()
 {
     ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
     if (coord.x >= int(pc.width) || coord.y >= int(pc.height)) return;
-    // While VELK_LIGHT_READ names pixels: the frame the lighting ran in (VELK_POOL_READ_STAMP),
-    // which the next frame's sweep copies with this frame's counts.
-    if (coord.x == 0 && coord.y == 0 && pc.spare3 != VELK_LIGHT_NONE
-        && velk_light_cell_words.data[pc.spare3 + VELK_POOL_READ_PIXELS] != VELK_LIGHT_NONE) {
-        velk_light_cell_words.data[pc.spare3 + VELK_POOL_READ_STAMP] = VELK_GLOBALS.present_counter;
+    // While VELK_LIGHT_READ names pixels, the pool's debug block (VELK_POOL_DEBUG), else none: the
+    // frame the lighting ran in (VELK_DEBUG_READ_STAMP), which the next frame's sweep copies with
+    // this frame's counts.
+    uint light_debug = pc.spare3 != VELK_LIGHT_NONE ? velk_light_cell_words.data[pc.spare3 + VELK_POOL_DEBUG] : VELK_LIGHT_NONE;
+    if (coord.x == 0 && coord.y == 0 && light_debug != VELK_LIGHT_NONE) {
+        velk_light_cell_words.data[light_debug + VELK_DEBUG_READ_STAMP] = VELK_GLOBALS.present_counter;
     }
 
     vec2 uv = (vec2(coord) + 0.5) / vec2(float(pc.width), float(pc.height));
@@ -1886,8 +1887,8 @@ void main()
 #ifdef VELK_LIGHT_CODES
         // For the log, while VELK_LIGHT_READ is set: this pixel's lights that bring it light and
         // whose points have not traced them yet, or a change made stale; before its points are
-        // traced, every light that brings it light. Added to the pool's PENDING.
-        if (pc.spare3 != VELK_LIGHT_NONE) {
+        // traced, every light that brings it light. Added to the debug block's PENDING.
+        if (light_debug != VELK_LIGHT_NONE) {
             uint pending = 0u;
             if (points) {
                 for (uint k = 0u; k < VELK_LIGHT_SLOTS; ++k) {
@@ -1904,7 +1905,7 @@ void main()
                     if (velk_light_strength(velk_light_at(pc.lights_base + i), world_pos) > 0.0) ++pending;
                 }
             }
-            if (pending != 0u) atomicAdd(velk_light_cell_words.data[pc.spare3 + VELK_POOL_PENDING], pending);
+            if (pending != 0u) atomicAdd(velk_light_cell_words.data[light_debug + VELK_DEBUG_PENDING], pending);
         }
 #endif
 )" R"(
@@ -1995,12 +1996,12 @@ void main()
         color = albedo.rgb * (1.0 - metallic) * (direct + indirect + area_irr) + highlights + F_env * env_specular
               + area_spec;
 
-        // At VELK_LIGHT_READ's pixels, its terms for the log (VELK_POOL_READ_TERMS).
-        if (pc.spare3 != VELK_LIGHT_NONE && velk_light_cell_words.data[pc.spare3 + VELK_POOL_READ_PIXELS] != VELK_LIGHT_NONE) {
+        // At VELK_LIGHT_READ's pixels, its terms for the log (VELK_DEBUG_READ_TERMS).
+        if (light_debug != VELK_LIGHT_NONE) {
             uint here = uint(coord.x) | (uint(coord.y) << 16u);
             for (uint k = 0u; k < 4u; ++k) {
-                if (velk_light_cell_words.data[pc.spare3 + VELK_POOL_READ_PIXELS + k] != here) continue;
-                uint at = pc.spare3 + VELK_POOL_READ_TERMS + k * VELK_LIGHT_READ_WORDS;
+                if (velk_light_cell_words.data[light_debug + VELK_DEBUG_READ_PIXELS + k] != here) continue;
+                uint at = light_debug + VELK_DEBUG_READ_TERMS + k * VELK_LIGHT_READ_WORDS;
                 vec3 terms[7] = vec3[7](albedo.rgb, direct, indirect, env_diffuse, highlights + F_env * env_specular + area_spec,
                                         area_irr, color);
                 for (uint t = 0u; t < 7u; ++t) {
@@ -2062,8 +2063,8 @@ void main()
 }
 )";
 
-// The sun pass as sun_rays_main_src, which also adds the rays that walked to the pool's SUN_RAYS,
-// the pool's word in pc.spare3 (VELK_LIGHT_NONE for none), for the log: used only while
+// The sun pass as sun_rays_main_src, which also adds the rays that walked to the debug block's
+// SUN_RAYS (VELK_POOL_DEBUG of the pool whose word is in pc.spare3, VELK_LIGHT_NONE for none), for the log: used only while
 // VELK_LIGHT_READ is set, so that the sun pass otherwise carries no count. Built on the deferred
 // prelude with the light grid.
 [[maybe_unused]] constexpr string_view sun_rays_count_main_src = R"(
@@ -2097,7 +2098,8 @@ void main()
     }
     barrier();
     if (gl_LocalInvocationIndex == 0u && s_sun_rays != 0u && pc.spare3 != 0xFFFFFFFFu) {
-        atomicAdd(velk_light_cell_words.data[pc.spare3 + VELK_POOL_SUN_RAYS], s_sun_rays);
+        uint light_debug = velk_light_cell_words.data[pc.spare3 + VELK_POOL_DEBUG];
+        if (light_debug != 0xFFFFFFFFu) atomicAdd(velk_light_cell_words.data[light_debug + VELK_DEBUG_SUN_RAYS], s_sun_rays);
     }
 }
 )";

@@ -5625,9 +5625,9 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
         }
         // VELK_LIGHT_READ's pixels, every frame: the lighting's terms at each, before tonemapping,
         // with the frame that wrote them (a pixel nothing lit keeps an older frame's).
-        if (pool.header.valid() && pool.reads) {
+        if (pool.header.valid() && pool.reads && pool.debug.valid()) {
             uint32_t r[kLightReadPixels * (1u + kLightReadWords)] = {};
-            arena->read_at(pool.header.offset() + uint64_t(kLightPoolReadPixels) * sizeof(uint32_t), r, sizeof(r));
+            arena->read_at(pool.debug.offset() + uint64_t(kLightDebugReadPixels) * sizeof(uint32_t), r, sizeof(r));
             // The pool's work around them: the last frame's asks for pieces, and since the log
             // last read them, pieces made and asks not made.
             uint32_t counts[4] = {};
@@ -5638,10 +5638,10 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             VELK_LOG(I, "light read pool (now %llu): last frame %u asks for pieces, %u untraced points listed; summed %u pieces made, "
                         "%u asks not made",
                      static_cast<unsigned long long>(ctx.present_counter), counts[0], counts[3], counts[1], counts[2]);
-            // One frame's counts (LAST_RAYS_CAST on), with the frame they are of (READ_STAMP as the
-            // sweep copied it), the view by its state as `light submit` names it.
+            // One frame's counts (the debug block's LAST_RAYS_CAST on), with the frame they are of
+            // (READ_STAMP as the sweep copied it), the view by its state as `light submit` names it.
             uint32_t last[4] = {};
-            arena->read_at(pool.header.offset() + uint64_t(kLightPoolLastRaysCast) * sizeof(uint32_t), last, sizeof(last));
+            arena->read_at(pool.debug.offset() + uint64_t(kLightDebugLastRaysCast) * sizeof(uint32_t), last, sizeof(last));
             VELK_LOG(I, "light frame %p,%u (now %llu): rays %u of the points, %u of the sun pass; pending %u",
                      static_cast<const void*>(&state), last[3], static_cast<unsigned long long>(ctx.present_counter), last[0],
                      last[1], last[2]);
