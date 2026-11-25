@@ -444,8 +444,8 @@ float velk_walk(Ray ray, float t_max, bool closest, out RayHit hit)
                 if (through < 0.01) return 0.0;
                 continue;
             }
-            // A record for light only is traced as the cluster it is.
-            if (velk_cut_light_only(entry)) entry &= ~VELK_CUT_LIGHT_ONLY;
+            // A record for rays only is traced as the cluster it is.
+            if (velk_cut_for_rays(entry)) entry &= ~VELK_CUT_FOR_RAYS;
             if (entry == VELK_CUT_QUAD) {
                 ++velk_ray_hit_quads;
                 // A quad: its plane, then where on it along its two sides, 0 to 1 within it.

@@ -797,9 +797,8 @@ vec3 triangle_size_color(uvec2 ids)
 
 // Mode 15: where light comes from. A triangle with pieces: the depth of the piece a pixel reads
 // (light_color says the colours). Else a record with points: a colour per point of light, blended
-// as a pixel reads them (its triangle's corners, each its own point or the three it links to), so
-// each patch is one point's reach, darker where they are the record's own than where they are
-// those of the records for light only it links to; one with one value flat in its colour; a quad
+// as a pixel reads them (its triangle's corners), so each patch is one point's reach; one with one
+// value flat in its colour; a quad
 // in the colour of the node its light is on; magenta as far as that light is not traced yet; what
 // has no light yet grey, and what is from no record white.
 vec3 light_color(uvec2 ids, ivec2 coord)
@@ -905,8 +904,7 @@ vec3 light_color(uvec2 ids, ivec2 coord)
         untrusted += weights[k] * (1.0 - trust);
         if (!none && traces == 0u) retracing += weights[k];
     }
-    // Darker where the record has its own points, coarse enough itself.
-    color = velk_culling.data[first + VELK_PAGE_KIND] == VELK_LIGHT_LINKED ? color : color * 0.45;
+    color *= 0.45;
     // Magenta as far as the points it reads are not traced yet, cyan as far as they are stale
     // since a change.
     color = mix(color, vec3(0.0, 1.0, 1.0), clamp(retracing, 0.0, 1.0));

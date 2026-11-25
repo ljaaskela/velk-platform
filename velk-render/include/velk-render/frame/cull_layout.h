@@ -280,8 +280,8 @@ namespace velk {
     X(cp, gp, TakeoverFrame, TAKEOVER_FRAME, 29) /* the frame of the takeover table, counted by the begin pass */ \
     X(cp, gp, TakeoverWord, TAKEOVER_WORD, 30)  /* the takeover table's word (VELK_TAKEOVER a slot) */ \
     X(cp, gp, TakeoverSlots, TAKEOVER_SLOTS, 31) /* and its slots, a power of two */           \
-    X(cp, gp, LightOnlyRecords, LIGHT_ONLY_RECORDS, 32) /* records for light only in the current store */ \
-    X(cp, gp, LastLightOnlyRecords, LAST_LIGHT_ONLY_RECORDS, 33)                               \
+    X(cp, gp, ForRaysRecords, FOR_RAYS_RECORDS, 32) /* records for rays only in the current store */  \
+    X(cp, gp, LastForRaysRecords, LAST_FOR_RAYS_RECORDS, 33)                                   \
     X(cp, gp, Rewritten, REWRITTEN, 34)         /* records written by partitions choosing again this frame */ \
     X(cp, gp, TookOver, TOOK_OVER, 35)          /* of those, how many took over an old record's light */ \
     X(cp, gp, LastRewritten, LAST_REWRITTEN, 36)                                               \
@@ -316,7 +316,7 @@ namespace velk {
     X(cp, gp, Looked, LOOKED, 17)               /* which way the camera looked when it chose, three floats */ \
     X(cp, gp, OutOfView, OUT_OF_VIEW, 20)       /* 1 when it chose clusters at the light's level for being out of view */ \
     X(cp, gp, Always, ALWAYS, 21)               /* 1 when its records are visited in view or not: some deform, or are items drawn by their own pass */ \
-    X(cp, gp, LightOnly, LIGHT_ONLY, 22)        /* its records for light only, for the log */ \
+    X(cp, gp, ForRays, FOR_RAYS, 22)            /* its records for rays only, for the log */ \
     X(cp, gp, Quads, QUADS, 23)                 /* its quads, for the log */                   \
     X(cp, gp, Box, BOX, 24)                     /* the world box around what it draws, min then max, six floats */ \
     X(cp, gp, Balanced, BALANCED, 30)           /* when its tree for rays fell back to a balanced one, the height the sorted one had (0 overflowed as 1); 0 when not; for the log */ \

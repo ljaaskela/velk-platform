@@ -78,8 +78,8 @@ inline constexpr float kCutRefresh = 1.f / 16.f;
 /// on the next frame, unless its members changed, when it has none for the frame. A new quad
 /// tree (QUAD_TREE) or a turn of the camera after choosing for being out of view (OUT_OF_VIEW)
 /// makes it choose again. A partition's ray list holds, in the order of its pages, an entry
-/// (kCutRayWords) for each record rays trace (those at the light's level: records for light
-/// only, clusters as coarse as the light, quads, whole objects): its record's place in the pool
+/// (kCutRayWords) for each record rays trace (those at the light's level: records for rays only,
+/// clusters as coarse as the light, quads, whole objects): its record's place in the pool
 /// and its box. Its tree is over them; the ray marks have a bit for each record of the
 /// pool, set by the choosing where the record's member is in a patch for rays (kCutRayQuad), so
 /// that the tree pass leaves it out, read only for the partitions that chose this frame.
@@ -136,10 +136,11 @@ inline constexpr uint32_t kCutRayQuad = 0xFFFFFFFDu;
 /// batches were made again. The rename marks it, and its partition chooses again before anything
 /// reads it (instance_cut_stale_src). Mirrors VELK_CUT_STALE.
 inline constexpr uint32_t kCutStale = 0xFFFFFFFCu;
-/// A kept cut's record of a cluster for light only has this on its entry: a cluster coarse
-/// enough for light (kLightPixels) over drawn ones finer than that. It holds light and is neither
-/// drawn nor seen by rays. Mirrors VELK_CUT_LIGHT_ONLY.
-inline constexpr uint32_t kCutLightOnly = 0x80000000u;
+/// A kept cut's record of a cluster for rays only has this on its entry: a cluster at the light's
+/// spacing (kLightPixels) over drawn ones finer than that, which rays walk in their place. It is
+/// not drawn and has no light of its own but the one value a ray's hit asks for. Mirrors
+/// VELK_CUT_FOR_RAYS.
+inline constexpr uint32_t kCutForRays = 0x80000000u;
 /// How wide on screen, in pixels, a partition's quad may be to take the place of the members
 /// under it, seen from where its partition chose. The topmost such quad over a member is chosen.
 inline constexpr float kQuadPixels = kLodElementPixels;
@@ -196,7 +197,7 @@ inline constexpr uint32_t kTraceResolve = 5;
 /// then its draw, its ids' second word and the bits of the opacity it was drawn with.
 inline constexpr uint32_t kTraceBlended = 6;
 /// A partition's walk of a mesh's hierarchy (velk_lod_child) reached a cluster on the ray: chosen
-/// (2), for light only (3), skipped with all under its node too coarse (4) or with a parent that
+/// (2), for rays only (3), skipped with all under its node too coarse (4) or with a parent that
 /// will do (5), too coarse itself (6), its parent will do (7); then its entry, cluster and the
 /// partition's state word.
 inline constexpr uint32_t kTraceWalk = 7;
@@ -774,12 +775,12 @@ float velk_lod_pixels(uint word, mat4 world, float scale, vec3 cam, float pixels
 }
 
 // What child `child` of a hierarchy node is to the choice (VELK_LOD_SKIP, VELK_LOD_DESCEND,
-// VELK_LOD_CHOSEN or VELK_LOD_LIGHT_ONLY), and in `c` the node it is or its cluster.
+// VELK_LOD_CHOSEN or VELK_LOD_FOR_RAYS), and in `c` the node it is or its cluster.
 // `clusters` is the entry's cluster words.
 #define VELK_LOD_SKIP 0u
 #define VELK_LOD_DESCEND 1u
 #define VELK_LOD_CHOSEN 2u
-#define VELK_LOD_LIGHT_ONLY 3u
+#define VELK_LOD_FOR_RAYS 3u
 uint velk_lod_child(uint child, uint clusters, mat4 world, float scale, vec3 lod_cam, mat4 vp, float pixels_per_unit,
                     float max_pixels, out uint c)
 {
@@ -854,7 +855,7 @@ uint velk_lod_child(uint child, uint clusters, mat4 world, float scale, vec3 lod
     // The cluster's own error and its parent's, as stored and on screen.
     velk_trace_numbers(c | 0x02000000u, uintBitsToFloat(cull_words.data[cluster + VELK_LOD_CLUSTER_SPHERE + 4u]), own);
     velk_trace_numbers(c | 0x01000000u, uintBitsToFloat(cull_words.data[cluster + VELK_LOD_CLUSTER_PARENT_SPHERE + 4u]), parent);
-    // Traced: chosen (2), for light only (3), too coarse (6), or its parent will do (7).
+    // Traced: chosen (2), for rays only (3), too coarse (6), or its parent will do (7).
     velk_trace_walk(clusters, c, world, scale,
                     own <= limit && parent > limit ? 2u
 #ifdef VELK_LOD_LIGHT
@@ -864,7 +865,7 @@ uint velk_lod_child(uint child, uint clusters, mat4 world, float scale, vec3 lod
 #endif
     if (own <= limit && parent > limit) return VELK_LOD_CHOSEN;
 #ifdef VELK_LOD_LIGHT
-    if (!out_of_view && own <= pc.light_pixels && parent > pc.light_pixels) return VELK_LOD_LIGHT_ONLY;
+    if (!out_of_view && own <= pc.light_pixels && parent > pc.light_pixels) return VELK_LOD_FOR_RAYS;
 #endif
     return VELK_LOD_SKIP;
 }
@@ -911,7 +912,7 @@ void velk_lod_walk(uint entry, uint start, uint slot, mat4 world, float scale, v
                 velk_lod_chosen(entry, c, slot, world, scale, cam, lod_cam, pixels_per_unit, deforming);
             }
 #ifdef VELK_LOD_LIGHT
-            else if (what == VELK_LOD_LIGHT_ONLY) {
+            else if (what == VELK_LOD_FOR_RAYS) {
                 velk_lod_light_chosen(entry, c, slot);
             }
 #endif
@@ -1135,8 +1136,8 @@ void main()
     cull_words.data[cut + VELK_CUT_PAGES_DEMAND] = 0u;
     // A new frame of the takeover table: what it held is gone.
     cull_words.data[cut + VELK_CUT_TAKEOVER_FRAME] += 1u;
-    cull_words.data[cut + VELK_CUT_LAST_LIGHT_ONLY_RECORDS] = cull_words.data[cut + VELK_CUT_LIGHT_ONLY_RECORDS];
-    cull_words.data[cut + VELK_CUT_LIGHT_ONLY_RECORDS] = 0u;
+    cull_words.data[cut + VELK_CUT_LAST_FOR_RAYS_RECORDS] = cull_words.data[cut + VELK_CUT_FOR_RAYS_RECORDS];
+    cull_words.data[cut + VELK_CUT_FOR_RAYS_RECORDS] = 0u;
     cull_words.data[cut + VELK_CUT_LAST_REWRITTEN] = cull_words.data[cut + VELK_CUT_REWRITTEN];
     cull_words.data[cut + VELK_CUT_LAST_TOOK_OVER] = cull_words.data[cut + VELK_CUT_TOOK_OVER];
     cull_words.data[cut + VELK_CUT_REWRITTEN] = 0u;
@@ -1375,7 +1376,7 @@ void velk_takeover_put(uint cut, uint was)
     uint cluster = cull_words.data[was + VELK_RECORD_CLUSTER];
     uint slot = cull_words.data[was + VELK_RECORD_SLOT];
     velk_takeover_insert(table, mask, stamp, velk_takeover_hash(entry, cluster, slot), was);
-    if (entry < VELK_CUT_LIGHT_ONLY) {
+    if (entry < VELK_CUT_FOR_RAYS) {
         uint mark = velk_takeover_mark(entry, cluster, false);
         if (mark != 0xFFFFFFFFu) velk_takeover_insert(table, mask, stamp, velk_takeover_mark_hash(entry, mark, slot), was);
     }
@@ -1464,7 +1465,7 @@ void velk_cut_record(uint entry, uint cluster, uint slot)
                 radiance = cull_words.data[was + VELK_RECORD_RADIANCE];
                 radiance_dir = cull_words.data[was + VELK_RECORD_RADIANCE_DIR];
                 ++g_took;
-            } else if (entry < VELK_CUT_LIGHT_ONLY) {
+            } else if (entry < VELK_CUT_FOR_RAYS) {
                 // Finer detail where coarser was: its light starts from the coarser record's, a
                 // traced one value as it is, points by their page (kLightInherit), and its indirect
                 // light likewise.
@@ -1509,10 +1510,10 @@ void velk_lod_chosen(uint entry, uint c, uint slot, mat4 world, float scale, vec
     velk_cut_record(entry, c, slot);
 }
 
-// A cluster at the light's level over drawn ones finer than it: a record for light only.
+// A cluster at the light's level over drawn ones finer than it: a record for rays only.
 void velk_lod_light_chosen(uint entry, uint c, uint slot)
 {
-    velk_cut_record(entry | VELK_CUT_LIGHT_ONLY, c, slot);
+    velk_cut_record(entry | VELK_CUT_FOR_RAYS, c, slot);
 }
 
 // The trace of the walk (kTraceWalk): what the walk of entry g_walk_entry, for the partition
@@ -1623,7 +1624,7 @@ uint velk_cut_expand(uint w, vec3 viewpoint, bool put, uint to)
     uint named = s_items[w];
     uint entry = s_items[w + 1u];
     uint node = s_items[w + 2u];
-    g_walk_entry = entry & ~VELK_CUT_LIGHT_ONLY;
+    g_walk_entry = entry & ~VELK_CUT_FOR_RAYS;
     CullInstance ci = cull_instances.data[velk_cut_named_instance(named)];
     mat4 world = velk_sized_world(ci.world_matrix, ci.offset.xyz, ci.size.xyz);
     float scale = velk_cut_scale(world);
@@ -1642,7 +1643,7 @@ uint velk_cut_expand(uint w, vec3 viewpoint, bool put, uint to)
         if (put) {
             uint o = (to + n) * 4u;
             s_items[o] = named;
-            s_items[o + 1u] = what == VELK_LOD_LIGHT_ONLY ? entry | VELK_CUT_LIGHT_ONLY : entry;
+            s_items[o + 1u] = what == VELK_LOD_FOR_RAYS ? entry | VELK_CUT_FOR_RAYS : entry;
             s_items[o + 2u] = c;
             s_items[o + 3u] = (what == VELK_LOD_DESCEND ? VELK_CHOOSE_NODE : VELK_CHOOSE_RECORD) | no_rays;
         }
@@ -2121,7 +2122,7 @@ void velk_cut_record_box(uint record, uint instances_base, uint items_word, floa
     lo = vec3(1e30);
     hi = vec3(-1e30);
     uint entry = cull_words.data[record + VELK_RECORD_ENTRY]
-               & ~(velk_cut_light_only(cull_words.data[record + VELK_RECORD_ENTRY]) ? VELK_CUT_LIGHT_ONLY : 0u);
+               & ~(velk_cut_for_rays(cull_words.data[record + VELK_RECORD_ENTRY]) ? VELK_CUT_FOR_RAYS : 0u);
     uint cluster = cull_words.data[record + VELK_RECORD_CLUSTER];
     uint slot = cull_words.data[record + VELK_RECORD_SLOT];
     if (entry == VELK_CUT_RAY_QUAD) {
@@ -2226,7 +2227,7 @@ void velk_cut_record_box(uint record, uint instances_base, uint items_word, floa
  * near to near, and the tree over it is balanced. `pad` grows every box, for instances that a
  * motion function moves, by twice how far it can move one, so that the tree holds wherever
  * they are while it is kept. Also the partition's box around all it draws, whether it is
- * always visited, and its counts for the log (VELK_PART_BOX, ALWAYS, LIGHT_ONLY, QUADS), which
+ * always visited, and its counts for the log (VELK_PART_BOX, ALWAYS, FOR_RAYS, QUADS), which
  * instance_cut_visible_src goes by. A work group per partition.
  */
 inline constexpr string_view instance_cut_tree_src = R"(
@@ -2268,17 +2269,17 @@ shared uint s_bounded;
 shared vec3 s_lo[64];
 shared vec3 s_hi[64];
 shared uint s_always[64];
-shared uint s_light_only[64];
+shared uint s_for_rays[64];
 shared uint s_quads[64];
 
-// Adds `record`'s share to the partition's box and counts: none for one for light only, a patch
-// for rays or a cluster for rays only, which are not drawn; a deforming mesh's or an item drawn
+// Adds `record`'s share to the partition's box and counts: none for one for rays only
+// (kCutForRays) or a patch for rays, which are not drawn; a deforming mesh's or an item drawn
 // by its own pass makes the partition always visited.
-void velk_draw_share(uint record, inout vec3 lo, inout vec3 hi, inout uint always, inout uint light_only, inout uint quads)
+void velk_draw_share(uint record, inout vec3 lo, inout vec3 hi, inout uint always, inout uint for_rays, inout uint quads)
 {
     uint entry = cull_words.data[record + VELK_RECORD_ENTRY];
-    if (velk_cut_light_only(entry)) {
-        ++light_only;
+    if (velk_cut_for_rays(entry)) {
+        ++for_rays;
         return;
     }
     if (entry == VELK_CUT_RAY_QUAD) return;
@@ -2307,16 +2308,16 @@ float velk_ray_pixels(uint word, mat4 world, float scale, vec3 from, float pixel
 }
 
 // Whether rays trace `record`, the record at `place` of the pool: at the light's level, seen
-// from `viewpoint` where its partition chose. A record for light only is, and a patch for rays;
+// from `viewpoint` where its partition chose. A record for rays only is, and a patch for rays;
 // a record of a member in a patch is not, the patch standing for it; a cluster drawn finer than
-// the light, whose parent is not coarser than the light, is not, since a record for light only
+// the light, whose parent is not coarser than the light, is not, since a record for rays only
 // covers it.
 bool velk_ray_record(uint record, uint place, vec3 viewpoint, float pixels_per_unit)
 {
     uint marks = cull_words.data[pc.cut_word + VELK_CUT_RAY_MARKS_WORD];
     if ((cull_words.data[marks + (place >> 5u)] & (1u << (place & 31u))) != 0u) return false;
     uint entry = cull_words.data[record + VELK_RECORD_ENTRY];
-    if (entry >= VELK_CUT_RAY_QUAD || velk_cut_light_only(entry)) return true;
+    if (entry >= VELK_CUT_RAY_QUAD || velk_cut_for_rays(entry)) return true;
     uint slot = cull_words.data[record + VELK_RECORD_SLOT];
     uint instance = pc.instances_base + slot;
     if (pc.items_word != 0xFFFFFFFFu) instance = cull_words.data[pc.items_word + slot * VELK_PLAIN_ITEM_WORDS];
@@ -2632,19 +2633,19 @@ void main()
     vec3 draw_lo = vec3(1e30);
     vec3 draw_hi = vec3(-1e30);
     uint always = 0u;
-    uint light_only = 0u;
+    uint for_rays = 0u;
     uint quads = 0u;
     for (uint r = from; r < to; ++r) {
         uint place = velk_cut_place(g_table, r);
         uint record = velk_cut_record_word(cut, place);
         if (velk_ray_record(record, place, viewpoint, pixels_per_unit)) ++mine;
-        velk_draw_share(record, draw_lo, draw_hi, always, light_only, quads);
+        velk_draw_share(record, draw_lo, draw_hi, always, for_rays, quads);
     }
     s_counts[lane] = mine;
     s_lo[lane] = draw_lo;
     s_hi[lane] = draw_hi;
     s_always[lane] = always;
-    s_light_only[lane] = light_only;
+    s_for_rays[lane] = for_rays;
     s_quads[lane] = quads;
     barrier();
     if (lane == 0u) {
@@ -2652,7 +2653,7 @@ void main()
             draw_lo = min(draw_lo, s_lo[i]);
             draw_hi = max(draw_hi, s_hi[i]);
             always |= s_always[i];
-            light_only += s_light_only[i];
+            for_rays += s_for_rays[i];
             quads += s_quads[i];
         }
         for (uint k = 0u; k < 3u; ++k) {
@@ -2660,7 +2661,7 @@ void main()
             cull_words.data[state + VELK_PART_BOX + 3u + k] = floatBitsToUint(draw_hi[k]);
         }
         cull_words.data[state + VELK_PART_ALWAYS] = always;
-        cull_words.data[state + VELK_PART_LIGHT_ONLY] = light_only;
+        cull_words.data[state + VELK_PART_FOR_RAYS] = for_rays;
         cull_words.data[state + VELK_PART_QUADS] = quads;
     }
     uint at = 0u;
@@ -2997,8 +2998,8 @@ void main()
     uint state = velk_cut_state(cut, index);
     uint count = cull_words.data[state + VELK_PART_COUNT];
     if (count == 0u) return;
-    uint light_only = cull_words.data[state + VELK_PART_LIGHT_ONLY];
-    if (light_only != 0u) atomicAdd(cull_words.data[cut + VELK_CUT_LIGHT_ONLY_RECORDS], light_only);
+    uint for_rays = cull_words.data[state + VELK_PART_FOR_RAYS];
+    if (for_rays != 0u) atomicAdd(cull_words.data[cut + VELK_CUT_FOR_RAYS_RECORDS], for_rays);
     uint quads = cull_words.data[state + VELK_PART_QUADS];
     if (pc.quads_word != 0xFFFFFFFFu && quads != 0u) atomicAdd(cull_words.data[pc.quads_word + VELK_QUAD_LIST_IN_CUTS], quads);
 
@@ -3011,7 +3012,7 @@ void main()
     bool boxed = all(lessThanEqual(lo, hi));
     bool traced = g.trace != VELK_TRACE_NONE && boxed && velk_trace_box(g, lo - g.cam_pos.xyz, hi - g.cam_pos.xyz);
     if (pc.whole == 0u && cull_words.data[state + VELK_PART_ALWAYS] == 0u) {
-        // Nothing drawn: only records for light only, or patches for rays.
+        // Nothing drawn: only records for rays only, or patches for rays.
         if (!boxed) return;
         if (velk_box_outside(g.view_projection, lo - g.cam_pos.xyz, hi - g.cam_pos.xyz)) {
             if (traced) velk_trace_note(g, VELK_TRACE_PARTITION, 1u, index, count, 0u);
@@ -3151,8 +3152,8 @@ void main()
     uint cluster_or_table = cull_words.data[record + VELK_RECORD_CLUSTER];
     uint slot = cull_words.data[record + VELK_RECORD_SLOT];
 
-    // For light only, or a patch for rays only: not drawn.
-    if (velk_cut_light_only(entry) || entry == VELK_CUT_RAY_QUAD) return;
+    // For rays only, or a patch for rays: not drawn.
+    if (velk_cut_for_rays(entry) || entry == VELK_CUT_RAY_QUAD) return;
 
     // A quad: in view, it goes to the view's quad list, never past its room, its record in the
     // column after.
@@ -4282,9 +4283,9 @@ void main()
             cull_words.data[record + VELK_RECORD_MESH_TABLE] = renamed;
         }
     } else {
-        uint renamed = velk_rename(entry & ~VELK_CUT_LIGHT_ONLY);
+        uint renamed = velk_rename(entry & ~VELK_CUT_FOR_RAYS);
         stale = renamed == VELK_CUT_STALE;
-        cull_words.data[record + VELK_RECORD_ENTRY] = stale ? VELK_CUT_STALE : renamed | (entry & VELK_CUT_LIGHT_ONLY);
+        cull_words.data[record + VELK_RECORD_ENTRY] = stale ? VELK_CUT_STALE : renamed | (entry & VELK_CUT_FOR_RAYS);
     }
     uint item = cull_words.data[record + VELK_RECORD_SLOT];
     if (item < pc.item_count) {
@@ -5326,7 +5327,7 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
         uint32_t moves = 0;
         uint32_t partitions = 0;
         uint32_t records = 0;
-        uint32_t light_only = 0;
+        uint32_t for_rays = 0;
         uint32_t pages = 0;
         uint32_t pages_used = 0;
         for (const auto& c : state.cuts) {
@@ -5334,8 +5335,8 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             arena->read_at(c.region.offset(), header, sizeof(header));
             moves += header[kCutChoseAgain];
             partitions += c.partitions;
-            const uint32_t light = header[kCutLastLightOnlyRecords];
-            light_only += light;
+            const uint32_t light = header[kCutLastForRaysRecords];
+            for_rays += light;
             pages += header[kCutPages];
             pages_used += header[kCutPages] - std::min(header[kCutFreePages], header[kCutPages]);
             vector<uint32_t> states(size_t(c.partitions) * kCutPartitionWords);
@@ -5344,9 +5345,9 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
         }
         const auto frames = static_cast<double>(ctx.present_counter - state.cut_log_frame);
         if (state.cut_moves_known) {
-            VELK_LOG(I, "kept cut: %u records on %u of %u pages, %u for light only; partitions choosing again: %.1f a frame, "
+            VELK_LOG(I, "kept cut: %u records on %u of %u pages, %u for rays only; partitions choosing again: %.1f a frame, "
                         "of %u table entries",
-                     records, pages_used, pages, light_only, static_cast<double>(moves - state.cut_moves) / frames, partitions);
+                     records, pages_used, pages, for_rays, static_cast<double>(moves - state.cut_moves) / frames, partitions);
             if (state.quads.valid()) {
                 uint32_t quads = 0;
                 uint32_t in_cut = 0;
@@ -5519,7 +5520,7 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
                     draw = batch->draw_data_region_offset() / sizeof(DrawDataHeader);
                     break;
                 }
-                static constexpr const char* kWalk[] = {"?", "?", "chosen", "for light only", "skipped, all under its node too coarse",
+                static constexpr const char* kWalk[] = {"?", "?", "chosen", "for rays only", "skipped, all under its node too coarse",
                                                         "skipped, all under its node have a parent that will do",
                                                         "too coarse", "its parent will do",
                                                         "NODE skipped, all under it too coarse",
@@ -5726,12 +5727,12 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
                 took += words[1];
             }
             clear(kLightPoolSumChanged, 1u);
-            VELK_LOG(I, "light: %u pages, %u of them free; records %u paged (%u linked), %u one value; last frame %u searched, %u one values "
+            VELK_LOG(I, "light: %u pages, %u of them free; records %u paged, %u one value; last frame %u searched, %u one values "
                         "traced, points listed: %u untraced coarse, %u due coarse, %u fine; "
                         "%u records changed since the last log, %u records "
                         "chosen again of which %u kept their light, %u lit pixels untraced; budget %u rays",
-                     h[kLightPoolPages], h[kLightPoolFreePages], h[kLightPoolLastRecordsPaged], h[kLightPoolLastRecordsLinked],
-                     h[kLightPoolLastRecordsOneValue], h[kLightPoolLastSearched], h[kLightPoolLastTraces],
+                     h[kLightPoolPages], h[kLightPoolFreePages], h[kLightPoolLastRecordsPaged], h[kLightPoolLastRecordsOneValue],
+                     h[kLightPoolLastSearched], h[kLightPoolLastTraces],
                      h[kLightPoolLastUntracedPoints], h[kLightPoolLastCoarsePoints], h[kLightPoolLastFinePoints],
                      h[kLightPoolSumChanged], written, took, h[kLightPoolLastUntracedPixels], h[kLightPoolRayBudget]);
             uint32_t longest = 0;
@@ -5782,9 +5783,8 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             clear(kLightPoolSumRetraces, kLightPoolSumSplitsRefused + 1u - kLightPoolSumRetraces);
             clear(kLightPoolSumLaidInherited, 1u);
             VELK_LOG(I, "light causes: %u points traced again from none after a change; points laid out for records without light %u, "
-                        "for records grown from one value %u, from a coarser record's %u, for records for light only %u",
-                     h[kLightPoolSumRetraces], h[kLightPoolSumLaidNew], h[kLightPoolSumLaidFromOne], h[kLightPoolSumLaidInherited],
-                     h[kLightPoolSumLaidLightOnly]);
+                        "for records grown from one value %u, from a coarser record's %u",
+                     h[kLightPoolSumRetraces], h[kLightPoolSumLaidNew], h[kLightPoolSumLaidFromOne], h[kLightPoolSumLaidInherited]);
             // Since the last log: records whose lights were chosen, and of them those that left out
             // a light at least a tenth, or a quarter, as strong as the strongest they took.
             // Since the last log, in every 16th frame: points listed by what listed them.

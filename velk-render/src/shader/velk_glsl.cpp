@@ -113,11 +113,11 @@ R"(
 // A kept cut's record whose batch words did not carry over when its batches were made again:
 // kCutStale. Its partition chooses again before anything reads it.
 #define VELK_CUT_STALE 0xFFFFFFFCu
-// A kept cut's record of a cluster that holds light and is not drawn has this on its entry:
-// kCutLightOnly. Test with velk_cut_light_only, since a quad's, a ray quad's and a whole mesh's
+// A kept cut's record of a cluster that rays see and is not drawn has this on its entry:
+// kCutForRays. Test with velk_cut_for_rays, since a quad's, a ray quad's and a whole mesh's
 // entries have it too.
-#define VELK_CUT_LIGHT_ONLY 0x80000000u
-#define velk_cut_light_only(entry) ((entry) < VELK_CUT_STALE && ((entry) & VELK_CUT_LIGHT_ONLY) != 0u)
+#define VELK_CUT_FOR_RAYS 0x80000000u
+#define velk_cut_for_rays(entry) ((entry) < VELK_CUT_STALE && ((entry) & VELK_CUT_FOR_RAYS) != 0u)
 // A partition's tree leaves are the finest it has: kQuadLeavesOnly.
 #define VELK_QUAD_LEAVES_ONLY 0x80000000u
 // Words per partition state of a kept cut: kCutPartitionWords.

@@ -1671,10 +1671,8 @@ void DeferredPath::emit_light_claim_pass(ViewState& vs, const RenderView& render
         uint32_t pool_word, globals_base;
         float light_pixels;
         uint32_t lights;
-        uint32_t top_word;  ///< Whose cuts bound the scan for records for light only.
     };
-    const SearchPushC search_pc{pool.word(), render_view.view_globals_base, kLightPixels, lights,
-                                instance_ray_top_word(vs.instance_cull)};
+    const SearchPushC search_pc{pool.word(), render_view.view_globals_base, kLightPixels, lights};
     // Its groups past the search list's make the pieces the claim asked for.
     emit_one(vs.light_search_pass, view_pass_name(other, "deferred.light_search", "other:deferred.light_search"),
              "DeferredPath: light search", search_pipeline, &search_pc, sizeof(search_pc),
