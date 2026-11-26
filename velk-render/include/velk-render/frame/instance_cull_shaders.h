@@ -90,10 +90,8 @@ inline constexpr string_view depth_pyramid_compute_src = VELK_DEPTH_PYRAMID_COMP
  * list, kCullChunkListWords each: its first slot's word and its partition's index. So a
  * partition's choice is never off by more than that share.
  */
-#include <velk-render/glsl/instance_partition_cull_1.inc>
-#include <velk-render/glsl/instance_partition_cull_2.inc>
-inline constexpr string_view instance_partition_cull_src = VELK_INSTANCE_PARTITION_CULL_1_GLSL VELK_CUT_GLSL
-    VELK_INSTANCE_PARTITION_CULL_2_GLSL;
+#include <velk-render/glsl/instance_partition_cull.inc>
+inline constexpr string_view instance_partition_cull_src = VELK_INSTANCE_PARTITION_CULL_GLSL;
 
 /**
  * Starts a frame of a kept cut (kCutHeaderWords): the other page table becomes current, and the
@@ -111,10 +109,8 @@ inline constexpr string_view instance_cut_begin_src = VELK_INSTANCE_CUT_BEGIN_GL
  * records (VELK_CUT_DRAW_GROUPS) go up to the last page in use, then clears the marks. The pages
  * of partitions that chose again are free from here, for the next frame's choosing.
  */
-#include <velk-render/glsl/instance_cut_pages_1.inc>
-#include <velk-render/glsl/instance_cut_pages_2.inc>
-inline constexpr string_view instance_cut_pages_src = VELK_INSTANCE_CUT_PAGES_1_GLSL VELK_CUT_GLSL
-    VELK_INSTANCE_CUT_PAGES_2_GLSL;
+#include <velk-render/glsl/instance_cut_pages.inc>
+inline constexpr string_view instance_cut_pages_src = VELK_INSTANCE_CUT_PAGES_GLSL;
 
 /**
  * Chooses the clusters of each instance in the chunks of the choose list, all round the camera,
@@ -135,11 +131,8 @@ inline constexpr string_view instance_cut_pages_src = VELK_INSTANCE_CUT_PAGES_1_
  * next_word each item's next item of the same object, and head_word by object slot its first.
  * A record then names the item in place of a slot.
  */
-#include <velk-render/glsl/instance_cut_choose_1.inc>
-#include <velk-render/glsl/instance_cut_choose_2.inc>
-#include <velk-render/glsl/instance_cut_choose_3.inc>
-inline constexpr string_view instance_cut_choose_src = VELK_INSTANCE_CUT_CHOOSE_1_GLSL VELK_CUT_GLSL VELK_TRACE_GLSL
-    VELK_INSTANCE_CUT_CHOOSE_2_GLSL VELK_LOD_SELECT_GLSL VELK_INSTANCE_CUT_CHOOSE_3_GLSL;
+#include <velk-render/glsl/instance_cut_choose.inc>
+inline constexpr string_view instance_cut_choose_src = VELK_INSTANCE_CUT_CHOOSE_GLSL;
 
 /**
  * Gives each partition that chose again this frame pages for its count, off the free stack, its
@@ -149,10 +142,8 @@ inline constexpr string_view instance_cut_choose_src = VELK_INSTANCE_CUT_CHOOSE_
  * records for the frame instead, since its old ones may name what is gone. A thread per
  * partition.
  */
-#include <velk-render/glsl/instance_cut_place_1.inc>
-#include <velk-render/glsl/instance_cut_place_2.inc>
-inline constexpr string_view instance_cut_place_src = VELK_INSTANCE_CUT_PLACE_1_GLSL VELK_CUT_GLSL
-    VELK_INSTANCE_CUT_PLACE_2_GLSL;
+#include <velk-render/glsl/instance_cut_place.inc>
+inline constexpr string_view instance_cut_place_src = VELK_INSTANCE_CUT_PLACE_GLSL;
 
 // Where a cut record is in the world, for the shader that declares cull_words and
 // cull_instances: a box around it, empty for a slot with no instance. `instances_base` and
@@ -170,10 +161,8 @@ inline constexpr string_view instance_cut_place_src = VELK_INSTANCE_CUT_PLACE_1_
  * always visited, and its counts for the log (VELK_PART_BOX, ALWAYS, FOR_RAYS, QUADS), which
  * instance_cut_visible_src goes by. A work group per partition.
  */
-#include <velk-render/glsl/instance_cut_tree_1.inc>
-#include <velk-render/glsl/instance_cut_tree_2.inc>
-inline constexpr string_view instance_cut_tree_src = VELK_INSTANCE_CUT_TREE_1_GLSL VELK_CUT_GLSL VELK_CUT_BOX_GLSL
-    VELK_SORT_GLSL VELK_LBVH_GLSL VELK_INSTANCE_CUT_TREE_2_GLSL;
+#include <velk-render/glsl/instance_cut_tree.inc>
+inline constexpr string_view instance_cut_tree_src = VELK_INSTANCE_CUT_TREE_GLSL;
 
 /**
  * Builds a view's top tree for rays (kRayTopHeaderWords) over the trees of its kept cuts'
@@ -182,10 +171,8 @@ inline constexpr string_view instance_cut_tree_src = VELK_INSTANCE_CUT_TREE_1_GL
  * order of their boxes' centres; past that, a balanced tree over all of them in the order of the
  * cuts and of each cut's partition table, those without records not referenced. One work group.
  */
-#include <velk-render/glsl/instance_cut_top_1.inc>
-#include <velk-render/glsl/instance_cut_top_2.inc>
-inline constexpr string_view instance_cut_top_src = VELK_INSTANCE_CUT_TOP_1_GLSL VELK_CUT_GLSL VELK_SORT_GLSL
-    VELK_LBVH_GLSL VELK_INSTANCE_CUT_TOP_2_GLSL;
+#include <velk-render/glsl/instance_cut_top.inc>
+inline constexpr string_view instance_cut_top_src = VELK_INSTANCE_CUT_TOP_GLSL;
 
 /**
  * Lists the records instance_cut_draw_src walks: those of each partition whose box around what
@@ -194,10 +181,8 @@ inline constexpr string_view instance_cut_top_src = VELK_INSTANCE_CUT_TOP_1_GLSL
  * VELK_CUT_VISIBLE_GROUPS. With `whole` set, every partition's. Adds up the partitions' counts
  * for the log. A thread per partition.
  */
-#include <velk-render/glsl/instance_cut_visible_1.inc>
-#include <velk-render/glsl/instance_cut_visible_2.inc>
-inline constexpr string_view instance_cut_visible_src = VELK_INSTANCE_CUT_VISIBLE_1_GLSL VELK_CUT_GLSL VELK_TRACE_GLSL
-    VELK_INSTANCE_CUT_VISIBLE_2_GLSL;
+#include <velk-render/glsl/instance_cut_visible.inc>
+inline constexpr string_view instance_cut_visible_src = VELK_INSTANCE_CUT_VISIBLE_GLSL;
 
 /**
  * Draws from a kept cut: each record a partition holds whose instance is near enough, and
@@ -209,12 +194,8 @@ inline constexpr string_view instance_cut_visible_src = VELK_INSTANCE_CUT_VISIBL
  * set, every record is drawn wherever it is, for a view that shows another camera's choice from
  * outside.
  */
-#include <velk-render/glsl/instance_cut_draw_1.inc>
-#include <velk-render/glsl/instance_cut_draw_2.inc>
-#include <velk-render/glsl/instance_cut_draw_3.inc>
-inline constexpr string_view instance_cut_draw_src = VELK_INSTANCE_CUT_DRAW_1_GLSL VELK_CUT_GLSL VELK_OCCLUSION_GLSL
-    VELK_TINY_ADD_GLSL VELK_TRACE_GLSL VELK_INSTANCE_CUT_DRAW_2_GLSL VELK_LOD_SELECT_GLSL VELK_LOD_TAKE_GLSL
-    VELK_INSTANCE_CUT_DRAW_3_GLSL;
+#include <velk-render/glsl/instance_cut_draw.inc>
+inline constexpr string_view instance_cut_draw_src = VELK_INSTANCE_CUT_DRAW_GLSL;
 
 /**
  * Tests each instance's bounding sphere against the view and appends the visible
@@ -237,23 +218,15 @@ inline constexpr string_view instance_cut_draw_src = VELK_INSTANCE_CUT_DRAW_1_GL
  * for instance_cluster_fill_src. A cluster that does not fit is not counted either, so the
  * counts always match the records.
  */
-#include <velk-render/glsl/instance_cull_compute_1.inc>
-#include <velk-render/glsl/instance_cull_compute_2.inc>
-#include <velk-render/glsl/instance_cull_compute_3.inc>
-inline constexpr string_view instance_cull_compute_src = VELK_INSTANCE_CULL_COMPUTE_1_GLSL VELK_OCCLUSION_GLSL
-    VELK_TINY_ADD_GLSL VELK_TRACE_GLSL VELK_INSTANCE_CULL_COMPUTE_2_GLSL VELK_LOD_SELECT_GLSL VELK_LOD_TAKE_GLSL
-    VELK_INSTANCE_CULL_COMPUTE_3_GLSL;
+#include <velk-render/glsl/instance_cull_compute.inc>
+inline constexpr string_view instance_cull_compute_src = VELK_INSTANCE_CULL_COMPUTE_GLSL;
 
 /**
  * Tests what failed instance_cull_compute_src's occlusion test again, against the pyramid of
  * what this frame has drawn so far, and adds what is visible after what that test passed.
  */
-#include <velk-render/glsl/instance_retest_compute_1.inc>
-#include <velk-render/glsl/instance_retest_compute_2.inc>
-#include <velk-render/glsl/instance_retest_compute_3.inc>
-inline constexpr string_view instance_retest_compute_src = VELK_INSTANCE_RETEST_COMPUTE_1_GLSL VELK_OCCLUSION_GLSL
-    VELK_TINY_ADD_GLSL VELK_INSTANCE_RETEST_COMPUTE_2_GLSL VELK_LOD_SELECT_GLSL VELK_LOD_TAKE_GLSL
-    VELK_INSTANCE_RETEST_COMPUTE_3_GLSL;
+#include <velk-render/glsl/instance_retest_compute.inc>
+inline constexpr string_view instance_retest_compute_src = VELK_INSTANCE_RETEST_COMPUTE_GLSL;
 
 /**
  * Lays out one primitive's draws by cluster, once its instances are counted. Each cluster in
@@ -343,10 +316,8 @@ inline constexpr string_view instance_items_src = VELK_INSTANCE_ITEMS_GLSL;
  * instanced visual's item from `blocks`. A record whose words do not carry over becomes
  * kCutStale. A thread per record the pool holds.
  */
-#include <velk-render/glsl/instance_cut_rename_1.inc>
-#include <velk-render/glsl/instance_cut_rename_2.inc>
-inline constexpr string_view instance_cut_rename_src = VELK_INSTANCE_CUT_RENAME_1_GLSL VELK_CUT_GLSL
-    VELK_INSTANCE_CUT_RENAME_2_GLSL;
+#include <velk-render/glsl/instance_cut_rename.inc>
+inline constexpr string_view instance_cut_rename_src = VELK_INSTANCE_CUT_RENAME_GLSL;
 
 /**
  * After a rename, makes each partition holding a record that did not carry over (kCutStale)
@@ -355,10 +326,8 @@ inline constexpr string_view instance_cut_rename_src = VELK_INSTANCE_CUT_RENAME_
  * free pages be there for it. A work group per partition, over its records by its page table of
  * the last frame, which the decide pass then reads.
  */
-#include <velk-render/glsl/instance_cut_stale_1.inc>
-#include <velk-render/glsl/instance_cut_stale_2.inc>
-inline constexpr string_view instance_cut_stale_src = VELK_INSTANCE_CUT_STALE_1_GLSL VELK_CUT_GLSL
-    VELK_INSTANCE_CUT_STALE_2_GLSL;
+#include <velk-render/glsl/instance_cut_stale.inc>
+inline constexpr string_view instance_cut_stale_src = VELK_INSTANCE_CUT_STALE_GLSL;
 
 } // namespace velk
 

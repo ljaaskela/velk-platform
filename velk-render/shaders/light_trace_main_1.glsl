@@ -1,1 +1,0 @@
-#define VELK_LIGHT_WORDS velk_light_cell_words

@@ -42,10 +42,7 @@ namespace velk {
  * pc.spare1 gives each (velk_points_trace_point). Built on the light grid's code
  * (light_grid_src), whose velk_light_cell_words is the culling arena; pc.spare3 is the pool.
  */
-#include <velk-render/glsl/light_trace_main_1.inc>
-#include <velk-render/glsl/light_trace_main_2.inc>
-#define VELK_LIGHT_TRACE_MAIN_GLSL VELK_LIGHT_TRACE_MAIN_1_GLSL VELK_LIGHT_POOL_GLSL VELK_LIGHT_SLOTS_GLSL             \
-    VELK_LIGHT_TRACE_MAIN_2_GLSL
+#include <velk-render/glsl/light_trace_main.inc>
 
 // The rest of the light trace's shaders, after VELK_LIGHT_TRACE_MAIN_GLSL: apart, as the whole is
 // past what one string the compiler takes may be.
@@ -68,10 +65,8 @@ inline constexpr string_view light_trace_tail_src = VELK_LIGHT_TRACE_MAIN_TAIL_G
  * nothing changed is not traced again. Built on the deferred prelude with the light grid;
  * velk_light_cell_words is the culling arena, pc.spare3 the pool and pc.spare4 the change list.
  */
-#include <velk-render/glsl/light_changes_main_1.inc>
-#include <velk-render/glsl/light_changes_main_2.inc>
-inline constexpr string_view light_changes_main_src = VELK_LIGHT_CHANGES_MAIN_1_GLSL VELK_LIGHT_POOL_GLSL
-    VELK_LIGHT_SLOTS_GLSL VELK_LIGHT_CHANGES_MAIN_2_GLSL;
+#include <velk-render/glsl/light_changes_main.inc>
+inline constexpr string_view light_changes_main_src = VELK_LIGHT_CHANGES_MAIN_GLSL;
 
 // A probe's light (VELK_PROBE_LIGHT), for a shader that defines VELK_LIGHT_WORDS as the buffer
 // the probes are in: read, written and seen from a normal.
@@ -106,16 +101,10 @@ inline constexpr string_view light_changes_main_src = VELK_LIGHT_CHANGES_MAIN_1_
  * cells, the frame everything last changed, this frame's change list and the probe list (bit 31
  * set for the trace).
  */
-#include <velk-render/glsl/light_probes_main_1.inc>
-#include <velk-render/glsl/light_probes_main_2.inc>
-#include <velk-render/glsl/light_probes_main_3.inc>
-#include <velk-render/glsl/light_probes_main_4.inc>
+#include <velk-render/glsl/light_probes_main.inc>
 #include <velk-render/glsl/light_eval.inc>
 #include <velk-render/glsl/light_area.inc>
-inline constexpr string_view light_probes_main_src = VELK_LIGHT_PROBES_MAIN_1_GLSL
-    VELK_LIGHT_POOL_GLSL VELK_LIGHT_PROBES_MAIN_2_GLSL VELK_PROBE_GLSL VELK_PROBE_WRITE_GLSL VELK_PROBE_CELL_GLSL
-    VELK_LIGHT_PROBES_MAIN_3_GLSL VELK_LIGHT_SLOTS_GLSL VELK_LIGHT_ADD_GLSL VELK_LIGHT_EVAL_GLSL
-    VELK_LIGHT_AREA_GLSL VELK_LIGHT_PROBES_MAIN_4_GLSL;
+inline constexpr string_view light_probes_main_src = VELK_LIGHT_PROBES_MAIN_GLSL;
 
 /**
  * The reflections' resolve, after their trace (light_probes_main_src with VELK_REFLECT): a thread a
@@ -146,10 +135,8 @@ inline constexpr string_view reflect_resolve_src = VELK_REFLECT_RESOLVE_GLSL;
  * G-buffer's size (x low, y high), pc.extras.z this frame's probe store, pc.env.w the cells,
  * pc.more.w the gather's probe list, which it empties.
  */
-#include <velk-render/glsl/light_probes_filter_1.inc>
-#include <velk-render/glsl/light_probes_filter_2.inc>
-inline constexpr string_view light_probes_filter_src = VELK_LIGHT_PROBES_FILTER_1_GLSL VELK_PROBE_GLSL
-    VELK_PROBE_WRITE_GLSL VELK_PROBE_CELL_GLSL VELK_LIGHT_PROBES_FILTER_2_GLSL;
+#include <velk-render/glsl/light_probes_filter.inc>
+inline constexpr string_view light_probes_filter_src = VELK_LIGHT_PROBES_FILTER_GLSL;
 
 /**
  * Gives each record a pixel shows its light, the first time one does, as kLightNone says: one
@@ -174,10 +161,8 @@ inline constexpr string_view light_probes_filter_src = VELK_LIGHT_PROBES_FILTER_
 // (velk_claim_world).
 #include <velk-render/glsl/light_claim.inc>
 
-#include <velk-render/glsl/light_claim_1.inc>
-#include <velk-render/glsl/light_claim_2.inc>
-inline constexpr string_view light_claim_src = VELK_LIGHT_CLAIM_1_GLSL VELK_LIGHT_POOL_GLSL VELK_LIGHT_LIST_GLSL
-    VELK_LIGHT_CLAIM_GLSL VELK_LIGHT_CLAIM_2_GLSL;
+#include <velk-render/glsl/light_claim_main.inc>
+inline constexpr string_view light_claim_src = VELK_LIGHT_CLAIM_MAIN_GLSL;
 
 // Where a fragment of a draw by cluster is in its triangle, for shaders over blended surfaces'
 // fragments, which the visibility buffer does not hold: from its triangle's corners, from the
@@ -192,12 +177,8 @@ inline constexpr string_view light_claim_src = VELK_LIGHT_CLAIM_1_GLSL VELK_LIGH
  * in its triangle comes from its triangle's corners. Its push constants are the draw's, then the
  * claim's.
  */
-#include <velk-render/glsl/light_claim_blended_1.inc>
-#include <velk-render/glsl/light_claim_blended_2.inc>
-#include <velk-render/glsl/light_claim_blended_3.inc>
-inline constexpr string_view light_claim_blended_src = VELK_LIGHT_CLAIM_BLENDED_1_GLSL VELK_FRAGMENT_TRIANGLE_GLSL
-    VELK_LIGHT_CLAIM_BLENDED_2_GLSL VELK_LIGHT_POOL_GLSL VELK_LIGHT_LIST_GLSL VELK_LIGHT_CLAIM_GLSL
-    VELK_LIGHT_CLAIM_BLENDED_3_GLSL;
+#include <velk-render/glsl/light_claim_blended.inc>
+inline constexpr string_view light_claim_blended_src = VELK_LIGHT_CLAIM_BLENDED_GLSL;
 
 /**
  * Lays out the records on the search list (light_claim_src), a work group each: a point per
@@ -211,10 +192,8 @@ inline constexpr string_view light_claim_blended_src = VELK_LIGHT_CLAIM_BLENDED_
  * in, so that every piece has its four children or none. Their points start untraced, but for a root's corners, which take the vertices' points'
  * light. They are linked in last, so that nothing reads them before they are written.
  */
-#include <velk-render/glsl/light_search_1.inc>
-#include <velk-render/glsl/light_search_2.inc>
-inline constexpr string_view light_search_src = VELK_LIGHT_SEARCH_1_GLSL VELK_LIGHT_POOL_GLSL VELK_LIGHT_LIST_GLSL
-    VELK_LIGHT_SEARCH_2_GLSL;
+#include <velk-render/glsl/light_search.inc>
+inline constexpr string_view light_search_src = VELK_LIGHT_SEARCH_GLSL;
 
 /**
  * Marks the pages the records of a kept cut name, and counts its records with pages and with one
@@ -223,9 +202,8 @@ inline constexpr string_view light_search_src = VELK_LIGHT_SEARCH_1_GLSL VELK_LI
  * later traces. A thread per record of the cut's pool, a group a page up to the last in use
  * (VELK_CUT_DRAW_GROUPS). Runs after the sweep's begin, so before the claim lists this frame's.
  */
-#include <velk-render/glsl/light_mark_1.inc>
-#include <velk-render/glsl/light_mark_2.inc>
-inline constexpr string_view light_mark_src = VELK_LIGHT_MARK_1_GLSL VELK_LIGHT_POOL_GLSL VELK_LIGHT_MARK_2_GLSL;
+#include <velk-render/glsl/light_mark.inc>
+inline constexpr string_view light_mark_src = VELK_LIGHT_MARK_GLSL;
 
 /**
  * Keeps the pieces in use, after the records' mark (light_mark_src) and before the sweep, a thread
@@ -238,9 +216,8 @@ inline constexpr string_view light_mark_src = VELK_LIGHT_MARK_1_GLSL VELK_LIGHT_
  * every piece still linked, from its parent or its record, whose record is marked; the sweep frees
  * the rest. Only childless pieces are unlinked, so a piece's parent is in use while it is.
  */
-#include <velk-render/glsl/light_pieces_1.inc>
-#include <velk-render/glsl/light_pieces_2.inc>
-inline constexpr string_view light_pieces_src = VELK_LIGHT_PIECES_1_GLSL VELK_LIGHT_POOL_GLSL VELK_LIGHT_PIECES_2_GLSL;
+#include <velk-render/glsl/light_pieces.inc>
+inline constexpr string_view light_pieces_src = VELK_LIGHT_PIECES_GLSL;
 
 /**
  * Puts every page no mark says is in use on the free stack, no longer a piece, and clears the
@@ -248,10 +225,8 @@ inline constexpr string_view light_pieces_src = VELK_LIGHT_PIECES_1_GLSL VELK_LI
  * `begin` set, one thread empties the stack, the mark's counts and the search and split lists
  * instead, and moves the pool's frame on.
  */
-#include <velk-render/glsl/light_sweep_1.inc>
-#include <velk-render/glsl/light_sweep_2.inc>
-inline constexpr string_view light_sweep_src = VELK_LIGHT_SWEEP_1_GLSL VELK_LIGHT_POOL_HEADER_GLSL
-    VELK_LIGHT_SWEEP_2_GLSL;
+#include <velk-render/glsl/light_sweep.inc>
+inline constexpr string_view light_sweep_src = VELK_LIGHT_SWEEP_GLSL;
 
 } // namespace velk
 

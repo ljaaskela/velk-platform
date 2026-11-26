@@ -191,81 +191,50 @@ set(VELK_RENDER_GLSL_SOURCES
     shaders/cut_box.glsl
     shaders/deferred_area_light.glsl
     shaders/deferred_area_light_stub.glsl
-    shaders/deferred_compute_prelude_1.glsl
-    shaders/deferred_compute_prelude_2.glsl
-    shaders/deferred_lighting_main_1.glsl
-    shaders/deferred_lighting_main_2.glsl
+    shaders/deferred_compute_prelude.glsl
+    shaders/deferred_lighting_main.glsl
     shaders/depth_pyramid_compute.glsl
     shaders/fragment_triangle.glsl
     shaders/instance_cluster_fill.glsl
     shaders/instance_cluster_runs.glsl
-    shaders/instance_cull_compute_1.glsl
-    shaders/instance_cull_compute_2.glsl
-    shaders/instance_cull_compute_3.glsl
+    shaders/instance_cull_compute.glsl
     shaders/instance_cut_begin.glsl
-    shaders/instance_cut_choose_1.glsl
-    shaders/instance_cut_choose_2.glsl
-    shaders/instance_cut_choose_3.glsl
-    shaders/instance_cut_draw_1.glsl
-    shaders/instance_cut_draw_2.glsl
-    shaders/instance_cut_draw_3.glsl
-    shaders/instance_cut_pages_1.glsl
-    shaders/instance_cut_pages_2.glsl
-    shaders/instance_cut_place_1.glsl
-    shaders/instance_cut_place_2.glsl
-    shaders/instance_cut_rename_1.glsl
-    shaders/instance_cut_rename_2.glsl
-    shaders/instance_cut_stale_1.glsl
-    shaders/instance_cut_stale_2.glsl
-    shaders/instance_cut_top_1.glsl
-    shaders/instance_cut_top_2.glsl
-    shaders/instance_cut_tree_1.glsl
-    shaders/instance_cut_tree_2.glsl
-    shaders/instance_cut_visible_1.glsl
-    shaders/instance_cut_visible_2.glsl
+    shaders/instance_cut_choose.glsl
+    shaders/instance_cut_draw.glsl
+    shaders/instance_cut_pages.glsl
+    shaders/instance_cut_place.glsl
+    shaders/instance_cut_rename.glsl
+    shaders/instance_cut_stale.glsl
+    shaders/instance_cut_top.glsl
+    shaders/instance_cut_tree.glsl
+    shaders/instance_cut_visible.glsl
     shaders/instance_items.glsl
-    shaders/instance_partition_cull_1.glsl
-    shaders/instance_partition_cull_2.glsl
-    shaders/instance_retest_compute_1.glsl
-    shaders/instance_retest_compute_2.glsl
-    shaders/instance_retest_compute_3.glsl
+    shaders/instance_partition_cull.glsl
+    shaders/instance_retest_compute.glsl
     shaders/instance_tiny_args.glsl
     shaders/instance_tiny_unpack.glsl
     shaders/intersect.glsl
     shaders/lbvh.glsl
     shaders/light_add.glsl
     shaders/light_area.glsl
-    shaders/light_changes_main_1.glsl
-    shaders/light_changes_main_2.glsl
+    shaders/light_changes_main.glsl
     shaders/light_claim.glsl
-    shaders/light_claim_1.glsl
-    shaders/light_claim_2.glsl
-    shaders/light_claim_blended_1.glsl
-    shaders/light_claim_blended_2.glsl
-    shaders/light_claim_blended_3.glsl
+    shaders/light_claim_blended.glsl
+    shaders/light_claim_main.glsl
     shaders/light_eval.glsl
     shaders/light_grid.glsl
     shaders/light_grid_only.glsl
     shaders/light_list.glsl
-    shaders/light_mark_1.glsl
-    shaders/light_mark_2.glsl
-    shaders/light_pieces_1.glsl
-    shaders/light_pieces_2.glsl
+    shaders/light_mark.glsl
+    shaders/light_pieces.glsl
     shaders/light_pool_body.glsl
-    shaders/light_probes_filter_1.glsl
-    shaders/light_probes_filter_2.glsl
-    shaders/light_probes_main_1.glsl
-    shaders/light_probes_main_2.glsl
-    shaders/light_probes_main_3.glsl
-    shaders/light_probes_main_4.glsl
+    shaders/light_probes_filter.glsl
+    shaders/light_probes_main.glsl
     shaders/light_read_body.glsl
-    shaders/light_search_1.glsl
-    shaders/light_search_2.glsl
+    shaders/light_search.glsl
     shaders/light_slots.glsl
-    shaders/light_sweep_1.glsl
-    shaders/light_sweep_2.glsl
-    shaders/light_trace_main_1.glsl
-    shaders/light_trace_main_2.glsl
+    shaders/light_sweep.glsl
+    shaders/light_trace_main.glsl
     shaders/light_trace_main_tail.glsl
     shaders/lod_select.glsl
     shaders/lod_take.glsl
@@ -282,27 +251,21 @@ set(VELK_RENDER_GLSL_SOURCES
     shaders/rt_pbr_shade.glsl
     shaders/rt_reference_main.glsl
     shaders/shadow_apply.glsl
-    shaders/shadow_pack_head.glsl
-    shaders/shadow_pack_main.glsl
+    shaders/shadow_pack.glsl
     shaders/shadow_soft.glsl
-    shaders/shadow_soften_head.glsl
-    shaders/shadow_soften_main.glsl
-    shaders/shadow_tiles_head.glsl
-    shaders/shadow_tiles_main.glsl
+    shaders/shadow_soften.glsl
+    shaders/shadow_tiles.glsl
     shaders/sort.glsl
     shaders/surface.glsl
-    shaders/surface_light_1.glsl
-    shaders/surface_light_2.glsl
+    shaders/surface_light.glsl
     shaders/surface_lights.glsl
     shaders/test_diagnostics_compute.glsl
     shaders/tiny_add.glsl
     shaders/tiny_draw.glsl
     shaders/trace.glsl
     shaders/transparent_lit_head.glsl
-    shaders/transparent_lit_main_1.glsl
-    shaders/transparent_lit_main_2.glsl
-    shaders/visibility_debug_compute_1.glsl
-    shaders/visibility_debug_compute_2.glsl
+    shaders/transparent_lit_main.glsl
+    shaders/visibility_debug_compute.glsl
     shaders/visibility_resolve_main.glsl
 )
 set(VELK_RENDER_GLSL_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)

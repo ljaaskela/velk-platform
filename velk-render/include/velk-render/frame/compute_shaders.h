@@ -70,9 +70,8 @@ inline constexpr string_view ray_tree_bounds_compute_src = VELK_RAY_TREE_BOUNDS_
 /// chooses sees it (FrameGlobals at chooser_globals). Modes 10 to 12 show instances dimmed,
 /// for partition_bounds_compute_src and ray_tree_bounds_compute_src to draw over. With `dim_outside`, clusters outside the
 /// chooser's view are dimmed. The numbers are DebugView's.
-#include <velk-render/glsl/visibility_debug_compute_1.inc>
-#include <velk-render/glsl/visibility_debug_compute_2.inc>
-inline constexpr string_view visibility_debug_compute_src = VELK_VISIBILITY_DEBUG_COMPUTE_1_GLSL VELK_LIGHT_POOL_GLSL VELK_VISIBILITY_DEBUG_COMPUTE_2_GLSL;
+#include <velk-render/glsl/visibility_debug_compute.inc>
+inline constexpr string_view visibility_debug_compute_src = VELK_VISIBILITY_DEBUG_COMPUTE_GLSL;
 
 // What the points of light's shaders take of the light code, built on the deferred prelude: the
 // culling arena (written by the trace), the light grid, whose word is in the light header at
@@ -85,13 +84,10 @@ inline constexpr string_view visibility_debug_compute_src = VELK_VISIBILITY_DEBU
 
 // The softening of shadows, for the soft shadows' passes, and the soft shadows' words the
 // lighting reads (velk-render/shaders/shadow_soft.glsl, VELK_SHADOW_SOFT_GLSL;
-// shadow_apply.glsl, VELK_SHADOW_APPLY_GLSL; shadow_pack_main.glsl, shadow_tiles_main.glsl and
-// shadow_soften_main.glsl, the soft shadows' passes).
+// shadow_apply.glsl, VELK_SHADOW_APPLY_GLSL; shadow_pack.glsl, shadow_tiles.glsl and
+// shadow_soften.glsl, the soft shadows' passes).
 #include <velk-render/glsl/shadow_soft.inc>
 #include <velk-render/glsl/shadow_apply.inc>
-#include <velk-render/glsl/shadow_pack_main.inc>
-#include <velk-render/glsl/shadow_tiles_main.inc>
-#include <velk-render/glsl/shadow_soften_main.inc>
 
 // The lights by where they reach, rebuilt each frame (DeferredPath::build_light_grid), in the
 // culling arena at the light header's word 18, 0xFFFFFFFF if there is none. Its words: how many
@@ -116,9 +112,7 @@ inline constexpr string_view visibility_debug_compute_src = VELK_VISIBILITY_DEBU
 // What lighting a surface takes, for the deferred lighting and the blended surfaces' fragments:
 // the scene's lights, the environment, the highlight's terms. Follows VELK_GLOBALS and push
 // constants `pc` with env_texture_id and env_params.
-#include <velk-render/glsl/surface_light_1.inc>
-#include <velk-render/glsl/surface_light_2.inc>
-#define VELK_SURFACE_LIGHT_GLSL VELK_SURFACE_LIGHT_1_GLSL VELK_LIGHT_EVAL_GLSL VELK_SURFACE_LIGHT_2_GLSL
+#include <velk-render/glsl/surface_light.inc>
 
 // Each light's diffuse light and highlight on a surface, for the deferred lighting and the
 // blended surfaces' fragments. Follows VELK_SURFACE_LIGHT_GLSL and velk_area_irradiance, with
@@ -136,9 +130,8 @@ inline constexpr string_view visibility_debug_compute_src = VELK_VISIBILITY_DEBU
 //     light (directional / point / spot) with distance + cone falloff.
 //   - Shadow modulation lands in a later slice (B.3.d) alongside the
 //     shared `velk_eval_shadow` composer.
-#include <velk-render/glsl/deferred_compute_prelude_1.inc>
-#include <velk-render/glsl/deferred_compute_prelude_2.inc>
-[[maybe_unused]] constexpr string_view deferred_compute_prelude_src = VELK_DEFERRED_COMPUTE_PRELUDE_1_GLSL VELK_SURFACE_LIGHT_GLSL VELK_DEFERRED_COMPUTE_PRELUDE_2_GLSL;
+#include <velk-render/glsl/deferred_compute_prelude.inc>
+[[maybe_unused]] constexpr string_view deferred_compute_prelude_src = VELK_DEFERRED_COMPUTE_PRELUDE_GLSL;
 
 // Area lights in closed form, for deferred_lighting_main_src. Appended after the prelude,
 // whose Light declaration it depends on.
@@ -167,25 +160,22 @@ inline constexpr string_view visibility_debug_compute_src = VELK_VISIBILITY_DEBU
 [[maybe_unused]] constexpr string_view transparent_lit_head_src = VELK_TRANSPARENT_LIT_HEAD_GLSL VELK_SURFACE_LIGHT_GLSL VELK_LIGHT_GRID_GLSL VELK_LIGHT_POOL_GLSL VELK_LIGHT_SLOTS_GLSL VELK_LIGHT_READ_GLSL
     VELK_FRAGMENT_TRIANGLE_GLSL;
 
-#include <velk-render/glsl/transparent_lit_main_1.inc>
-#include <velk-render/glsl/transparent_lit_main_2.inc>
-[[maybe_unused]] constexpr string_view transparent_lit_main_src = VELK_SURFACE_LIGHTS_GLSL VELK_TRANSPARENT_LIT_MAIN_1_GLSL VELK_TRACE_FRAGMENT_GLSL VELK_TRANSPARENT_LIT_MAIN_2_GLSL;
+#include <velk-render/glsl/transparent_lit_main.inc>
+[[maybe_unused]] constexpr string_view transparent_lit_main_src = VELK_SURFACE_LIGHTS_GLSL VELK_TRANSPARENT_LIT_MAIN_GLSL;
 
-#include <velk-render/glsl/deferred_lighting_main_1.inc>
-#include <velk-render/glsl/deferred_lighting_main_2.inc>
-[[maybe_unused]] constexpr string_view deferred_lighting_main_src = VELK_DEFERRED_LIGHTING_MAIN_1_GLSL VELK_LIGHT_POOL_GLSL VELK_LIGHT_SLOTS_GLSL VELK_LIGHT_READ_GLSL VELK_PROBE_GLSL VELK_SURFACE_LIGHTS_GLSL
-    VELK_SHADOW_SOFT_GLSL VELK_SHADOW_APPLY_GLSL VELK_DEFERRED_LIGHTING_MAIN_2_GLSL;
+#include <velk-render/glsl/deferred_lighting_main.inc>
+[[maybe_unused]] constexpr string_view deferred_lighting_main_src = VELK_DEFERRED_LIGHTING_MAIN_GLSL;
 
 // The soft shadows from the points of light (DeferredPath::emit_shadow_soft_passes), three passes
 // built on the deferred prelude with the light grid: what each pixel's lights with a size are
-// (shadow_pack_main.glsl), the tiles near an edge to soften (shadow_tiles_main.glsl), and the
-// softening of those (shadow_soften_main.glsl), which the lighting then takes (velk_shadow_apply).
-#include <velk-render/glsl/shadow_pack_head.inc>
-[[maybe_unused]] constexpr string_view shadow_pack_main_src = VELK_SHADOW_PACK_HEAD_GLSL VELK_LIGHT_POOL_GLSL VELK_LIGHT_SLOTS_GLSL VELK_LIGHT_READ_GLSL VELK_SHADOW_SOFT_GLSL VELK_SHADOW_PACK_MAIN_GLSL;
-#include <velk-render/glsl/shadow_tiles_head.inc>
-[[maybe_unused]] constexpr string_view shadow_tiles_main_src = VELK_SHADOW_TILES_HEAD_GLSL VELK_LIGHT_POOL_GLSL VELK_SHADOW_SOFT_GLSL VELK_SHADOW_TILES_MAIN_GLSL;
-#include <velk-render/glsl/shadow_soften_head.inc>
-[[maybe_unused]] constexpr string_view shadow_soften_main_src = VELK_SHADOW_SOFTEN_HEAD_GLSL VELK_LIGHT_POOL_GLSL VELK_SHADOW_SOFT_GLSL VELK_SHADOW_SOFTEN_MAIN_GLSL;
+// (shadow_pack.glsl), the tiles near an edge to soften (shadow_tiles.glsl), and the softening of
+// those (shadow_soften.glsl), which the lighting then takes (velk_shadow_apply).
+#include <velk-render/glsl/shadow_pack.inc>
+[[maybe_unused]] constexpr string_view shadow_pack_main_src = VELK_SHADOW_PACK_GLSL;
+#include <velk-render/glsl/shadow_tiles.inc>
+[[maybe_unused]] constexpr string_view shadow_tiles_main_src = VELK_SHADOW_TILES_GLSL;
+#include <velk-render/glsl/shadow_soften.inc>
+[[maybe_unused]] constexpr string_view shadow_soften_main_src = VELK_SHADOW_SOFTEN_GLSL;
 
 // Compute ray tracer prelude. Fixed header that precedes all material
 // snippets. Declares extensions, storage-image binding, shape struct,
