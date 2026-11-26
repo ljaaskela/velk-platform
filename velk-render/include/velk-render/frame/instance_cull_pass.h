@@ -2350,6 +2350,7 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         rec.held.push_back(std::move(rename_pipeline));
         rec.held.push_back(std::move(items_pipeline));
         rec.held.push_back(std::move(stale_pipeline));
+        rec.held.push_back(std::move(large_pipeline));
     };
     if (record) record_all();
     const char* const* names = state.chosen_by_other ? kCullOtherStageNames : kCullStageNames;
