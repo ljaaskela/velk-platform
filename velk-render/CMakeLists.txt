@@ -189,6 +189,8 @@ set(VELK_RENDER_GLSL_SOURCES
     shaders/chooser_frustum_compute.glsl
     shaders/cut.glsl
     shaders/cut_box.glsl
+    shaders/cut_large_queue.glsl
+    shaders/cut_ray_record.glsl
     shaders/cut_tree_nodes.glsl
     shaders/deferred_area_light.glsl
     shaders/deferred_area_light_stub.glsl
@@ -207,6 +209,7 @@ set(VELK_RENDER_GLSL_SOURCES
     shaders/instance_cut_pages.glsl
     shaders/instance_cut_place.glsl
     shaders/instance_cut_rename.glsl
+    shaders/instance_cut_scan.glsl
     shaders/instance_cut_stale.glsl
     shaders/instance_cut_top.glsl
     shaders/instance_cut_tree.glsl

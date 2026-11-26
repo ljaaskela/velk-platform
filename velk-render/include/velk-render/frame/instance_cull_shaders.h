@@ -161,6 +161,16 @@ inline constexpr string_view instance_cut_place_src = VELK_INSTANCE_CUT_PLACE_GL
 // (g_leaf_records), and what VELK_LBVH_GLSL asks of the shader but velk_lbvh_key.
 #include <velk-render/glsl/cut_tree_nodes.inc>
 
+// Which of a partition's records rays trace, and each record's share of the partition's box and
+// counts, for the scans of instance_cut_tree_src and instance_cut_scan_src after VELK_CUT_GLSL and
+// VELK_CUT_BOX_GLSL. The shader's push constants have cut_word, instances_base, items_word, pad,
+// globals_base and light_pixels, as at instance_cut_tree_src.
+#include <velk-render/glsl/cut_ray_record.inc>
+
+// The words of a kept cut's queue of long lists (kCutLargeHeaderWords): its header's, a queue
+// place's, and which list a work group's block is of.
+#include <velk-render/glsl/cut_large_queue.inc>
+
 /**
  * Builds the tree over each partition's records that chose again this frame (kCutNodeWords):
  * its ray list sorted by where its records are (Morton order, the widest after them, those
@@ -169,16 +179,29 @@ inline constexpr string_view instance_cut_place_src = VELK_INSTANCE_CUT_PLACE_GL
  * moves, by twice how far it can move one, so that the tree holds wherever they are while it is
  * kept. Also the partition's box around all it draws, whether it is always visited, and its counts
  * for the log (VELK_PART_BOX, ALWAYS, FOR_RAYS, QUADS), which instance_cut_visible_src goes by.
- * A work group per partition; a list past kRaySortMax entries that the cut's sort of long lists
- * has room for (kCutLargeHeaderWords) is queued for it instead, which sorts it and builds its
- * tree (instance_cut_large_src).
+ * A work group per partition (`mode` 0); a partition past kRaySortMax records that the cut's
+ * queue of long lists has room for (kCutLargeHeaderWords) is queued instead, scanned by
+ * instance_cut_scan_src and sorted and built by instance_cut_large_src. One whose scan leaves
+ * kRaySortMax entries or fewer is sorted and built here, as its own group would (`mode` 1, a work
+ * group a queued list).
  */
 #include <velk-render/glsl/instance_cut_tree.inc>
 inline constexpr string_view instance_cut_tree_src = VELK_INSTANCE_CUT_TREE_GLSL;
 
 /**
- * Sorts a kept cut's ray lists past kRaySortMax entries that instance_cut_tree_src queued, all
- * at once, a work group of 256 threads a block of kCutLargeBlockEntries entries or a list: by
+ * Scans the partitions instance_cut_tree_src queued, a work group of 256 threads a block of
+ * kCutLargeBlockEntries records or a list: by `mode`, 0 whether rays trace each record and each
+ * block's share of what the partition's own group adds up (VELK_CUT_LARGE_BLOCK); 1 for each list
+ * where its blocks' entries start, its count, its partition's box and counts and the box around
+ * its entries' centres; 2 the entries written, in the records' order. The list, the partition's
+ * words and the box are those a partition's own work group makes.
+ */
+#include <velk-render/glsl/instance_cut_scan.inc>
+inline constexpr string_view instance_cut_scan_src = VELK_INSTANCE_CUT_SCAN_GLSL;
+
+/**
+ * Sorts a kept cut's ray lists past kRaySortMax entries that instance_cut_scan_src made, all at
+ * once, a work group of 256 threads a block of kCutLargeBlockEntries entries or a list: by
  * `mode`, 0 the group counts of the passes after it, from the queue (one group); 1 each entry's
  * code (as velk_sort_ray_list_large's) and the box count; then for each of four 8-bit digits, 2
  * each block's digit counts, 3 for each list where each block's entries of each digit go, and 4

@@ -116,6 +116,7 @@ inline constexpr uint32_t kCutLargeBlockEntries = 256;
 inline constexpr uint32_t kCutLargeRoom = 512;
 inline constexpr uint32_t kCutLargeHeaderWords = kCutLargeEnd;
 inline constexpr uint32_t kCutLargeListWords = kCutLargeListEnd;
+static_assert(kCutLargeBlockEnd <= 256u, "a block's scan words fit its digit counts");
 /// The words of a kept cut's sort of long ray lists (kCutLargeHeaderWords): its header, a queue
 /// place for each partition, a word a block, and 256 digit counts a block.
 inline uint32_t cut_large_words(uint32_t partitions, uint32_t room)

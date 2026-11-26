@@ -1857,6 +1857,7 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         auto tree_pipeline = pipeline_for(instance_cut_tree_src, 0x4375'7454'7265'6520ULL);
         auto top_pipeline = pipeline_for(instance_cut_top_src, 0x4375'7454'6f70'2020ULL);
         auto large_pipeline = pipeline_for(instance_cut_large_src, 0x4375'744c'6172'6765ULL);
+        auto scan_pipeline = pipeline_for(instance_cut_scan_src, 0x4375'7453'6361'6e20ULL);
         auto mark_pipeline = pipeline_for(light_mark_src, 0x4c69'6768'744d'726bULL);
         auto sweep_pipeline = pipeline_for(light_sweep_src, 0x4c69'6768'7453'7770ULL);
         auto pieces_pipeline = pipeline_for(light_pieces_src, 0x4c69'6768'7450'6363ULL);
@@ -1865,7 +1866,8 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         auto stale_pipeline = pipeline_for(instance_cut_stale_src, 0x4375'7453'7461'6c65ULL);
         const bool have_pipelines = pipeline && partition_pipeline && runs_pipeline && fill_pipeline && begin_pipeline
                                  && pages_pipeline && choose_pipeline && place_pipeline && draw_pipeline
-                                 && visible_pipeline && tree_pipeline && top_pipeline && large_pipeline && mark_pipeline && sweep_pipeline && pieces_pipeline
+                                 && visible_pipeline && tree_pipeline && top_pipeline && large_pipeline && scan_pipeline && mark_pipeline
+                                 && sweep_pipeline && pieces_pipeline
                                  && rename_pipeline
                                  && items_pipeline && stale_pipeline;
         IGpuCommandBuffer::Ptr stage_cmds[kCullStages];
@@ -2073,9 +2075,9 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
                 choose(job, 1u);
             }
             next_stage();
-            // Then the trees for rays over the partitions that chose again: those with ray lists
-            // past kRaySortMax that the cut's sort of long lists has room for are queued for it,
-            // which starts each frame empty, and built after it.
+            // Then the trees for rays over the partitions that chose again: those with records past
+            // kRaySortMax that the cut's queue of long lists has room for are queued for it, which
+            // starts each frame empty, and scanned, sorted and built after it.
             struct TreePushC
             {
                 uint32_t cut_word;
@@ -2126,8 +2128,42 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
                 }
                 cmd->record_global_barrier();
             };
+            // The queued partitions' scan: each block's records, each list's sums, the entries.
+            struct ScanPushC
+            {
+                uint32_t cut_word;
+                uint32_t instances_base;
+                uint32_t items_word;
+                float pad;
+                uint32_t globals_base;
+                float light_pixels;
+                uint32_t mode;
+            };
+            const auto scan_pass = [&](uint32_t mode, uint32_t args) {
+                for (const CutJob& job : jobs) {
+                    const uint32_t large = job.large_word;
+                    if (large == kCullNoSlot) continue;
+                    const ScanPushC pc{job.cut, job.instances_base, job.items_word, job.pad, view_globals_base,
+                                       kLodMaxErrorPixels * kLightPixels / kLodElementPixels, mode};
+                    dispatch(scan_pipeline.get(), &pc, sizeof(pc), 1u, large + args);
+                }
+                cmd->record_global_barrier();
+            };
+            // The queued lists' trees made by instance_cut_tree_src, a group a list.
+            const auto tree_lists = [&](uint32_t mode) {
+                for (const CutJob& job : jobs) {
+                    if (job.large_word != kCullNoSlot) tree(job, mode, job.large_word + kCutLargeListGroups);
+                }
+                cmd->record_global_barrier();
+            };
             if (any_large) {
                 large_pass(0u, 0u, 0u, kCullNoSlot);
+                scan_pass(0u, kCutLargeBlockGroups);
+                scan_pass(1u, kCutLargeListGroups);
+                scan_pass(2u, kCutLargeBlockGroups);
+                // Those the scan left kRaySortMax entries or fewer, as a partition's own group builds
+                // them; the rest sorted and built over many groups.
+                tree_lists(1u);
                 large_pass(1u, 0u, 0u, kCutLargeBlockGroups);
                 for (uint32_t digit = 0; digit < 4u; ++digit) {
                     large_pass(2u, digit * 8u, digit & 1u, kCutLargeBlockGroups);
@@ -2342,6 +2378,8 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         rec.held.push_back(std::move(place_pipeline));
         rec.held.push_back(std::move(tree_pipeline));
         rec.held.push_back(std::move(top_pipeline));
+        rec.held.push_back(std::move(large_pipeline));
+        rec.held.push_back(std::move(scan_pipeline));
         rec.held.push_back(std::move(draw_pipeline));
         rec.held.push_back(std::move(visible_pipeline));
         rec.held.push_back(std::move(mark_pipeline));
@@ -2350,7 +2388,6 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         rec.held.push_back(std::move(rename_pipeline));
         rec.held.push_back(std::move(items_pipeline));
         rec.held.push_back(std::move(stale_pipeline));
-        rec.held.push_back(std::move(large_pipeline));
     };
     if (record) record_all();
     const char* const* names = state.chosen_by_other ? kCullOtherStageNames : kCullStageNames;

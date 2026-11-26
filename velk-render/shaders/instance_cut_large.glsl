@@ -35,40 +35,20 @@ layout(push_constant) uniform PC {
 #velk_include VELK_RAY_ENTRY_GLSL
 #velk_include VELK_LBVH_GLSL
 #velk_include VELK_CUT_TREE_NODES_GLSL
+#velk_include VELK_CUT_LARGE_QUEUE_GLSL
 
 shared uint s_digits[256];
 shared uint s_bounded_here;
 
-// The long lists' sort's words of the cut, and where its queue, block table and digit counts are.
-uint g_large = 0u;
-uint g_table_word = 0u;
-uint g_counts_word = 0u;
-
-void velk_large_words()
-{
-    g_large = cull_words.data[pc.cut_word + VELK_CUT_LARGE_WORD];
-    g_table_word = g_large + VELK_CUT_LARGE_END + cull_words.data[pc.cut_word + VELK_CUT_PARTITIONS] * VELK_CUT_LARGE_LIST_END;
-    g_counts_word = g_table_word + cull_words.data[g_large + VELK_CUT_LARGE_CAP];
-}
-
-uint velk_large_list_word(uint slot)
-{
-    return g_large + VELK_CUT_LARGE_END + slot * VELK_CUT_LARGE_LIST_END;
-}
-
 // The list this work group's block is of: its queue place's word, the block's first entry in the
-// list, and the list's count; false for a block of no list.
+// list, and the list's count of entries; false for a block of no list, or of a list its scan left
+// kRaySortMax entries or fewer, which instance_cut_tree_src sorts and builds instead. A list's
+// blocks were taken for its records, so its last ones may hold no entry.
 bool velk_large_block(out uint list, out uint first, out uint count)
 {
-    list = 0u;
-    first = 0u;
     count = 0u;
-    uint block = gl_WorkGroupID.x;
-    if (block >= min(cull_words.data[g_large + VELK_CUT_LARGE_BLOCKS], cull_words.data[g_large + VELK_CUT_LARGE_CAP])) return false;
-    uint slot = cull_words.data[g_table_word + block];
-    if (slot == 0xFFFFFFFFu) return false;
-    list = velk_large_list_word(slot);
-    first = (block - cull_words.data[list + VELK_CUT_LARGE_LIST_FIRST_BLOCK]) * VELK_CUT_LARGE_BLOCK_ENTRIES;
+    if (!velk_large_block_slot(list, first)) return false;
+    if (cull_words.data[list + VELK_CUT_LARGE_LIST_SMALL] != 0u) return false;
     count = cull_words.data[list + VELK_CUT_LARGE_LIST_COUNT];
     return true;
 }
@@ -126,6 +106,7 @@ void main()
     if (pc.mode == 10u) {
         if (lane != 0u || gl_WorkGroupID.x >= cull_words.data[g_large + VELK_CUT_LARGE_LISTS]) return;
         uint list = velk_large_list_word(gl_WorkGroupID.x);
+        if (cull_words.data[list + VELK_CUT_LARGE_LIST_SMALL] != 0u) return;
         velk_large_tree(list, cull_words.data[list + VELK_CUT_LARGE_LIST_COUNT]);
         uint state = cull_words.data[list + VELK_CUT_LARGE_LIST_STATE];
         uint root = velk_lbvh_node_word(g_node_count - 1u);
@@ -179,6 +160,7 @@ void main()
     if (pc.mode == 3u) {
         if (gl_WorkGroupID.x >= cull_words.data[g_large + VELK_CUT_LARGE_LISTS]) return;
         uint list = velk_large_list_word(gl_WorkGroupID.x);
+        if (cull_words.data[list + VELK_CUT_LARGE_LIST_SMALL] != 0u) return;
         uint count = cull_words.data[list + VELK_CUT_LARGE_LIST_COUNT];
         uint first_block = cull_words.data[list + VELK_CUT_LARGE_LIST_FIRST_BLOCK];
         uint blocks = (count + VELK_CUT_LARGE_BLOCK_ENTRIES - 1u) / VELK_CUT_LARGE_BLOCK_ENTRIES;

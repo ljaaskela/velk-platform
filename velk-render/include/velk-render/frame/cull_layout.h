@@ -326,14 +326,14 @@ namespace velk {
     X(cp, gp, Chose, CHOSE, 31)                 /* the frame it last chose in, plus one: a cluster of its records whose errors changed later has it choose again */ \
     X(cp, gp, End, END, 32)
 
-/// The sort of a kept cut's ray lists longer than kRaySortMax (kCutLarge, VELK_CUT_LARGE), at the
-/// cut's LARGE_WORD: a list's partition takes blocks of kCutLargeBlockEntries entries off BLOCKS,
-/// up to CAP of them, then a place in the queue, a VELK_CUT_LARGE_LIST each, which the sort's
-/// passes go through, a work group a block or a list. Then a word a block, the queue place of the
-/// list it is of (kCullNoSlot for a block taken by a list that did not get all it asked for), and
-/// each block's count of each of its 256 digits, which once the sort is done hold the words the
-/// builds of its lists' trees go by, a list's from its first block's. LISTS and BLOCKS start each
-/// frame at 0.
+/// The scan and sort of a kept cut's partitions with more than kRaySortMax records (kCutLarge,
+/// VELK_CUT_LARGE), at the cut's LARGE_WORD: a partition takes blocks of kCutLargeBlockEntries
+/// records off BLOCKS, up to CAP of them, then a place in the queue, a VELK_CUT_LARGE_LIST each,
+/// which the passes go through, a work group a block or a list. Then a word a block, the queue
+/// place of the list it is of (kCullNoSlot for a block taken by a list that did not get all it
+/// asked for), and 256 words a block: first what its scan leaves (VELK_CUT_LARGE_BLOCK), then its
+/// count of each of its 256 digits, which once the sort is done hold the words the builds of its
+/// lists' trees go by, a list's from its first block's. LISTS and BLOCKS start each frame at 0.
 #define VELK_CUT_LARGE(X, cp, gp)                                                                  \
     X(cp, gp, Lists, LISTS, 0)                  /* lists queued this frame */                  \
     X(cp, gp, Blocks, BLOCKS, 1)                /* blocks taken this frame, past CAP by those that did not fit */ \
@@ -353,7 +353,26 @@ namespace velk {
     X(cp, gp, Hi, HI, 8)                                                                       \
     X(cp, gp, Retry, RETRY, 11)                 /* 1 when its tree is built again balanced, its sorted one too deep */ \
     X(cp, gp, Tried, TRIED, 12)                 /* the height its sorted tree had then, 0 for one not done */ \
-    X(cp, gp, End, END, 13)
+    X(cp, gp, Records, RECORDS, 13)             /* its partition's records, which its blocks were taken for and the scan goes through */ \
+    X(cp, gp, Small, SMALL, 14)                 /* 1 when its scan found kRaySortMax entries or fewer: sorted and built as such a list always is */ \
+    X(cp, gp, End, END, 15)
+
+/// What the scan of a queued partition's records leaves in each of its blocks' digit counts,
+/// before the sort counts digits there (kCutLargeBlock, VELK_CUT_LARGE_BLOCK): the block's share of
+/// what a partition's own work group adds up (VELK_PART_BOX, ALWAYS, FOR_RAYS, QUADS), of the
+/// box around its entries' centres, which entries it has, and where they start in the list.
+#define VELK_CUT_LARGE_BLOCK(X, cp, gp)                                                            \
+    X(cp, gp, Count, COUNT, 0)                  /* its records rays trace */                   \
+    X(cp, gp, DrawMin, DRAW_MIN, 1)             /* the box around what it draws, three floats each */ \
+    X(cp, gp, DrawMax, DRAW_MAX, 4)                                                            \
+    X(cp, gp, Always, ALWAYS, 7)                                                               \
+    X(cp, gp, ForRays, FOR_RAYS, 8)                                                            \
+    X(cp, gp, Quads, QUADS, 9)                                                                 \
+    X(cp, gp, CentreMin, CENTRE_MIN, 10)        /* the box around its entries' centres */      \
+    X(cp, gp, CentreMax, CENTRE_MAX, 13)                                                       \
+    X(cp, gp, Mask, MASK, 16)                   /* a bit a record of it, set for those rays trace, eight words */ \
+    X(cp, gp, First, FIRST, 24)                 /* its first entry's place in the list */      \
+    X(cp, gp, End, END, 25)
 
 /// A page header of a kept cut's pool (kCutPage, VELK_CUT_PAGE): which partition holds the page,
 /// and where in its page table.
@@ -451,6 +470,7 @@ VELK_CUT_HEADER(VELK_LAYOUT_CPP_WORD, Cut, CUT)
 VELK_CUT_PART(VELK_LAYOUT_CPP_WORD, Part, PART)
 VELK_CUT_LARGE(VELK_LAYOUT_CPP_WORD, CutLarge, CUT_LARGE)
 VELK_CUT_LARGE_LIST(VELK_LAYOUT_CPP_WORD, CutLargeList, CUT_LARGE_LIST)
+VELK_CUT_LARGE_BLOCK(VELK_LAYOUT_CPP_WORD, CutLargeBlock, CUT_LARGE_BLOCK)
 VELK_CUT_PAGE(VELK_LAYOUT_CPP_WORD, CutPage, CUT_PAGE)
 VELK_CUT_RECORD(VELK_LAYOUT_CPP_WORD, CutRecord, RECORD)
 VELK_TAKEOVER(VELK_LAYOUT_CPP_WORD, Takeover, TAKEOVER)
@@ -489,6 +509,7 @@ VELK_RETEST(VELK_LAYOUT_CPP_WORD, Retest, RETEST)
     VELK_CUT_PART(VELK_LAYOUT_GLSL_WORD, Part, PART)                                               \
     VELK_CUT_LARGE(VELK_LAYOUT_GLSL_WORD, CutLarge, CUT_LARGE)                                     \
     VELK_CUT_LARGE_LIST(VELK_LAYOUT_GLSL_WORD, CutLargeList, CUT_LARGE_LIST)                       \
+    VELK_CUT_LARGE_BLOCK(VELK_LAYOUT_GLSL_WORD, CutLargeBlock, CUT_LARGE_BLOCK)                    \
     VELK_CUT_PAGE(VELK_LAYOUT_GLSL_WORD, CutPage, CUT_PAGE)                                        \
     VELK_CUT_RECORD(VELK_LAYOUT_GLSL_WORD, CutRecord, RECORD)                                      \
     VELK_TAKEOVER(VELK_LAYOUT_GLSL_WORD, Takeover, TAKEOVER)                                       \
