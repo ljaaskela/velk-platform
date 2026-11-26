@@ -665,12 +665,14 @@ int main(int argc, char* argv[])
                     int judged = 0;
                     bool have_references = true;
                     velk::vector<double> glide_ms;
+                    velk::vector<inspect::PassTime> glide_passes;
                     int next = 1;
                     for (long f = 1; f <= view.glide_frames; ++f) {
                         place_camera(main_camera, inspect::glide_place(view, f));
                         inspect::place_glide_movers(built, view, f);
                         if (!frame()) return 1;
                         glide_ms.push_back(frame_ms(*backend));
+                        add_passes(glide_passes);
                         if (f >= glide_save_from && f <= glide_save_to) {
                             inspect::Image saved;
                             if (!grab(saved)) return 1;
@@ -730,6 +732,16 @@ int main(int argc, char* argv[])
                     double max_ms = 0.0;
                     char ms_text[32];
                     moving_text(glide_ms, median_ms, max_ms, ms_text, sizeof(ms_text));
+                    // Each pass's GPU time over the motion, on average, those from 0.05 ms.
+                    average_passes(glide_passes, glide_ms.size());
+                    velk::string passes_text;
+                    for (const auto& p : glide_passes) {
+                        if (p.ms < 0.05) continue;
+                        char one[96];
+                        std::snprintf(one, sizeof(one), " %s=%.3f", p.name.c_str(), p.ms);
+                        passes_text.append(one);
+                    }
+                    VELK_LOG(I, "inspect: %s glide passes:%s", name, passes_text.c_str());
                     if (!have_references || judged == 0) {
                         std::snprintf(buf, sizeof(buf), "%-24s  no reference for every judged frame", name);
                         line(buf);
