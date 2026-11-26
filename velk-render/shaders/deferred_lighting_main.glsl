@@ -185,7 +185,11 @@ void main()
             vec4 traced = texelFetch(velk_textures[nonuniformEXT(pc.spare0)], coord, 0);
             if (traced.a > 0.0) env_specular = mix(env_specular, traced.rgb, 1.0 - smoothstep(0.21, 0.3, roughness));
         }
-        vec3 F_env = fresnel_schlick_roughness(NdotV, F0, F90, roughness);
+        // A shading normal turned from the camera (a sheet's normal bent off its plane, or a normal
+        // map at a silhouette) shows no reflection: past grazing, the environment's fades out as
+        // it turns further away, rather than staying at its grazing strength. A normal facing the
+        // camera at all keeps all of it.
+        vec3 F_env = fresnel_schlick_roughness(NdotV, F0, F90, roughness) * smoothstep(-0.2, 0.0, dot(N, V));
 
         if (!probed) {
             indirect = env_diffuse;

@@ -81,7 +81,8 @@ void main()
         }
         // A thin sheet passing light through: that share of its diffuse light from its other side.
         if (transmission > 0.0) indirect = mix(indirect, env_miss_color_lod(-N, env_max_lod), transmission);
-        vec3 F_env = fresnel_schlick_roughness(NdotV, F0, F90, roughness);
+        // As the deferred lighting's: a normal turned from the camera fades its reflection out.
+        vec3 F_env = fresnel_schlick_roughness(NdotV, F0, F90, roughness) * smoothstep(-0.2, 0.0, dot(N, V));
         color = e.color.rgb * (1.0 - metallic) * (direct + indirect + area_irr) + highlights + F_env * env_specular
               + area_spec;
     }
