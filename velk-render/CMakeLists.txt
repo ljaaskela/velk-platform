@@ -202,6 +202,7 @@ set(VELK_RENDER_GLSL_SOURCES
     shaders/instance_cut_begin.glsl
     shaders/instance_cut_choose.glsl
     shaders/instance_cut_draw.glsl
+    shaders/instance_cut_large.glsl
     shaders/instance_cut_pages.glsl
     shaders/instance_cut_place.glsl
     shaders/instance_cut_rename.glsl
@@ -252,6 +253,7 @@ set(VELK_RENDER_GLSL_SOURCES
     shaders/probe.glsl
     shaders/probe_cell.glsl
     shaders/probe_write.glsl
+    shaders/ray_entry.glsl
     shaders/ray_tree_bounds_compute.glsl
     shaders/reference_path.glsl
     shaders/reflect_resolve.glsl

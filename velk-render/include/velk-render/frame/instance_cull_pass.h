@@ -102,6 +102,7 @@ struct InstanceCullPass
         uint32_t node_capacity = 0; ///< Tree nodes the pool holds, kCutPageNodes a page.
         uint64_t made_frame = 0;    ///< The frame it was made, for watching its pool closely at first.
         bool short_pages = false;   ///< Partitions lately asked for pages they did not get.
+        uint32_t large_word = 0;    ///< The word of its sort of long ray lists (kCutLargeHeaderWords).
     };
     vector<Cut> cuts;
     /// The view's quads drawn (kQuadListHeaderWords), filled each frame by the draw pass from
@@ -1023,7 +1024,9 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             const uint32_t marks_word = takeover_word + takeover_slots * kCutTakeoverWords;
             // The runs the drawing walks, two words each.
             const uint32_t visible_word = marks_word + cut.capacity / 32u + 1u;
-            const size_t words = size_t(visible_word) + size_t(cut_visible_runs(cut.capacity, info.partitions)) * 2u;
+            // The sort of its ray lists past kRaySortMax.
+            const uint32_t large_word = visible_word + cut_visible_runs(cut.capacity, info.partitions) * 2u;
+            const size_t words = size_t(large_word) + size_t(cut_large_words(info.partitions, kCutLargeRoom));
             cut.region = arena->alloc(words * sizeof(uint32_t));
             if (!cut.region.valid()) {
                 VELK_LOG(E, "instance culling: no room for a kept cut of %u records", cut.capacity);
@@ -1055,6 +1058,8 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             initial[kCutTakeoverSlots] = takeover_slots;
             initial[kCutRayMarksWord] = base + marks_word;
             initial[kCutVisibleWord] = base + visible_word;
+            initial[kCutLargeWord] = base + large_word;
+            cut.large_word = base + large_word;
             // Every page free, the lowest taken first; the marks clear.
             for (uint32_t p = 0; p < pages; ++p) {
                 initial[headers_word + p * kCutPageWords + kCutPageOwner] = kCullNoSlot;
@@ -1070,6 +1075,16 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
                 partition[kPartChunkFirst] = kCullNoSlot;
             }
             arena->write_at(cut.region.offset(), initial.data(), initial.size() * sizeof(uint32_t));
+            // The long lists' sort: nothing queued, its room, and its dispatches' other group counts.
+            {
+                uint32_t large[kCutLargeHeaderWords] = {};
+                large[kCutLargeCap] = kCutLargeRoom;
+                for (uint32_t args : {kCutLargeListGroups, kCutLargeBlockGroups}) {
+                    large[args + 1u] = 1u;
+                    large[args + 2u] = 1u;
+                }
+                arena->write_at(cut.region.offset() + uint64_t(large_word) * sizeof(uint32_t), large, sizeof(large));
+            }
             // The takeover table starts empty: no slot of frame 0, which the begin pass leaves at once.
             vector<uint32_t> empty_table(size_t(takeover_slots) * kCutTakeoverWords, 0u);
             arena->write_at(cut.region.offset() + uint64_t(takeover_word) * sizeof(uint32_t), empty_table.data(),
@@ -1836,6 +1851,7 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         auto visible_pipeline = pipeline_for(instance_cut_visible_src, 0x4375'7456'6973'6962ULL);
         auto tree_pipeline = pipeline_for(instance_cut_tree_src, 0x4375'7454'7265'6520ULL);
         auto top_pipeline = pipeline_for(instance_cut_top_src, 0x4375'7454'6f70'2020ULL);
+        auto large_pipeline = pipeline_for(instance_cut_large_src, 0x4375'744c'6172'6765ULL);
         auto mark_pipeline = pipeline_for(light_mark_src, 0x4c69'6768'744d'726bULL);
         auto sweep_pipeline = pipeline_for(light_sweep_src, 0x4c69'6768'7453'7770ULL);
         auto pieces_pipeline = pipeline_for(light_pieces_src, 0x4c69'6768'7450'6363ULL);
@@ -1844,7 +1860,7 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         auto stale_pipeline = pipeline_for(instance_cut_stale_src, 0x4375'7453'7461'6c65ULL);
         const bool have_pipelines = pipeline && partition_pipeline && runs_pipeline && fill_pipeline && begin_pipeline
                                  && pages_pipeline && choose_pipeline && place_pipeline && draw_pipeline
-                                 && visible_pipeline && tree_pipeline && top_pipeline && mark_pipeline && sweep_pipeline && pieces_pipeline
+                                 && visible_pipeline && tree_pipeline && top_pipeline && large_pipeline && mark_pipeline && sweep_pipeline && pieces_pipeline
                                  && rename_pipeline
                                  && items_pipeline && stale_pipeline;
         IGpuCommandBuffer::Ptr stage_cmds[kCullStages];
@@ -2044,7 +2060,9 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
                 choose(job, 1u);
             }
             next_stage();
-            // Then the trees for rays over the partitions that chose again.
+            // Then the trees for rays over the partitions that chose again: those with ray lists
+            // past kRaySortMax that the cut's sort of long lists has room for are queued for it,
+            // which starts each frame empty, and built after it.
             struct TreePushC
             {
                 uint32_t cut_word;
@@ -2053,11 +2071,62 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
                 float pad;
                 uint32_t globals_base;
                 float light_pixels;
+                uint32_t mode;
+            };
+            const auto large_word = [&](const CutJob& job) {
+                for (const auto& c : state.cuts) {
+                    if (static_cast<uint32_t>(c.region.offset() / sizeof(uint32_t)) == job.cut) return c.large_word;
+                }
+                return kCullNoSlot;
             };
             for (const CutJob& job : jobs) {
+                const uint32_t large = large_word(job);
+                if (large != kCullNoSlot) {
+                    cmd->record_clear_buffer(arena_buffer, uint64_t(large + kCutLargeLists) * sizeof(uint32_t), 2u * sizeof(uint32_t));
+                }
+            }
+            cmd->record_global_barrier();
+            const auto tree = [&](const CutJob& job, uint32_t mode, uint32_t args_word) {
                 const TreePushC pc{job.cut, job.instances_base, job.items_word, job.pad, view_globals_base,
-                                   kLodMaxErrorPixels * kLightPixels / kLodElementPixels};
-                dispatch(tree_pipeline.get(), &pc, sizeof(pc), job.partition_count);
+                                   kLodMaxErrorPixels * kLightPixels / kLodElementPixels, mode};
+                dispatch(tree_pipeline.get(), &pc, sizeof(pc), job.partition_count, args_word);
+            };
+            for (const CutJob& job : jobs) {
+                tree(job, 0u, kCullNoSlot);
+            }
+            cmd->record_global_barrier();
+            // The long lists' sort, its passes sized from its queue, then their trees.
+            struct LargePushC
+            {
+                uint32_t cut_word;
+                uint32_t instances_base;
+                uint32_t items_word;
+                float pad;
+                uint32_t mode;
+                uint32_t shift;
+                uint32_t source;
+            };
+            const auto large_pass = [&](uint32_t mode, uint32_t shift, uint32_t source, uint32_t args) {
+                for (const CutJob& job : jobs) {
+                    const uint32_t large = large_word(job);
+                    if (large == kCullNoSlot) continue;
+                    const LargePushC pc{job.cut, job.instances_base, job.items_word, job.pad, mode, shift, source};
+                    dispatch(large_pipeline.get(), &pc, sizeof(pc), 1u, args == kCullNoSlot ? kCullNoSlot : large + args);
+                }
+                cmd->record_global_barrier();
+            };
+            large_pass(0u, 0u, 0u, kCullNoSlot);
+            large_pass(1u, 0u, 0u, kCutLargeBlockGroups);
+            for (uint32_t digit = 0; digit < 4u; ++digit) {
+                large_pass(2u, digit * 8u, digit & 1u, kCutLargeBlockGroups);
+                large_pass(3u, digit * 8u, digit & 1u, kCutLargeListGroups);
+                large_pass(4u, digit * 8u, digit & 1u, kCutLargeBlockGroups);
+            }
+            large_pass(5u, 0u, 0u, kCutLargeBlockGroups);
+            large_pass(6u, 0u, 0u, kCutLargeBlockGroups);
+            for (const CutJob& job : jobs) {
+                const uint32_t large = large_word(job);
+                if (large != kCullNoSlot) tree(job, 1u, large + kCutLargeListGroups);
             }
             cmd->record_global_barrier();
 

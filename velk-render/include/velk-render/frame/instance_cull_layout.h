@@ -108,6 +108,20 @@ inline constexpr uint32_t kCutPageRecords = 64;
 /// Tree nodes a page holds: enough for the tree over its records' leaves of four. Mirrors
 /// VELK_CUT_PAGE_NODES.
 inline constexpr uint32_t kCutPageNodes = 16;
+/// Entries a block of the sort of ray lists past kRaySortMax takes (kCutLargeHeaderWords), a work
+/// group each. Mirrors VELK_CUT_LARGE_BLOCK_ENTRIES.
+inline constexpr uint32_t kCutLargeBlockEntries = 256;
+/// Blocks a kept cut's sort of long ray lists has room for each frame: a list that does not fit
+/// is sorted by its partition's own work group, as one up to kRaySortMax is.
+inline constexpr uint32_t kCutLargeRoom = 512;
+inline constexpr uint32_t kCutLargeHeaderWords = kCutLargeEnd;
+inline constexpr uint32_t kCutLargeListWords = kCutLargeListEnd;
+/// The words of a kept cut's sort of long ray lists (kCutLargeHeaderWords): its header, a queue
+/// place for each partition, a word a block, and 256 digit counts a block.
+inline uint32_t cut_large_words(uint32_t partitions, uint32_t room)
+{
+    return kCutLargeHeaderWords + partitions * kCutLargeListWords + room + room * 256u;
+}
 /// Words per slot of a kept cut's takeover table: the frame it was filled in and an old record's word.
 inline constexpr uint32_t kCutTakeoverWords = kTakeoverEnd;
 inline constexpr uint32_t kCutRecordWords = kCutRecordEnd;

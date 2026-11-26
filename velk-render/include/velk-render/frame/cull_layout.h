@@ -294,7 +294,8 @@ namespace velk {
     X(cp, gp, VisibleGroups, VISIBLE_GROUPS, 45) /* of the drawing dispatch: a group a page of partitions in view */ \
     X(cp, gp, VisibleWord, VISIBLE_WORD, 48)    /* the word of their runs: first record and end, two words a group */ \
     X(cp, gp, ShortPages, SHORT_PAGES, 54)      /* pages partitions choosing again asked for and did not get, the last frame */ \
-    X(cp, gp, End, END, 55)
+    X(cp, gp, LargeWord, LARGE_WORD, 55)        /* the word of its large ray lists' sort (VELK_CUT_LARGE) */ \
+    X(cp, gp, End, END, 56)
 
 /// A partition's state in a kept cut (kPart, VELK_PART), at the cut's STATES_WORD.
 #define VELK_CUT_PART(X, cp, gp)                                                                   \
@@ -322,6 +323,31 @@ namespace velk {
     X(cp, gp, Balanced, BALANCED, 30)           /* when its tree for rays fell back to a balanced one, the height the sorted one had (0 overflowed as 1); 0 when not; for the log */ \
     X(cp, gp, Chose, CHOSE, 31)                 /* the frame it last chose in, plus one: a cluster of its records whose errors changed later has it choose again */ \
     X(cp, gp, End, END, 32)
+
+/// The sort of a kept cut's ray lists longer than kRaySortMax (kCutLarge, VELK_CUT_LARGE), at the
+/// cut's LARGE_WORD: a list's partition takes blocks of kCutLargeBlockEntries entries off BLOCKS,
+/// up to CAP of them, then a place in the queue, a VELK_CUT_LARGE_LIST each, which the sort's
+/// passes go through, a work group a block or a list. Then a word a block, the queue place of the
+/// list it is of (kCullNoSlot for a block taken by a list that did not get all it asked for), and
+/// each block's count of each of its 256 digits. LISTS and BLOCKS start each frame at 0.
+#define VELK_CUT_LARGE(X, cp, gp)                                                                  \
+    X(cp, gp, Lists, LISTS, 0)                  /* lists queued this frame */                  \
+    X(cp, gp, Blocks, BLOCKS, 1)                /* blocks taken this frame, past CAP by those that did not fit */ \
+    X(cp, gp, Cap, CAP, 2)                      /* blocks there is room for */                 \
+    X(cp, gp, ListGroups, LIST_GROUPS, 3)       /* group counts of the passes a group a list */ \
+    X(cp, gp, BlockGroups, BLOCK_GROUPS, 6)     /* and of those a group a block */             \
+    X(cp, gp, End, END, 9)
+
+/// A list in the queue of a kept cut's sort of long ray lists (kCutLargeList, VELK_CUT_LARGE_LIST).
+#define VELK_CUT_LARGE_LIST(X, cp, gp)                                                             \
+    X(cp, gp, State, STATE, 0)                  /* its partition's state's word */             \
+    X(cp, gp, Table, TABLE, 1)                  /* the word of its page table */               \
+    X(cp, gp, Count, COUNT, 2)                  /* its entries */                              \
+    X(cp, gp, FirstBlock, FIRST_BLOCK, 3)       /* its first block, the rest after it */       \
+    X(cp, gp, Bounded, BOUNDED, 4)              /* its entries with a box, which the sort puts first */ \
+    X(cp, gp, Lo, LO, 5)                        /* the box around its entries' centres, three floats each */ \
+    X(cp, gp, Hi, HI, 8)                                                                       \
+    X(cp, gp, End, END, 11)
 
 /// A page header of a kept cut's pool (kCutPage, VELK_CUT_PAGE): which partition holds the page,
 /// and where in its page table.
@@ -417,6 +443,8 @@ VELK_PARTITION_ENTRY(VELK_LAYOUT_CPP_WORD, PartitionEntry, PARTITION_ENTRY)
 VELK_CHUNK(VELK_LAYOUT_CPP_WORD, Chunk, CHUNK)
 VELK_CUT_HEADER(VELK_LAYOUT_CPP_WORD, Cut, CUT)
 VELK_CUT_PART(VELK_LAYOUT_CPP_WORD, Part, PART)
+VELK_CUT_LARGE(VELK_LAYOUT_CPP_WORD, CutLarge, CUT_LARGE)
+VELK_CUT_LARGE_LIST(VELK_LAYOUT_CPP_WORD, CutLargeList, CUT_LARGE_LIST)
 VELK_CUT_PAGE(VELK_LAYOUT_CPP_WORD, CutPage, CUT_PAGE)
 VELK_CUT_RECORD(VELK_LAYOUT_CPP_WORD, CutRecord, RECORD)
 VELK_TAKEOVER(VELK_LAYOUT_CPP_WORD, Takeover, TAKEOVER)
@@ -453,6 +481,8 @@ VELK_RETEST(VELK_LAYOUT_CPP_WORD, Retest, RETEST)
     VELK_CHUNK(VELK_LAYOUT_GLSL_WORD, Chunk, CHUNK)                                                \
     VELK_CUT_HEADER(VELK_LAYOUT_GLSL_WORD, Cut, CUT)                                               \
     VELK_CUT_PART(VELK_LAYOUT_GLSL_WORD, Part, PART)                                               \
+    VELK_CUT_LARGE(VELK_LAYOUT_GLSL_WORD, CutLarge, CUT_LARGE)                                     \
+    VELK_CUT_LARGE_LIST(VELK_LAYOUT_GLSL_WORD, CutLargeList, CUT_LARGE_LIST)                       \
     VELK_CUT_PAGE(VELK_LAYOUT_GLSL_WORD, CutPage, CUT_PAGE)                                        \
     VELK_CUT_RECORD(VELK_LAYOUT_GLSL_WORD, CutRecord, RECORD)                                      \
     VELK_TAKEOVER(VELK_LAYOUT_GLSL_WORD, Takeover, TAKEOVER)                                       \

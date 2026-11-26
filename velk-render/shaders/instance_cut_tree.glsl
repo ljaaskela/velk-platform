@@ -25,11 +25,13 @@ layout(push_constant) uniform PC {
     float pad;
     uint globals_base;   // the view's, for sizes on screen
     float light_pixels;  // the light's level, as at instance_cut_choose_src
+    uint mode;           // 0 a group a partition, 1 a group a list of the long lists' queue
 } pc;
 #velk_include VELK_CUT_GLSL
 #velk_include VELK_CUT_BOX_GLSL
 #velk_include VELK_SORT_GLSL
 #velk_include VELK_LBVH_GLSL
+#velk_include VELK_RAY_ENTRY_GLSL
 shared uint s_counts[64];
 // After the sort: the key of each leaf of four records, that of its first, and how many records
 // have a box, which the sort puts first.
@@ -41,6 +43,10 @@ shared vec3 s_hi[64];
 shared uint s_always[64];
 shared uint s_for_rays[64];
 shared uint s_quads[64];
+// A long list's place in the queue of the long lists' sort, kCullNoSlot when its own group sorts
+// it; and the first block it took.
+shared uint s_large_slot;
+shared uint s_large_first;
 
 // Adds `record`'s share to the partition's box and counts: none for one for rays only
 // (kCutForRays) or a patch for rays, which are not drawn; a deforming mesh's or an item drawn
@@ -99,43 +105,6 @@ bool velk_ray_record(uint record, uint place, vec3 viewpoint, float pixels_per_u
     return velk_ray_pixels(cluster + VELK_LOD_CLUSTER_PARENT_SPHERE, world, scale, viewpoint, pixels_per_unit) > pc.light_pixels;
 }
 
-void velk_store_box(uint at, vec3 lo, vec3 hi)
-{
-    cull_words.data[at] = floatBitsToUint(lo.x);
-    cull_words.data[at + 1u] = floatBitsToUint(lo.y);
-    cull_words.data[at + 2u] = floatBitsToUint(lo.z);
-    cull_words.data[at + 3u] = floatBitsToUint(hi.x);
-    cull_words.data[at + 4u] = floatBitsToUint(hi.y);
-    cull_words.data[at + 5u] = floatBitsToUint(hi.z);
-}
-
-vec3 velk_load_vec3(uint at)
-{
-    return vec3(uintBitsToFloat(cull_words.data[at]), uintBitsToFloat(cull_words.data[at + 1u]),
-                uintBitsToFloat(cull_words.data[at + 2u]));
-}
-
-// Writes the ray list entry at word `at` for the record at pool place `place`: the place and
-// the record's box, grown by the pad.
-void velk_write_ray_entry(uint at, uint place)
-{
-    vec3 rlo, rhi;
-    velk_cut_record_box(velk_cut_record_word(pc.cut_word, place), pc.instances_base, pc.items_word, pc.pad, rlo, rhi);
-    cull_words.data[at + VELK_CUT_RAY_INDEX] = place;
-    velk_store_box(at + VELK_CUT_RAY_MIN, rlo, rhi);
-}
-
-// The box of the ray list entry at word `at`, and its centre and the radius of the sphere round
-// it, which the sorts go by; false for a record without a box.
-bool velk_ray_entry_box(uint at, out vec3 lo, out vec3 hi, out vec3 centre, out float radius)
-{
-    lo = velk_load_vec3(at + VELK_CUT_RAY_MIN);
-    hi = velk_load_vec3(at + VELK_CUT_RAY_MAX);
-    centre = (lo + hi) * 0.5;
-    radius = length(hi - lo) * 0.5;
-    return lo.x <= hi.x;
-}
-
 // The partition the tree is built over: the word of its page table in the current one, and how
 // many of its ray list's entries its leaves of four hold.
 uint g_table = 0u;
@@ -145,6 +114,31 @@ uint g_leaf_records = 0u;
 uint velk_tree_ray_word(uint i)
 {
     return velk_cut_ray_word(pc.cut_word, velk_cut_place(g_table, i));
+}
+
+// The box around the centres of the `count` entries of the partition's ray list that have a box,
+// the same in every thread. All threads of the group call it.
+void velk_ray_list_box(uint count, uint lane, out vec3 lo, out vec3 hi)
+{
+    lo = vec3(1e30);
+    hi = vec3(-1e30);
+    for (uint i = lane; i < count; i += 64u) {
+        vec3 blo, bhi, c;
+        float radius;
+        if (!velk_ray_entry_box(velk_tree_ray_word(i), blo, bhi, c, radius)) continue;
+        lo = min(lo, c);
+        hi = max(hi, c);
+    }
+    s_lo[lane] = lo;
+    s_hi[lane] = hi;
+    memoryBarrierShared();
+    barrier();
+    for (uint i = 0u; i < 64u; ++i) {
+        lo = min(lo, s_lo[i]);
+        hi = max(hi, s_hi[i]);
+    }
+    memoryBarrierShared();
+    barrier();
 }
 
 // Puts the `count` entries of the partition's ray list in Morton order of their spheres' centres
@@ -216,7 +210,8 @@ void velk_sort_ray_list(uint count, uint lane)
 // is built on them: a page's kCutPageNodes nodes are four words for each of its kCutPageRecords
 // entries, two buffers of (code, place in the list) pairs. A thread's run of entries is counted
 // by digit, the counts summed in order of digit then thread, and the run moved in its order, so
-// that each pass keeps the order of the one before.
+// that each pass keeps the order of the one before. A list the long lists' sort has room for is
+// sorted by that instead, the same way over many work groups (instance_cut_large_src).
 shared uint s_radix[16u * 64u];
 shared uint s_radix_sum[64];
 // Whether the radix sort made the order: a leaf's key is then its code, made again from its entry
@@ -236,38 +231,28 @@ uint velk_sort_scratch(uint w)
 // Morton code under the bit for the wide ones, and above every other for one without a box.
 uint velk_ray_code_large(uint at)
 {
-    vec3 blo, bhi, c;
-    float radius;
-    if (!velk_ray_entry_box(at, blo, bhi, c, radius)) return 0xFFFFFFFFu;
-    return ((radius >= 0.25 * g_sort_extent ? 1u : 0u) << 30u) | velk_morton(c, g_sort_lo, g_sort_hi);
+    return velk_ray_entry_code(at, g_sort_lo, g_sort_hi, g_sort_extent);
+}
+
+// Sets the box the codes of a list past kSortMax entries are within (velk_ray_code_large).
+void velk_large_sort_box(vec3 lo, vec3 hi)
+{
+    g_sort_lo = lo;
+    g_sort_hi = hi;
+    g_sort_extent = max(max(hi.x - lo.x, hi.y - lo.y), hi.z - lo.z);
+    g_large_sort = true;
 }
 
 // velk_sort_ray_list for more than kSortMax entries. Leaves s_bounded. All threads of the group
 // call it.
 void velk_sort_ray_list_large(uint count, uint lane)
 {
-    vec3 lo = vec3(1e30);
-    vec3 hi = vec3(-1e30);
-    for (uint i = lane; i < count; i += 64u) {
-        vec3 blo, bhi, c;
-        float radius;
-        if (!velk_ray_entry_box(velk_tree_ray_word(i), blo, bhi, c, radius)) continue;
-        lo = min(lo, c);
-        hi = max(hi, c);
-    }
-    s_lo[lane] = lo;
-    s_hi[lane] = hi;
+    vec3 lo, hi;
+    velk_ray_list_box(count, lane, lo, hi);
     if (lane == 0u) s_bounded = 0u;
     memoryBarrierShared();
     barrier();
-    for (uint i = 0u; i < 64u; ++i) {
-        lo = min(lo, s_lo[i]);
-        hi = max(hi, s_hi[i]);
-    }
-    g_sort_lo = lo;
-    g_sort_hi = hi;
-    g_sort_extent = max(max(hi.x - lo.x, hi.y - lo.y), hi.z - lo.z);
-    g_large_sort = true;
+    velk_large_sort_box(lo, hi);
     for (uint i = lane; i < count; i += 64u) {
         uint code = velk_ray_code_large(velk_tree_ray_word(i));
         if (code != 0xFFFFFFFFu) atomicAdd(s_bounded, 1u);
@@ -378,16 +363,89 @@ uint velk_lbvh_ref_word(uint ref)
     return velk_cut_node_word(pc.cut_word, ref);
 }
 
+// The tree over the partition at state word `state` with `count` entries in its ray list, the
+// first `leaf_records` of them in leaves of four, in their order when `sorted`, else balanced; its
+// root and whether it fell back to a balanced tree. All threads of the group call it.
+void velk_build_tree(uint state, uint count, uint leaf_records, bool sorted, uint lane)
+{
+    g_leaf_records = leaf_records;
+    uint node_count = velk_cut_tree_nodes(count);
+    velk_lbvh_build_bounded(node_count, (leaf_records + 3u) / 4u, lane, 64u, !sorted);
+    if (lane == 0u) {
+        cull_words.data[state + VELK_PART_ROOT] = velk_lbvh_node_ref(node_count - 1u);
+        cull_words.data[state + VELK_PART_BALANCED] = sorted && g_lbvh_balanced ? max(g_lbvh_tried_height, 1u) : 0u;
+    }
+}
+
+// The word of the long lists' sort's queue place `slot` of the cut.
+uint velk_large_list_word(uint large, uint slot)
+{
+    return large + VELK_CUT_LARGE_END + slot * VELK_CUT_LARGE_LIST_END;
+}
+
+// Whether the long lists' sort takes the partition's ray list of `count` entries, past kSortMax:
+// its blocks if there is room for them all, then a place in the queue, which has one for every
+// partition. The blocks of a list there was no room for are named by none. When taken, the box
+// its codes are within and the rest the sort needs are in its place. All threads of the group
+// call it.
+bool velk_large_take(uint state, uint count, uint lane)
+{
+    uint cut = pc.cut_word;
+    uint large = cull_words.data[cut + VELK_CUT_LARGE_WORD];
+    uint blocks = (count + VELK_CUT_LARGE_BLOCK_ENTRIES - 1u) / VELK_CUT_LARGE_BLOCK_ENTRIES;
+    uint cap = cull_words.data[large + VELK_CUT_LARGE_CAP];
+    if (lane == 0u) {
+        uint first = atomicAdd(cull_words.data[large + VELK_CUT_LARGE_BLOCKS], blocks);
+        s_large_first = first;
+        s_large_slot = first + blocks <= cap ? atomicAdd(cull_words.data[large + VELK_CUT_LARGE_LISTS], 1u) : 0xFFFFFFFFu;
+    }
+    memoryBarrierShared();
+    barrier();
+    uint first = s_large_first;
+    uint slot = s_large_slot;
+    // Each block it took that is in the table: of its place, or of none.
+    uint table = large + VELK_CUT_LARGE_END + cull_words.data[cut + VELK_CUT_PARTITIONS] * VELK_CUT_LARGE_LIST_END;
+    for (uint b = first + lane; b < first + blocks && b < cap; b += 64u) cull_words.data[table + b] = slot;
+    if (slot == 0xFFFFFFFFu) return false;
+    vec3 lo, hi;
+    velk_ray_list_box(count, lane, lo, hi);
+    if (lane == 0u) {
+        uint at = velk_large_list_word(large, slot);
+        cull_words.data[at + VELK_CUT_LARGE_LIST_STATE] = state;
+        cull_words.data[at + VELK_CUT_LARGE_LIST_TABLE] = g_table;
+        cull_words.data[at + VELK_CUT_LARGE_LIST_COUNT] = count;
+        cull_words.data[at + VELK_CUT_LARGE_LIST_FIRST_BLOCK] = first;
+        cull_words.data[at + VELK_CUT_LARGE_LIST_BOUNDED] = 0u;
+        velk_store_box(at + VELK_CUT_LARGE_LIST_LO, lo, hi);
+    }
+    return true;
+}
+
 void main()
 {
     uint cut = pc.cut_word;
+    uint lane = gl_LocalInvocationIndex;
+    // A list of the long lists' queue, sorted by now: its tree.
+    if (pc.mode != 0u) {
+        uint large = cull_words.data[cut + VELK_CUT_LARGE_WORD];
+        if (gl_WorkGroupID.x >= cull_words.data[large + VELK_CUT_LARGE_LISTS]) return;
+        uint at = velk_large_list_word(large, gl_WorkGroupID.x);
+        uint state = cull_words.data[at + VELK_CUT_LARGE_LIST_STATE];
+        g_table = cull_words.data[at + VELK_CUT_LARGE_LIST_TABLE];
+        uint count = cull_words.data[at + VELK_CUT_LARGE_LIST_COUNT];
+        if (lane == 0u) s_bounded = cull_words.data[at + VELK_CUT_LARGE_LIST_BOUNDED];
+        memoryBarrierShared();
+        barrier();
+        velk_large_sort_box(velk_load_vec3(at + VELK_CUT_LARGE_LIST_LO), velk_load_vec3(at + VELK_CUT_LARGE_LIST_HI));
+        velk_build_tree(state, count, s_bounded, true, lane);
+        return;
+    }
     if (gl_WorkGroupID.x >= cull_words.data[cut + VELK_CUT_PARTITIONS]) return;
     uint state = velk_cut_state(cut, gl_WorkGroupID.x);
     // The same for the whole group.
     if (cull_words.data[state + VELK_PART_CHOOSING] == 0u) return;
     uint records_count = cull_words.data[state + VELK_PART_COUNT];
     g_table = velk_cut_table(cut, true) + cull_words.data[state + VELK_PART_TABLE_FIRST];
-    uint lane = gl_LocalInvocationIndex;
 
     // The records rays trace, in their order: each thread a run of them, counted, then placed
     // after the runs before.
@@ -449,21 +507,17 @@ void main()
     barrier();
     if (count == 0u) return;
     // Where they are, those without a box last and left out of the leaves: sorted in the group's
-    // memory as far as it holds them, past that in the partition's node pages.
+    // memory as far as it holds them; past that by the long lists' sort when it has room, which
+    // then builds the tree, else in the partition's node pages.
     bool sorted = count > 4u;
     uint leaf_records = count;
     if (count > kSortMax) {
+        if (velk_large_take(state, count, lane)) return;
         velk_sort_ray_list_large(count, lane);
         leaf_records = s_bounded;
     } else if (sorted) {
         velk_sort_ray_list(count, lane);
         leaf_records = s_bounded;
     }
-    g_leaf_records = leaf_records;
-    uint node_count = velk_cut_tree_nodes(count);
-    velk_lbvh_build_bounded(node_count, (leaf_records + 3u) / 4u, lane, 64u, !sorted);
-    if (lane == 0u) {
-        cull_words.data[state + VELK_PART_ROOT] = velk_lbvh_node_ref(node_count - 1u);
-        cull_words.data[state + VELK_PART_BALANCED] = sorted && g_lbvh_balanced ? max(g_lbvh_tried_height, 1u) : 0u;
-    }
+    velk_build_tree(state, count, leaf_records, sorted, lane);
 }

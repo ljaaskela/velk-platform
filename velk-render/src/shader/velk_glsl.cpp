@@ -126,6 +126,8 @@ R"(
 // kCutPageNodes.
 #define VELK_CUT_PAGE_RECORDS 64u
 #define VELK_CUT_PAGE_NODES 16u
+// Entries a block of the sort of ray lists past kRaySortMax takes: kCutLargeBlockEntries.
+#define VELK_CUT_LARGE_BLOCK_ENTRIES 256u
 // Words from one node of the tree over a hierarchy's clusters to the next. A node is
 // kLodNodeWords, and rays' node with its children's boxes sits before each.
 #define VELK_LOD_NODE_STRIDE 32u
