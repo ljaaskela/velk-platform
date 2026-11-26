@@ -631,6 +631,21 @@ void build_soft(SceneBuilder& b)
         {add_mesh(b, build_box(raw(b), {60.f, 60.f, 60.f}, 8, standard(0.75f, 0.75f, 0.75f)), from), from, {150.f, 0.f, 40.f}});
 }
 
+/// A fence of thin boards under one sized point light and a dim sky, and a thin board moving
+/// across before the fence, then standing still: penumbras of thin blockers under a local light,
+/// following a thin mover.
+void build_thin_local(SceneBuilder& b)
+{
+    set_sky(b, "thin_local", 0.03f, 0.035f, 0.045f);
+    add_mesh(b, build_ground(raw(b), 1200.f, 64, standard(0.5f, 0.5f, 0.5f)), {});
+    const velk::IMesh::Ptr board = build_box(raw(b), {3.f, 90.f, 3.f}, 2, standard(0.6f, 0.45f, 0.3f));
+    for (int i = 0; i < 9; ++i) add_mesh(b, board, {-80.f + static_cast<float>(i) * 20.f, 0.f, -40.f});
+    add_point(b, {0.f, -160.f, 120.f}, velk::color{1.f, 0.96f, 0.88f, 1.f}, 1.f, 700.f, 6.f);
+    const velk::vec3 from{-150.f, 0.f, 20.f};
+    b.out.frames = 120;
+    b.out.movers.push_back({add_mesh(b, board, from), from, {150.f, 0.f, 20.f}});
+}
+
 /// Paving of long thin triangles fanned round a corner, under a sun of size 2 as bistro's, with
 /// a tall block whose shadow crosses it with a wide penumbra, buildings all round, a few posts and
 /// a thin board as a sign: shadows on long thin triangles, settled, coming into view, and on
@@ -1051,6 +1066,9 @@ const velk::vector<SceneSpec>& scenes()
         {"soft", "a row of posts and a box moving through their shadows under a wide sun: soft shadows following a mover",
          {{"front", {{0.f, -120.f, 320.f}, 0.f, -15.f}}},
          build_soft},
+        {"thin_local", "a fence of thin boards and a thin board moving before it under a sized point light: thin penumbras following a mover",
+         {{"front", {{0.f, -120.f, 320.f}, 0.f, -15.f}}},
+         build_thin_local},
         {"pavement", "paving of long thin triangles under a wide sun, a tall block's shadow across it: shadows on long triangles",
          {{"front", {{0.f, -110.f, 300.f}, -35.f, -15.f}},
           {"turn", {{0.f, -110.f, 300.f}, -35.f, -15.f}, {{0.f, -110.f, 300.f}, 145.f, -15.f}, 10, false, nullptr, 1100},
