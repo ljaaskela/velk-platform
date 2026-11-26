@@ -130,6 +130,7 @@ inline constexpr string_view visibility_debug_compute_src = VELK_VISIBILITY_DEBU
 //     light (directional / point / spot) with distance + cone falloff.
 //   - Shadow modulation lands in a later slice (B.3.d) alongside the
 //     shared `velk_eval_shadow` composer.
+#include <velk-render/glsl/deferred_push_constants.inc>
 #include <velk-render/glsl/deferred_compute_prelude.inc>
 [[maybe_unused]] constexpr string_view deferred_compute_prelude_src = VELK_DEFERRED_COMPUTE_PRELUDE_GLSL;
 

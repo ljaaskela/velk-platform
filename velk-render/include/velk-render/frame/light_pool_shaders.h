@@ -46,27 +46,37 @@ namespace velk {
 #include <velk-render/glsl/light_read_body.inc>
 #define VELK_LIGHT_READ_GLSL VELK_LIGHT_ADD_GLSL VELK_LIGHT_READ_BODY_GLSL
 
+// The deferred compute shaders' push constants (PC pc), as deferred_compute_prelude_src declares
+// them, for a shader that takes the same push constants without the prelude.
+#include <velk-render/glsl/deferred_push_constants.inc>
+
+// The point lists in the order the trace takes them, and the trace's group size and most lanes a
+// point spreads its rays over: what the trace and its sizing agree on.
+#include <velk-render/glsl/light_trace_common.inc>
+
 /**
- * The light trace, three dispatches by VELK_LIGHT_TRACE_MODE: 1, a group that sizes the other two
- * from what the claims listed (their indirect args in the pool's header); 0, the one values on
- * the trace list (light_claim_src lists them), a group of threads each, a ray a light from its
- * centre; 2, the points of light on the point lists: their due lights traced over the lanes
- * pc.spare1 gives each (velk_points_trace_point). Built on the light grid's code
+ * The light trace's sizing, a group that sizes the trace's two dispatches from what the claims
+ * listed: their indirect args in the pool's header, and the points each list traces this frame
+ * (velk_points_takes). A shader of its own, with no ray code; the culling arena is
+ * velk_light_cell_words, pc.spare3 the pool and pc.spare1's low byte the most lanes a point
+ * spreads its rays over, as in the trace's push constants.
+ */
+#include <velk-render/glsl/light_trace_args.inc>
+inline constexpr string_view light_trace_args_src = VELK_LIGHT_TRACE_ARGS_GLSL;
+
+/**
+ * The light trace, two dispatches by VELK_LIGHT_TRACE_MODE, both sized by light_trace_args_src:
+ * 0, the one values on the trace list (light_claim_src lists them), a group of threads each, a
+ * ray a light from its centre; 2, the points of light on the point lists: their due lights traced
+ * over the lanes pc.spare1 gives each (velk_points_trace_point). Built on the light grid's code
  * (light_grid_src), whose velk_light_cell_words is the culling arena; pc.spare3 is the pool.
  */
 #include <velk-render/glsl/light_trace_main.inc>
 
-// The rest of the light trace's shaders, after VELK_LIGHT_TRACE_MAIN_GLSL: apart, as the whole is
-// past what one string the compiler takes may be.
-#include <velk-render/glsl/light_trace_main_tail.inc>
-
-/// The light trace's three shaders (VELK_LIGHT_TRACE_MAIN_GLSL), each only its own part, so that
-/// each holds only its own code: the sizes of the other two, the one values, the points. Each is
-/// its head here followed by light_trace_tail_src.
-inline constexpr string_view light_trace_args_src = "#define VELK_LIGHT_TRACE_MODE 1\n" VELK_LIGHT_TRACE_MAIN_GLSL;
+/// The light trace's two shaders (VELK_LIGHT_TRACE_MAIN_GLSL), each only its own part: the one
+/// values, the points.
 inline constexpr string_view light_trace_ones_src = "#define VELK_LIGHT_TRACE_MODE 0\n" VELK_LIGHT_TRACE_MAIN_GLSL;
 inline constexpr string_view light_trace_points_src = "#define VELK_LIGHT_TRACE_MODE 2\n" VELK_LIGHT_TRACE_MAIN_GLSL;
-inline constexpr string_view light_trace_tail_src = VELK_LIGHT_TRACE_MAIN_TAIL_GLSL;
 
 /**
  * Makes the light of each kept cut record that a change this frame could alter due again, a

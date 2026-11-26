@@ -1468,15 +1468,17 @@ void DeferredPath::emit_light_claim_pass(ViewState& vs, const RenderView& render
     // The lights listed for tracing, built on the deferred prelude, which has the lights and the
     // walk, and the light grid. Without the light header there is no grid yet: nothing is traced.
     const bool trace = vs.light_header.valid();
-    // Its three shaders: the sizes, the one values, the points.
-    auto args_pipeline = trace ? compose_deferred_compute_pipeline(ctx, light_trace_args_src, 0x4c50'5452'4141ULL, false, 5u,
-                                                                   light_trace_tail_src)
-                               : IGpuPipeline::Ptr{};
-    auto trace_pipeline = trace ? compose_deferred_compute_pipeline(ctx, light_trace_ones_src, 0x4c50'5452'4143ULL, false, 5u,
-                                                                    light_trace_tail_src)
+    // Its three shaders: the sizes, a shader of its own without the walk; the one values and the
+    // points, on the deferred prelude.
+    constexpr uint64_t kArgsKey = 0x4c69'6768'7454'4172ULL;
+    IGpuPipeline::Ptr args_pipeline;
+    if (trace) {
+        auto found_args = ctx.render_ctx->pipelines().find(PipelineCacheKey{kArgsKey, PixelFormat::RGBA8, DepthFormat::None, 0});
+        args_pipeline = found_args ? found_args : ctx.render_ctx->pipelines().compile_compute(light_trace_args_src, kArgsKey);
+    }
+    auto trace_pipeline = trace ? compose_deferred_compute_pipeline(ctx, light_trace_ones_src, 0x4c50'5452'4143ULL, false, 5u)
                                 : IGpuPipeline::Ptr{};
-    auto points_pipeline = trace ? compose_deferred_compute_pipeline(ctx, light_trace_points_src, 0x4c50'5452'4150ULL, false, 5u,
-                                                                     light_trace_tail_src)
+    auto points_pipeline = trace ? compose_deferred_compute_pipeline(ctx, light_trace_points_src, 0x4c50'5452'4150ULL, false, 5u)
                                  : IGpuPipeline::Ptr{};
     if (!pipeline || !search_pipeline || (trace && (!args_pipeline || !trace_pipeline || !points_pipeline))) return;
 

@@ -193,6 +193,7 @@ set(VELK_RENDER_GLSL_SOURCES
     shaders/deferred_area_light_stub.glsl
     shaders/deferred_compute_prelude.glsl
     shaders/deferred_lighting_main.glsl
+    shaders/deferred_push_constants.glsl
     shaders/depth_pyramid_compute.glsl
     shaders/fragment_triangle.glsl
     shaders/instance_cluster_fill.glsl
@@ -241,8 +242,9 @@ set(VELK_RENDER_GLSL_SOURCES
     shaders/light_search.glsl
     shaders/light_slots.glsl
     shaders/light_sweep.glsl
+    shaders/light_trace_args.glsl
+    shaders/light_trace_common.glsl
     shaders/light_trace_main.glsl
-    shaders/light_trace_main_tail.glsl
     shaders/lod_select.glsl
     shaders/lod_take.glsl
     shaders/occlusion.glsl
