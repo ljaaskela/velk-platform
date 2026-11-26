@@ -7,10 +7,12 @@
 #velk_include VELK_SHADOW_SOFT_GLSL
 #velk_include VELK_SHADOW_APPLY_GLSL
 // The bounce light at a pixel from the screen probes around it (light_probes_main_src, this
-// frame's store at pc.spare1): the four nearest, each seen from `n` (velk_probe_eval), by how
-// near they are on screen, how much their normal agrees with `n` and how near `pos` is to their
-// surface's plane. `along` is the same probes' light seen from `r`, for a rough reflection along
-// it, and `match` how well they matched, 0 to 1. False where none of them has a surface like it.
+// frame's store at pc.spare1): the three by three nearest, each seen from `n` (velk_probe_eval),
+// by how near they are on screen (a tent one and a half probes wide, so that a probe joins and
+// leaves the pixels it lights gradually), how much their normal agrees with `n` and how near
+// `pos` is to their surface's plane. `along` is the same probes' light seen from `r`, for a rough
+// reflection along it, and `match` how well they matched, 0 to 1. False where none of them has a
+// surface like it.
 bool velk_probe_indirect(ivec2 coord, vec3 pos, vec3 n, vec3 r, out vec3 light, out vec3 along, out float match)
 {
     light = vec3(0.0);
@@ -22,19 +24,25 @@ bool velk_probe_indirect(ivec2 coord, vec3 pos, vec3 n, vec3 r, out vec3 light, 
     uint down = (pc.height + 15u) / 16u;
     // A probe sits at the middle pixel of its square, whose centre is 8.5 pixels in.
     vec2 at = (vec2(coord) + 0.5 - (kProbe * 0.5 + 0.5)) / kProbe;
-    ivec2 base = ivec2(floor(at));
-    vec2 f = at - vec2(base);
+    ivec2 centre = ivec2(floor(at + 0.5));
     float total = 0.0;
-    for (int k = 0; k < 4; ++k) {
-        ivec2 p = clamp(base + ivec2(k & 1, k >> 1), ivec2(0), ivec2(int(across) - 1, int(down) - 1));
+    float spread = 0.0;
+    for (int k = 0; k < 9; ++k) {
+        ivec2 p = centre + ivec2(k % 3 - 1, k / 3 - 1);
+        // Off the grid there is no probe, and none is counted twice for it.
+        if (p.x < 0 || p.y < 0 || p.x >= int(across) || p.y >= int(down)) continue;
+        vec2 d = abs(at - vec2(p));
+        float tent = max(0.0, 1.0 - d.x / 1.5) * max(0.0, 1.0 - d.y / 1.5);
+        // Every probe the tent reaches counts toward how much could have matched, with a surface
+        // or without one.
+        spread += tent;
         uint w = pc.spare1 + (uint(p.y) * across + uint(p.x)) * VELK_PROBE_WORDS;
         if (uintBitsToFloat(velk_light_cell_words.data[w + VELK_PROBE_FRAMES]) <= 0.0) continue;
         vec3 pn = velk_probe_normal(w);
         vec3 ppos = velk_probe_position(w);
-        float bilinear = ((k & 1) != 0 ? f.x : 1.0 - f.x) * ((k >> 1) != 0 ? f.y : 1.0 - f.y);
         float facing = pow(max(dot(pn, n), 0.0), 4.0);
         float plane = exp(-abs(dot(pn, pos - ppos)) / (0.02 * length(pos) + 1e-3));
-        float weight = bilinear * facing * plane + 1e-6 * bilinear;
+        float weight = tent * facing * plane + 1e-6 * tent;
         VelkProbeLight probe = velk_probe_read(w);
         light += weight * velk_probe_eval(probe, pn, n);
         along += weight * velk_probe_eval(probe, pn, r);
@@ -43,8 +51,8 @@ bool velk_probe_indirect(ivec2 coord, vec3 pos, vec3 n, vec3 r, out vec3 light, 
     if (total <= 1e-5) return false;
     light /= total;
     along /= total;
-    // The bilinear weights add up to one: what is left of them is how much matched.
-    match = clamp(total, 0.0, 1.0);
+    // How much of what the tent reached matched.
+    match = clamp(total / max(spread, 1e-6), 0.0, 1.0);
     return true;
 }
 
