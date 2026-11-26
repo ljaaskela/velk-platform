@@ -1,0 +1,3 @@
+VELK_VARYINGS_IN
+
+VELK_FRAG_OUT(frag_color)
