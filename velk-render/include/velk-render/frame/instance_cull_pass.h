@@ -2133,11 +2133,14 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
                 }
                 large_pass(5u, 0u, 0u, kCutLargeBlockGroups);
                 large_pass(6u, 0u, 0u, kCutLargeBlockGroups);
-                for (const CutJob& job : jobs) {
-                    const uint32_t large = job.large_word;
-                    if (large != kCullNoSlot) tree(job, 1u, large + kCutLargeListGroups);
+                // Their trees: the leaves' keys, then for the sorted tree and again for those built
+                // balanced instead, each node's children, the boxes from the leaves up, and the root.
+                large_pass(7u, 0u, 0u, kCutLargeBlockGroups);
+                for (uint32_t attempt = 0; attempt < 2u; ++attempt) {
+                    large_pass(8u, 0u, attempt, kCutLargeBlockGroups);
+                    large_pass(9u, 0u, attempt, kCutLargeBlockGroups);
+                    large_pass(10u, 0u, attempt, kCutLargeListGroups);
                 }
-                cmd->record_global_barrier();
             }
 
             // And the top tree over them all, its cuts and leaves written into the region

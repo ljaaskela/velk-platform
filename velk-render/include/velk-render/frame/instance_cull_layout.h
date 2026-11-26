@@ -121,7 +121,8 @@ inline constexpr uint32_t kCutLargeListWords = kCutLargeListEnd;
 inline uint32_t cut_large_words(uint32_t partitions, uint32_t room)
 {
     return kCutLargeHeaderWords + partitions * kCutLargeListWords + room + room * 256u;
-}/// Words per slot of a kept cut's takeover table: the frame it was filled in and an old record's word.
+}
+/// Words per slot of a kept cut's takeover table: the frame it was filled in and an old record's word.
 inline constexpr uint32_t kCutTakeoverWords = kTakeoverEnd;
 inline constexpr uint32_t kCutRecordWords = kCutRecordEnd;
 inline constexpr uint32_t kCutLeaf = 0x80000000u;

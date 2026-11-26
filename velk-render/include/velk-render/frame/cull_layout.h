@@ -329,7 +329,9 @@ namespace velk {
 /// up to CAP of them, then a place in the queue, a VELK_CUT_LARGE_LIST each, which the sort's
 /// passes go through, a work group a block or a list. Then a word a block, the queue place of the
 /// list it is of (kCullNoSlot for a block taken by a list that did not get all it asked for), and
-/// each block's count of each of its 256 digits. LISTS and BLOCKS start each frame at 0.
+/// each block's count of each of its 256 digits, which once the sort is done hold the words the
+/// builds of its lists' trees go by, a list's from its first block's. LISTS and BLOCKS start each
+/// frame at 0.
 #define VELK_CUT_LARGE(X, cp, gp)                                                                  \
     X(cp, gp, Lists, LISTS, 0)                  /* lists queued this frame */                  \
     X(cp, gp, Blocks, BLOCKS, 1)                /* blocks taken this frame, past CAP by those that did not fit */ \
@@ -347,7 +349,9 @@ namespace velk {
     X(cp, gp, Bounded, BOUNDED, 4)              /* its entries with a box, which the sort puts first */ \
     X(cp, gp, Lo, LO, 5)                        /* the box around its entries' centres, three floats each */ \
     X(cp, gp, Hi, HI, 8)                                                                       \
-    X(cp, gp, End, END, 11)
+    X(cp, gp, Retry, RETRY, 11)                 /* 1 when its tree is built again balanced, its sorted one too deep */ \
+    X(cp, gp, Tried, TRIED, 12)                 /* the height its sorted tree had then, 0 for one not done */ \
+    X(cp, gp, End, END, 13)
 
 /// A page header of a kept cut's pool (kCutPage, VELK_CUT_PAGE): which partition holds the page,
 /// and where in its page table.
