@@ -1024,9 +1024,11 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             const uint32_t marks_word = takeover_word + takeover_slots * kCutTakeoverWords;
             // The runs the drawing walks, two words each.
             const uint32_t visible_word = marks_word + cut.capacity / 32u + 1u;
-            // The sort of its ray lists past kRaySortMax.
+            // The sort of its ray lists past kRaySortMax, when its pool holds that many records.
+            const bool has_large = cut_has_large_lists(cut.capacity);
+            const uint32_t large_room = has_large ? cut_large_room(cut.capacity) : 0u;
             const uint32_t large_word = visible_word + cut_visible_runs(cut.capacity, info.partitions) * 2u;
-            const size_t words = size_t(large_word) + size_t(cut_large_words(info.partitions, kCutLargeRoom));
+            const size_t words = size_t(large_word) + (has_large ? size_t(cut_large_words(info.partitions, large_room)) : 0u);
             cut.region = arena->alloc(words * sizeof(uint32_t));
             if (!cut.region.valid()) {
                 VELK_LOG(E, "instance culling: no room for a kept cut of %u records", cut.capacity);
@@ -1058,8 +1060,8 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             initial[kCutTakeoverSlots] = takeover_slots;
             initial[kCutRayMarksWord] = base + marks_word;
             initial[kCutVisibleWord] = base + visible_word;
-            initial[kCutLargeWord] = base + large_word;
-            cut.large_word = base + large_word;
+            initial[kCutLargeWord] = has_large ? base + large_word : kCullNoSlot;
+            cut.large_word = has_large ? base + large_word : kCullNoSlot;
             // Every page free, the lowest taken first; the marks clear.
             for (uint32_t p = 0; p < pages; ++p) {
                 initial[headers_word + p * kCutPageWords + kCutPageOwner] = kCullNoSlot;
@@ -1076,9 +1078,9 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             }
             arena->write_at(cut.region.offset(), initial.data(), initial.size() * sizeof(uint32_t));
             // The long lists' sort: nothing queued, its room, and its dispatches' other group counts.
-            {
+            if (has_large) {
                 uint32_t large[kCutLargeHeaderWords] = {};
-                large[kCutLargeCap] = kCutLargeRoom;
+                large[kCutLargeCap] = large_room;
                 for (uint32_t args : {kCutLargeListGroups, kCutLargeBlockGroups}) {
                     large[args + 1u] = 1u;
                     large[args + 2u] = 1u;
@@ -1959,6 +1961,14 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             uint32_t chosen_capacity;
             uint32_t items_word;  ///< The items.
             float pad;            ///< What its tree's boxes grow by besides each item's own: see instance_cut_tree_src.
+            uint32_t large_word;  ///< Its sort of long ray lists (kCutLargeHeaderWords), kCullNoSlot without.
+        };
+        // The word of the sort of long ray lists of the cut whose region starts at `cut`.
+        const auto large_word_of = [&](uint32_t cut) {
+            for (const auto& c : state.cuts) {
+                if (static_cast<uint32_t>(c.region.offset() / sizeof(uint32_t)) == cut) return c.large_word;
+            }
+            return kCullNoSlot;
         };
         const uint32_t together_objects_word = together_items_word + state.together_items * kPlainItemWords;
         const uint32_t together_next_word = together_objects_word + state.together_items;
@@ -1967,7 +1977,7 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
         const uint32_t plain_cut_word = plain_cut ? cut_word(&kPlainCutKey) : kCullNoSlot;
         if (plain_cut_word != kCullNoSlot) {
             jobs.push_back({plain_cut_word, plain_table_word, plain_count, 0.f, 0u, 0u, 0u, together_word, state.together_chosen,
-                            together_items_word, 0.f});
+                            together_items_word, 0.f, large_word_of(plain_cut_word)});
         }
         for (const CutJob& job : jobs) {
             dispatch(begin_pipeline.get(), &job.cut, sizeof(job.cut), 1u);
@@ -2073,19 +2083,17 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
                 float light_pixels;
                 uint32_t mode;
             };
-            const auto large_word = [&](const CutJob& job) {
-                for (const auto& c : state.cuts) {
-                    if (static_cast<uint32_t>(c.region.offset() / sizeof(uint32_t)) == job.cut) return c.large_word;
-                }
-                return kCullNoSlot;
-            };
+            // A cut whose pool cannot hold a list past kRaySortMax has no sort of long lists; with
+            // none, none of its passes are recorded.
+            bool any_large = false;
             for (const CutJob& job : jobs) {
-                const uint32_t large = large_word(job);
+                const uint32_t large = job.large_word;
                 if (large != kCullNoSlot) {
                     cmd->record_clear_buffer(arena_buffer, uint64_t(large + kCutLargeLists) * sizeof(uint32_t), 2u * sizeof(uint32_t));
+                    any_large = true;
                 }
             }
-            cmd->record_global_barrier();
+            if (any_large) cmd->record_global_barrier();
             const auto tree = [&](const CutJob& job, uint32_t mode, uint32_t args_word) {
                 const TreePushC pc{job.cut, job.instances_base, job.items_word, job.pad, view_globals_base,
                                    kLodMaxErrorPixels * kLightPixels / kLodElementPixels, mode};
@@ -2108,27 +2116,29 @@ inline void emit_instance_cull_pass(InstanceCullPass& state, const vector<IBatch
             };
             const auto large_pass = [&](uint32_t mode, uint32_t shift, uint32_t source, uint32_t args) {
                 for (const CutJob& job : jobs) {
-                    const uint32_t large = large_word(job);
+                    const uint32_t large = job.large_word;
                     if (large == kCullNoSlot) continue;
                     const LargePushC pc{job.cut, job.instances_base, job.items_word, job.pad, mode, shift, source};
                     dispatch(large_pipeline.get(), &pc, sizeof(pc), 1u, args == kCullNoSlot ? kCullNoSlot : large + args);
                 }
                 cmd->record_global_barrier();
             };
-            large_pass(0u, 0u, 0u, kCullNoSlot);
-            large_pass(1u, 0u, 0u, kCutLargeBlockGroups);
-            for (uint32_t digit = 0; digit < 4u; ++digit) {
-                large_pass(2u, digit * 8u, digit & 1u, kCutLargeBlockGroups);
-                large_pass(3u, digit * 8u, digit & 1u, kCutLargeListGroups);
-                large_pass(4u, digit * 8u, digit & 1u, kCutLargeBlockGroups);
+            if (any_large) {
+                large_pass(0u, 0u, 0u, kCullNoSlot);
+                large_pass(1u, 0u, 0u, kCutLargeBlockGroups);
+                for (uint32_t digit = 0; digit < 4u; ++digit) {
+                    large_pass(2u, digit * 8u, digit & 1u, kCutLargeBlockGroups);
+                    large_pass(3u, digit * 8u, digit & 1u, kCutLargeListGroups);
+                    large_pass(4u, digit * 8u, digit & 1u, kCutLargeBlockGroups);
+                }
+                large_pass(5u, 0u, 0u, kCutLargeBlockGroups);
+                large_pass(6u, 0u, 0u, kCutLargeBlockGroups);
+                for (const CutJob& job : jobs) {
+                    const uint32_t large = job.large_word;
+                    if (large != kCullNoSlot) tree(job, 1u, large + kCutLargeListGroups);
+                }
+                cmd->record_global_barrier();
             }
-            large_pass(5u, 0u, 0u, kCutLargeBlockGroups);
-            large_pass(6u, 0u, 0u, kCutLargeBlockGroups);
-            for (const CutJob& job : jobs) {
-                const uint32_t large = large_word(job);
-                if (large != kCullNoSlot) tree(job, 1u, large + kCutLargeListGroups);
-            }
-            cmd->record_global_barrier();
 
             // And the top tree over them all, its cuts and leaves written into the region
             // reserve_instance_cull made when they changed (instance_ray_top_layout).

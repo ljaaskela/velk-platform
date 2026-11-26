@@ -121,8 +121,7 @@ inline constexpr uint32_t kCutLargeListWords = kCutLargeListEnd;
 inline uint32_t cut_large_words(uint32_t partitions, uint32_t room)
 {
     return kCutLargeHeaderWords + partitions * kCutLargeListWords + room + room * 256u;
-}
-/// Words per slot of a kept cut's takeover table: the frame it was filled in and an old record's word.
+}/// Words per slot of a kept cut's takeover table: the frame it was filled in and an old record's word.
 inline constexpr uint32_t kCutTakeoverWords = kTakeoverEnd;
 inline constexpr uint32_t kCutRecordWords = kCutRecordEnd;
 inline constexpr uint32_t kCutLeaf = 0x80000000u;
@@ -234,6 +233,20 @@ inline constexpr uint32_t kTraceShape = 11;
 /// with more records for rays, or a top tree with more partitions, keeps its order. Mirrors
 /// kSortMax there.
 inline constexpr uint32_t kRaySortMax = 2048;
+/// Whether a kept cut of @p capacity records can have a ray list past kRaySortMax: a list holds at
+/// most its partition's records, which the cut's pool holds. Without, the cut has no sort of long
+/// ray lists.
+inline bool cut_has_large_lists(uint32_t capacity)
+{
+    return capacity > kRaySortMax;
+}
+/// The blocks a kept cut's sort of long ray lists has room for: as many as its records fill, at
+/// most kCutLargeRoom. A list that does not fit is sorted by its partition's own work group.
+inline uint32_t cut_large_room(uint32_t capacity)
+{
+    const uint32_t blocks = (capacity + kCutLargeBlockEntries - 1u) / kCutLargeBlockEntries;
+    return blocks < kCutLargeRoom ? blocks : kCutLargeRoom;
+}
 
 /// Words before the levels of a depth pyramid in the culling arena: the level count, the
 /// first level's width and height, then each level's first word, as many as
