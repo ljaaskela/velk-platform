@@ -48,6 +48,7 @@ void main()
     uint slot = found != 0xFFFFFFFFu ? item - cull_words.data[found + VELK_ITEM_DESCRIPTOR_FIRST] : 0u;
     cull_words.data[w + VELK_PLAIN_ITEM_TABLE] = found != 0xFFFFFFFFu ? cull_words.data[found + VELK_ITEM_DESCRIPTOR_TABLE] : 0xFFFFFFFFu;
     cull_words.data[w + VELK_PLAIN_ITEM_MOTION] = found != 0xFFFFFFFFu ? cull_words.data[found + VELK_ITEM_DESCRIPTOR_MOTION] : 0u;
+    cull_words.data[w + VELK_PLAIN_ITEM_REST] = 0xFFFFFFFFu;
     uint object_base = found != 0xFFFFFFFFu ? cull_words.data[found + VELK_ITEM_DESCRIPTOR_OBJECT_BASE] : 0xFFFFFFFFu;
     cull_words.data[pc.objects_word + item] = object_base != 0xFFFFFFFFu ? object_base + slot : 0xFFFFFFFFu;
     cull_words.data[pc.next_word + item] = 0xFFFFFFFFu;
@@ -66,6 +67,9 @@ void main()
     uint instance = cull_words.data[found + VELK_ITEM_DESCRIPTOR_INSTANCES] + place;
     cull_words.data[w + VELK_PLAIN_ITEM_INSTANCE] = instance;
     cull_words.data[w + VELK_PLAIN_ITEM_SLOT] = place;
+    // Its resting transform, three rows of four floats by raster place, as the motion pass reads it.
+    uint rest = cull_words.data[found + VELK_ITEM_DESCRIPTOR_REST];
+    if (rest != 0xFFFFFFFFu) cull_words.data[w + VELK_PLAIN_ITEM_REST] = rest + place * 12u;
     uint mesh = cull_instances.data[instance].params.y;
     if (mesh < cull_words.data[found + VELK_ITEM_DESCRIPTOR_MESHES]) {
         uint m = found + VELK_ITEM_DESCRIPTOR_HEADER_WORDS + mesh * VELK_ITEM_MESH_WORDS;

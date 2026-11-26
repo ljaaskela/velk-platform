@@ -83,7 +83,8 @@ namespace velk {
     X(cp, gp, Kind, KIND, 4)                    /* what rays test it as: kRayShapeMesh, else an RtShape kind */ \
     X(cp, gp, Mesh, MESH, 5)                    /* its mesh's ray data, kInvalidMeshStaticBase for none */ \
     X(cp, gp, Motion, MOTION, 6)                /* how far a motion function can move it, a float */ \
-    X(cp, gp, Words, WORDS, 7)
+    X(cp, gp, Rest, REST, 7)                    /* with motion, the word of its resting transform (three rows), else kCullNoSlot */ \
+    X(cp, gp, Words, WORDS, 8)
 
 /// An instanced visual's item descriptor (kItemDescriptor, VELK_ITEM_DESCRIPTOR), then a
 /// VELK_ITEM_MESH for each of its meshes. See InstanceCullPass::item_descriptors.
@@ -96,7 +97,8 @@ namespace velk {
     X(cp, gp, Table, TABLE, 5)                  /* its culling table */                        \
     X(cp, gp, Motion, MOTION, 6)                /* how far it can move, a float */             \
     X(cp, gp, ObjectBase, OBJECT_BASE, 7)       /* its first object id; slot i's is that plus i */ \
-    X(cp, gp, HeaderWords, HEADER_WORDS, 8)
+    X(cp, gp, Rest, REST, 8)                    /* with motion, slot 0's resting transform's word, else kCullNoSlot */ \
+    X(cp, gp, HeaderWords, HEADER_WORDS, 9)
 
 /// A mesh of an item descriptor (kItemMesh, VELK_ITEM_MESH): an item's words from Draw on.
 #define VELK_ITEM_MESH(X, cp, gp)                                                                  \

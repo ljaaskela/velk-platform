@@ -323,6 +323,9 @@ bool DefaultBatch::fill_cull_info(InstanceCullInfo& out) const
     out.instanced = true;
     out.max_distance = instance_source_->get_draw_distance();
     out.max_displacement = instance_source_->get_motion_source().empty() ? 0.f : instance_source_->get_max_displacement();
+    if (out.max_displacement > 0.f && instance_source_->rest_region_size() != 0) {
+        out.rest_word = static_cast<uint32_t>(instance_source_->rest_region_offset() / sizeof(uint32_t));
+    }
     instance_source_->get_slot_table(out.slot_table_word, out.slot_table_count);
     out.object_base = instance_source_->get_object_id_base();
     out.mesh_index = cull_mesh_;

@@ -33,15 +33,37 @@ void velk_cut_record_box(uint record, uint instances_base, uint items_word, floa
         return;
     }
     uint instance = instances_base + slot;
+    float motion = 0.0;
+    uint rest = 0xFFFFFFFFu;
     if (items_word != 0xFFFFFFFFu) {
         uint item = items_word + slot * VELK_PLAIN_ITEM_WORDS;
         instance = cull_words.data[item];
-        // Grown by how far a motion function can move it, both ways.
-        pad += 2.0 * uintBitsToFloat(cull_words.data[item + VELK_PLAIN_ITEM_MOTION]);
+        motion = uintBitsToFloat(cull_words.data[item + VELK_PLAIN_ITEM_MOTION]);
+        rest = cull_words.data[item + VELK_PLAIN_ITEM_REST];
     }
     if (instance == 0xFFFFFFFFu) return;
     mat4 world = cull_instances.data[instance].world_matrix;
     if (world[3][3] == 0.0) return;
+    if (motion > 0.0) {
+        // A motion function moves no point further than `motion` from where it rests: around its
+        // resting pose by that much, every pose it can take is held; without one, around the pose
+        // it has now by twice that.
+        bool rested = false;
+        if (rest != 0xFFFFFFFFu) {
+            vec4 r0 = vec4(uintBitsToFloat(cull_words.data[rest]), uintBitsToFloat(cull_words.data[rest + 1u]),
+                           uintBitsToFloat(cull_words.data[rest + 2u]), uintBitsToFloat(cull_words.data[rest + 3u]));
+            vec4 r1 = vec4(uintBitsToFloat(cull_words.data[rest + 4u]), uintBitsToFloat(cull_words.data[rest + 5u]),
+                           uintBitsToFloat(cull_words.data[rest + 6u]), uintBitsToFloat(cull_words.data[rest + 7u]));
+            vec4 r2 = vec4(uintBitsToFloat(cull_words.data[rest + 8u]), uintBitsToFloat(cull_words.data[rest + 9u]),
+                           uintBitsToFloat(cull_words.data[rest + 10u]), uintBitsToFloat(cull_words.data[rest + 11u]));
+            // A slot not placed yet rests nowhere, as the motion pass finds it.
+            if (r0.xyz != vec3(0.0) || r1.xyz != vec3(0.0) || r2.xyz != vec3(0.0)) {
+                world = transpose(mat4(r0, r1, r2, vec4(0.0, 0.0, 0.0, 1.0)));
+                rested = true;
+            }
+        }
+        pad += rested ? motion : 2.0 * motion;
+    }
     if (entry == 0xFFFFFFFFu && cluster == 0xFFFFFFFFu) {
         // An item rays see that its own pass draws: its instance's box.
         vec3 offset = cull_instances.data[instance].offset.xyz;

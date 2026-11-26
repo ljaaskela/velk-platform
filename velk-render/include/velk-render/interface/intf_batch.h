@@ -99,6 +99,10 @@ struct InstanceCullInfo
     bool cull_together = false;
     float max_distance = 0.f;     ///< Instances further from the camera are culled. 0 means no limit.
     float max_displacement = 0.f; ///< How far a motion function can move an instance from where it rests.
+    /// With a motion function: the word in the culling arena of slot 0's resting transform, three
+    /// rows of four floats a slot by raster place, which rays bound its instances' poses from.
+    /// 0xFFFFFFFF for none.
+    uint32_t rest_word = 0xFFFFFFFFu;
     /// An instanced visual's: its instances are members of the scene's partitions like any
     /// object, slot i with object id @c object_base plus i, and culled together with the
     /// plain objects. Its slot table gives each slot's place in the raster region

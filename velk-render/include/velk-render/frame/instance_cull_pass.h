@@ -529,6 +529,7 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
                 items[at + kPlainItemDraw] = draw;
                 items[at + kPlainItemKind] = kind;
                 items[at + kPlainItemMesh] = mesh;
+                items[at + kPlainItemRest] = kCullNoSlot;
                 uint32_t object = kCullNoSlot;
                 if (stride >= 128u && size_t(slot + 1u) * stride <= instances.size()) {
                     std::memcpy(&object, instances.begin() + size_t(slot) * stride + 124u, sizeof(object));
@@ -856,6 +857,7 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
             descriptors.resize(header + kItemDescriptorHeaderWords, 0u);
             descriptors[header + kItemDescriptorFirst] = first;
             descriptors[header + kItemDescriptorSlots] = slots;
+            descriptors[header + kItemDescriptorRest] = kCullNoSlot;
             uint32_t meshes = 0;
             for (const auto& batch : *batches) {
                 InstanceCullInfo info{};
@@ -867,6 +869,7 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
                 descriptors[header + kItemDescriptorTable] = info.table_word;
                 std::memcpy(&descriptors[header + kItemDescriptorMotion], &info.max_displacement, sizeof(uint32_t));
                 descriptors[header + kItemDescriptorObjectBase] = info.object_base != 0u ? info.object_base : kCullNoSlot;
+                descriptors[header + kItemDescriptorRest] = info.rest_word;
                 if (info.mesh_index >= meshes) {
                     descriptors.resize(header + kItemDescriptorHeaderWords + size_t(info.mesh_index + 1u) * kItemMeshWords, 0u);
                     for (uint32_t m = meshes; m <= info.mesh_index; ++m) {
