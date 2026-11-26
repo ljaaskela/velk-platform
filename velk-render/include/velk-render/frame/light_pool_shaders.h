@@ -10,10 +10,22 @@
 
 namespace velk {
 
-// Reading the pool, for a shader that defines VELK_LIGHT_WORDS as the culling arena's buffer.
-#include <velk-render/glsl/light_pool_body.inc>
+// Reading the pool, for a shader that defines VELK_LIGHT_WORDS as the culling arena's buffer: its
+// constants, RGB9E5 colours, pages and records, blocker codes, points and roots, the pieces' grids,
+// a pixel's way down the pieces, the point lists and one values.
+#include <velk-render/glsl/light_pool_defs.inc>
+#include <velk-render/glsl/rgb9e5.inc>
+#include <velk-render/glsl/light_pool_pages.inc>
+#include <velk-render/glsl/light_blocker_codes.inc>
+#include <velk-render/glsl/light_pool_points.inc>
+#include <velk-render/glsl/light_piece_grid.inc>
+#include <velk-render/glsl/light_piece_way.inc>
+#include <velk-render/glsl/light_point_lists.inc>
+#include <velk-render/glsl/light_one_values.inc>
 #define VELK_LIGHT_POOL_GLSL VELK_LIGHT_POOL_HEADER_GLSL VELK_LIGHT_PAGE_HEADER_GLSL VELK_LIGHT_PIECE_PAGE_GLSL        \
-    VELK_LIGHT_POOL_BODY_GLSL
+    VELK_LIGHT_POOL_DEFS_GLSL VELK_RGB9E5_GLSL VELK_LIGHT_POOL_PAGES_GLSL VELK_LIGHT_BLOCKER_CODES_GLSL                 \
+    VELK_LIGHT_POOL_POINTS_GLSL VELK_LIGHT_PIECE_GRID_GLSL VELK_LIGHT_PIECE_WAY_GLSL VELK_LIGHT_POINT_LISTS_GLSL       \
+    VELK_LIGHT_ONE_VALUES_GLSL
 
 // Putting lights on the trace list, after VELK_LIGHT_POOL_GLSL, for the shaders that list them
 // (the claim and the search); apart, since it writes the pool and shaders that only read it

@@ -217,6 +217,7 @@ set(VELK_RENDER_GLSL_SOURCES
     shaders/lbvh.glsl
     shaders/light_add.glsl
     shaders/light_area.glsl
+    shaders/light_blocker_codes.glsl
     shaders/light_changes_main.glsl
     shaders/light_claim.glsl
     shaders/light_claim_blended.glsl
@@ -226,8 +227,14 @@ set(VELK_RENDER_GLSL_SOURCES
     shaders/light_grid_only.glsl
     shaders/light_list.glsl
     shaders/light_mark.glsl
+    shaders/light_one_values.glsl
+    shaders/light_piece_grid.glsl
+    shaders/light_piece_way.glsl
     shaders/light_pieces.glsl
-    shaders/light_pool_body.glsl
+    shaders/light_point_lists.glsl
+    shaders/light_pool_defs.glsl
+    shaders/light_pool_pages.glsl
+    shaders/light_pool_points.glsl
     shaders/light_probes_filter.glsl
     shaders/light_probes_main.glsl
     shaders/light_read_body.glsl
@@ -246,6 +253,7 @@ set(VELK_RENDER_GLSL_SOURCES
     shaders/ray_tree_bounds_compute.glsl
     shaders/reference_path.glsl
     shaders/reflect_resolve.glsl
+    shaders/rgb9e5.glsl
     shaders/rt_compute_main.glsl
     shaders/rt_compute_prelude.glsl
     shaders/rt_pbr_shade.glsl
