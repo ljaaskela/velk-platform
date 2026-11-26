@@ -11,13 +11,17 @@
 // by how near they are on screen (a tent one and a half probes wide, so that a probe joins and
 // leaves the pixels it lights gradually), how much their normal agrees with `n` and how near
 // `pos` is to their surface's plane. `along` is the same probes' light seen from `r`, for a rough
-// reflection along it, and `match` how well they matched, 0 to 1. False where none of them has a
-// surface like it.
-bool velk_probe_indirect(ivec2 coord, vec3 pos, vec3 n, vec3 r, out vec3 light, out vec3 along, out float match)
+// reflection along it, and `match` how well they matched, 0 to 1. `sure` is how far `light` is to
+// be trusted over what stands in for it, 0 to 1: one probe that matched far off, which the tent
+// gives little weight, still makes all of `light`, and as it falls out of the tent `light` has to
+// give way to the stand-in smoothly. False where none of them has a surface like it.
+bool velk_probe_indirect(ivec2 coord, vec3 pos, vec3 n, vec3 r, out vec3 light, out vec3 along, out float match,
+                         out float sure)
 {
     light = vec3(0.0);
     along = vec3(0.0);
     match = 0.0;
+    sure = 0.0;
     if (pc.spare1 == 0xFFFFFFFFu) return false;
     const float kProbe = 16.0;
     uint across = (pc.width + 15u) / 16u;
@@ -53,6 +57,7 @@ bool velk_probe_indirect(ivec2 coord, vec3 pos, vec3 n, vec3 r, out vec3 light, 
     along /= total;
     // How much of what the tent reached matched.
     match = clamp(total / max(spread, 1e-6), 0.0, 1.0);
+    sure = smoothstep(0.0, 1e-2, total);
     return true;
 }
 
@@ -178,14 +183,30 @@ void main()
         vec3 env_diffuse = env_miss_color_lod(N, env_max_lod);
         vec3 env_specular = env_miss_color_lod(reflect(-V, N), roughness * env_max_lod);
 
-        // Light from other surfaces and the sky: the screen probes around it, or the environment
-        // where none has a surface like it yet. The same probes seen along the reflection stand in
-        // for a rough reflection, shadowed as the environment is not, as far as they matched the
-        // surface.
+        // Light from other surfaces and the sky: the screen probes around it, as far as they are
+        // sure, and for the rest what its record keeps of its pixels' indirect light, or the
+        // environment where it keeps none. The same probes seen along the reflection stand in for a
+        // rough reflection, shadowed as the environment is not, as far as they matched the surface.
         vec3 indirect;
         vec3 probe_specular;
         float match;
-        bool probed = velk_probe_indirect(coord, world_pos, N, reflect(-V, N), indirect, probe_specular, match);
+        float sure;
+        bool probed = velk_probe_indirect(coord, world_pos, N, reflect(-V, N), indirect, probe_specular, match, sure);
+        // A pixel in 16 each frame, a 4 by 4 pattern that moves every frame, that the probes are
+        // sure of keeps its record's indirect light (below).
+        bool keeps = probed && sure >= 1.0 && radiance != VELK_LIGHT_NONE
+                  && ((uint(coord.x) & 3u) | ((uint(coord.y) & 3u) << 2u)) == (VELK_GLOBALS.present_counter * 7u & 15u);
+        // Pixels of this dispatch write the kept value as others read it: each access is one
+        // atomic word, so that a reader takes a whole old or new value. Only the pixels that use
+        // it read it, as one record can cover the screen and its word is then read by them all.
+        uint kept = VELK_LIGHT_NONE;
+        if (radiance != VELK_LIGHT_NONE && (keeps || !probed || sure < 1.0)) {
+            kept = atomicOr(velk_light_cell_words.data[radiance], 0u);
+        }
+        if (!probed || sure < 1.0) {
+            vec3 stand_in = kept != VELK_LIGHT_NONE ? velk_rgb9e5(kept) : env_diffuse;
+            indirect = probed ? mix(stand_in, indirect, sure) : stand_in;
+        }
         if (probed) env_specular = mix(env_specular, probe_specular, clamp(match * 4.0, 0.0, 1.0));
         // Traced reflections (reflect_resolve_src, pc.spare0) where the surface is smooth enough
         // for them, fading into the rough reflection toward the roughness they stop at.
@@ -199,18 +220,16 @@ void main()
         // camera at all keeps all of it.
         vec3 F_env = fresnel_schlick_roughness(NdotV, F0, F90, roughness) * smoothstep(-0.2, 0.0, dot(N, V));
 
-        if (!probed) {
-            indirect = env_diffuse;
-        } else if (radiance != VELK_LIGHT_NONE
-                   && ((uint(coord.x) & 3u) | ((uint(coord.y) & 3u) << 2u)) == (VELK_GLOBALS.present_counter * 7u & 15u)) {
-            // A pixel in 16 each frame, a 4 by 4 pattern that moves every frame, keeps its record's
-            // indirect light for rays that hit it off screen (velk_probe_hit_indirect): the first
-            // as it is, then a little of each; and the way it faces, likewise, not made of unit
-            // length again, so that a record seen facing many ways keeps a short one. Pixels of one
-            // record race; any of them will do.
-            uint kept = velk_light_cell_words.data[radiance];
+        if (keeps) {
+            // Its record's indirect light, for rays that hit it off screen (velk_probe_hit_indirect)
+            // and for its pixels the probes are not sure of: the first as it is, then a little of
+            // each; and the way it faces, likewise, not made of unit length again, so that a
+            // record seen facing many ways keeps a short one. Only pixels the probes are sure of
+            // keep it, so that it is not made of itself. Pixels of one record race; any of them
+            // will do.
             bool first = kept == VELK_LIGHT_NONE;
-            velk_light_cell_words.data[radiance] = velk_pack_rgb9e5(first ? indirect : mix(velk_rgb9e5(kept), indirect, 0.125));
+            atomicExchange(velk_light_cell_words.data[radiance],
+                           velk_pack_rgb9e5(first ? indirect : mix(velk_rgb9e5(kept), indirect, 0.125)));
             if (radiance_dir != VELK_LIGHT_NONE) {
                 vec3 way = first ? N : mix(unpackSnorm4x8(velk_light_cell_words.data[radiance_dir]).xyz, N, 0.125);
                 velk_light_cell_words.data[radiance_dir] = packSnorm4x8(vec4(way, 0.0));
@@ -222,9 +241,12 @@ void main()
             vec3 back;
             vec3 back_specular;
             float back_match;
-            if (!velk_probe_indirect(coord, world_pos, -N, reflect(-V, -N), back, back_specular, back_match)) {
-                back = env_miss_color_lod(-N, env_max_lod);
-            }
+            float back_sure;
+            // The record keeps its seen side's light, so the other side's stand-in is the
+            // environment.
+            vec3 back_env = env_miss_color_lod(-N, env_max_lod);
+            bool back_probed = velk_probe_indirect(coord, world_pos, -N, reflect(-V, -N), back, back_specular, back_match, back_sure);
+            back = back_probed ? mix(back_env, back, back_sure) : back_env;
             indirect = mix(indirect, back, transmission);
         }
 
