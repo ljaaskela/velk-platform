@@ -1,6 +1,6 @@
 // The soft shadows' third pass, a group a listed tile, a thread a pixel: each light the first pass
-// took of the pixel spread over the penumbra its size gives, as the sun pass's softening spreads
-// the sun's (sun_soften_main_src), from what the points of light say, with no rays. First how far
+// took of the pixel spread over the penumbra its size gives, from what the points of light say,
+// with no rays. First how far
 // away what keeps it is, the mean of the pixel's and of the pixels around within
 // kSunSearchPixels that took the same light and know it; then what of it gets through at the
 // pixels within the penumbra that took the same light. Both take only pixels on a surface like
@@ -76,7 +76,7 @@ void main()
         float clip_w = (vp * vec4(p, 1.0)).w;
         if (dot(n3, n3) < 1e-6 || !(clip_w > 1e-6)) continue;
         vec3 nrm = normalize(n3);
-        // Pixels a world unit spans at this depth, as the sun pass's softening finds it.
+        // Pixels a world unit spans at this depth.
         float per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * VELK_GLOBALS.viewport.y * 0.5 / clip_w;
         uint h = (uint(coord.x) * 0x8da6b343u) ^ (uint(coord.y) * 0xd8163841u);
         h ^= h >> 16; h *= 0x7feb352du; h ^= h >> 15;

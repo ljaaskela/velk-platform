@@ -304,8 +304,6 @@ inline constexpr uint32_t kLightPoolAheadEvery = 60;
     X(DemandFrames, DEMAND_FRAMES, 190)          /* frames in a row, up to 3, that asked for pages not there */      \
     X(ListRays, LIST_RAYS, 194)                  /* the rays each point list's points this frame are due, past its \
                                                     room too: three words (velk_light_list_at) */                    \
-    X(SunSkip, SUN_SKIP, 201)                    /* the light the sun pass shades this frame, which points of \
-                                                    what is drawn opaque leave untraced; kLightNone for none */      \
     X(Debug, DEBUG, 203)                         /* the word of the debug block (VELK_LIGHT_DEBUG_BLOCK) while \
                                                     VELK_LIGHT_READ names pixels, kLightNone otherwise */            \
     X(HeaderEnd, HEADER_END, 204)
@@ -316,9 +314,8 @@ inline constexpr uint32_t kLightPoolAheadEvery = 60;
 #define VELK_LIGHT_DEBUG_BLOCK(X)                                                                                    \
     X(Pending, PENDING, 0)                       /* the lit pixels' lights this frame that bring them light and \
                                                     whose points have not traced them yet, or a change made stale */ \
-    X(SunRays, SUN_RAYS, 1)                      /* the sun pass's rays this frame that walked */                    \
-    X(LastRaysCast, LAST_RAYS_CAST, 2)           /* the last frame's RAYS_CAST, SUN_RAYS, PENDING and READ_STAMP: \
-                                                    four words, the same frame's, which the sweep's begin copies */  \
+    X(LastRaysCast, LAST_RAYS_CAST, 2)           /* the last frame's RAYS_CAST, PENDING and READ_STAMP: three \
+                                                    words, the same frame's, which the sweep's begin copies */       \
     X(ReadStamp, READ_STAMP, 6)                  /* the frame the lighting last ran in (present_counter), so that \
                                                     the copy above says its frame */                                 \
     X(ReadPixels, READ_PIXELS, 7)                /* VELK_LIGHT_READ's pixels, x | y << 16, kLightNone for none: \

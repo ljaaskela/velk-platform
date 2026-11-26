@@ -198,28 +198,7 @@ public:
         vec3 reflect_cam{};
         IRenderPass::Ptr reflect_trace_pass;
         IRenderPass::Ptr reflect_resolve_pass;
-        /// The sun pass (ICamera::sun_pass): a ray a pixel to the sun's middle (sun_rays_main_src),
-        /// and that softened (sun_soften_main_src), which the lighting takes in place of what the
-        /// sun's points keep. `sun_mode` is this frame's choice; `sun_shaded` is what the lighting
-        /// takes this frame, none without the pass.
-        SunPass sun_mode = SunPass::Off;
-        IRenderTarget::Ptr sun_rays;
-        IRenderTarget::Ptr sun_soft;
-        uvec2 sun_rays_size{};
-        IRenderTarget::Ptr sun_shaded;
-        uint32_t lighting_sun_mode = 0;  ///< The sun terms the lighting pass was recorded with.
         uint32_t lighting_shadow_word = 0;  ///< The soft shadows' word the lighting pass was recorded with.
-        /// The light the sun pass shades this frame, which the light points leave untraced for
-        /// what is drawn opaque (kLightPoolSunSkip); kLightNone for none. `sun_skip_changed` until
-        /// the light changes pass has traced everything again for a change of it.
-        uint32_t sun_skip = 0xFFFFFFFFu;
-        bool sun_skip_changed = false;
-        IRenderPass::Ptr sun_rays_pass;
-        IRenderPass::Ptr sun_soften_pass;
-        /// The sun pass's pipelines for this frame, as prepare_sun_pass made them; none when it
-        /// cannot run.
-        IGpuPipeline::Ptr sun_pipeline;
-        IGpuPipeline::Ptr sun_soften_pipeline;
         /// The soft shadows from the points of light (emit_shadow_soft_passes): their words in the
         /// culling arena (VELK_SHADOW_SOFT_GLSL), for a G-buffer of `shadow_soft_size`, and
         /// `shadow_soft_word` their first word while the lighting takes them this frame, else
@@ -360,18 +339,10 @@ private:
     /// Traces and resolves reflections of smooth surfaces (light_probes_main_src with
     /// VELK_REFLECT, reflect_resolve_src), after the probes and before the lighting.
     void emit_reflection_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
-    /// Makes the sun pass's targets and pipelines for this frame; false when it cannot run
-    /// (SunPass::Off, no lit directional light, no G-buffer, or a target or pipeline missing), so
-    /// that the light points keep tracing the sun.
-    bool prepare_sun_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
-    /// The sun pass (ICamera::sun_pass): casts a ray a pixel to the sun's middle (sun_rays_main_src),
-    /// and softens it (sun_soften_main_src) for soft, before the lighting. Nothing without a lit
-    /// directional light; no softening for a sun without a size.
-    void emit_sun_rays_pass(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
-    /// The soft shadows from the points of light, before the lighting and after the sun pass: the
-    /// lights with a size each pixel gets (shadow_pack_main_src), the tiles near an edge of one
-    /// (shadow_tiles_main_src) and those softened over their penumbrae (shadow_soften_main_src),
-    /// with no rays. Nothing without such a light other than the one the sun pass shades.
+    /// The soft shadows from the points of light, before the lighting: the lights with a size each
+    /// pixel gets (shadow_pack_main_src), the tiles near an edge of one (shadow_tiles_main_src)
+    /// and those softened over their penumbrae (shadow_soften_main_src), with no rays. Nothing
+    /// without such a light.
     void emit_shadow_soft_passes(ViewState& vs, const RenderView& render_view, FrameContext& ctx, IRenderGraph& graph);
     /// Replaces the final image with the visibility buffer as flat colours.
     void emit_visibility_debug_pass(ViewState& vs, const RenderView& render_view, IRenderTarget::Ptr color_target,

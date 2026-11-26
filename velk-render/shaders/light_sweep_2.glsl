@@ -12,16 +12,14 @@ void main()
             light_words.data[pool + VELK_POOL_LAST_UNTRACED_PIXELS] = light_words.data[pool + VELK_POOL_UNTRACED_PIXELS];
             light_words.data[pool + VELK_POOL_UNTRACED_PIXELS] = 0u;
             // While VELK_LIGHT_READ names pixels, its debug block: the last frame's rays of the points
-            // and the sun pass and its pending lights, then those cleared for this one; and the frame
-            // they are of, which the lighting writes last in a frame, so that this begin of the next
-            // one finds it still that frame's.
+            // and its pending lights, then those cleared for this one; and the frame they are of,
+            // which the lighting writes last in a frame, so that this begin of the next one finds it
+            // still that frame's.
             const uint light_debug = light_words.data[pool + VELK_POOL_DEBUG];
             if (light_debug != 0xFFFFFFFFu) {
                 light_words.data[light_debug + VELK_DEBUG_LAST_RAYS_CAST] = light_words.data[pool + VELK_POOL_RAYS_CAST];
-                light_words.data[light_debug + VELK_DEBUG_LAST_RAYS_CAST + 1u] = light_words.data[light_debug + VELK_DEBUG_SUN_RAYS];
-                light_words.data[light_debug + VELK_DEBUG_LAST_RAYS_CAST + 2u] = light_words.data[light_debug + VELK_DEBUG_PENDING];
-                light_words.data[light_debug + VELK_DEBUG_LAST_RAYS_CAST + 3u] = light_words.data[light_debug + VELK_DEBUG_READ_STAMP];
-                light_words.data[light_debug + VELK_DEBUG_SUN_RAYS] = 0u;
+                light_words.data[light_debug + VELK_DEBUG_LAST_RAYS_CAST + 1u] = light_words.data[light_debug + VELK_DEBUG_PENDING];
+                light_words.data[light_debug + VELK_DEBUG_LAST_RAYS_CAST + 2u] = light_words.data[light_debug + VELK_DEBUG_READ_STAMP];
                 light_words.data[light_debug + VELK_DEBUG_PENDING] = 0u;
             }
             // What the frame's work was charged: the lights listed for tracing and the points.

@@ -89,22 +89,6 @@ void velk_points_count(uint pool)
 
 // The blocker codes of the slots of `slots` without a light: VELK_LIGHT_BLOCKER_CLEAR, so that a
 // code VELK_LIGHT_BLOCKER_DUE always means a light still to trace (velk_light_list_at).
-// For a record drawn opaque (`kind` its page's, without VELK_LIGHT_BLENDED): the light the sun pass
-// shades (VELK_POOL_SUN_SKIP) taken out of `slots`, as a slot without a light. True when it was
-// there.
-bool velk_points_leave_sun(uint pool, uint kind, inout uint slots[VELK_LIGHT_SLOTS])
-{
-    uint sun = VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUN_SKIP];
-    if (sun == VELK_LIGHT_NONE || (kind & VELK_LIGHT_BLENDED) != 0u) return false;
-    bool left = false;
-    for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) {
-        if (slots[s] != sun) continue;
-        slots[s] = VELK_LIGHT_NONE;
-        left = true;
-    }
-    return left;
-}
-
 uint velk_points_none_clear(uint slots[VELK_LIGHT_SLOTS])
 {
     uint codes = 0u;
@@ -324,9 +308,6 @@ void velk_points_trace_point(uint pool, uint i, uint frame, uint counts[VELK_LIG
             }
         }
     }
-    // The light the sun pass shades (VELK_POOL_SUN_SKIP), for a record drawn opaque: its slot is
-    // traced as one without a light, nothing to cast, its choice kept as stored.
-    velk_points_leave_sun(pool, kind, slots);
 
     // A vertex, or a piece's point in a triangle at weights of its corners.
     uint vertex_word = VELK_LIGHT_WORDS.data[cluster + VELK_LOD_CLUSTER_VERTEX];

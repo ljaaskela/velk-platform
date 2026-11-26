@@ -270,7 +270,6 @@ set(VELK_RENDER_GLSL_SOURCES
     shaders/shadow_soften_main.glsl
     shaders/shadow_tiles_main.glsl
     shaders/sort.glsl
-    shaders/sun_visibility.glsl
     shaders/tiny_add.glsl
     shaders/tiny_draw.glsl
     shaders/trace.glsl

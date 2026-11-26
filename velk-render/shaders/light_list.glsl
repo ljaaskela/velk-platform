@@ -85,17 +85,15 @@ void velk_light_list_at(uint pool, uint word, uint bw, uint first, uint entry_fi
     // finer points' over it after.
     bool never = VELK_LIGHT_WORDS.data[at - 1u] == VELK_LIGHT_NONE;
     uint list = !coarse ? VELK_LIGHT_LIST_FINE : never ? VELK_LIGHT_LIST_UNTRACED : VELK_LIGHT_LIST_COARSE;
-    // Its rays: a ray each of its record's lights it is due, the sun pass's left out for what is
-    // drawn opaque; every light the scene could give it when its record has none chosen yet.
-    uint sun = VELK_LIGHT_WORDS.data[pool + VELK_POOL_SUN_SKIP];
-    if ((VELK_LIGHT_WORDS.data[first + VELK_PAGE_KIND] & VELK_LIGHT_BLENDED) != 0u) sun = VELK_LIGHT_NONE;
+    // Its rays: a ray each of its record's lights it is due; every light the scene could give it
+    // when its record has none chosen yet.
     uint rays = 0u;
     if (VELK_LIGHT_WORDS.data[first + VELK_PAGE_SLOTS] == VELK_LIGHT_NONE) {
         rays = min(VELK_LIGHT_WORDS.data[pool + VELK_POOL_LIGHTS], VELK_LIGHT_SLOTS);
     } else {
         for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) {
             uint light = VELK_LIGHT_WORDS.data[first + VELK_PAGE_SLOTS + s];
-            if (light != VELK_LIGHT_NONE && light != sun && ((codes >> (4u * s)) & 15u) == VELK_LIGHT_BLOCKER_DUE) ++rays;
+            if (light != VELK_LIGHT_NONE && ((codes >> (4u * s)) & 15u) == VELK_LIGHT_BLOCKER_DUE) ++rays;
         }
     }
     atomicAdd(VELK_LIGHT_WORDS.data[pool + VELK_POOL_LIST_RAYS + list], max(rays, 1u));

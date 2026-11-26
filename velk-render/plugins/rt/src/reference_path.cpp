@@ -8,7 +8,6 @@
 #include <velk-render/frame/draw_call_emit.h>
 #include <velk-render/gpu_data.h>
 
-#include <cstdlib>
 #include <cstring>
 
 namespace velk {
@@ -26,18 +25,6 @@ VELK_GPU_STRUCT ReferencePushC
     uint32_t env[4];
     uint32_t more[4];
 };
-
-// A development aid: VELK_SUN_VISIBILITY=r shows the sun's visibility over its disk in place of
-// the image, r0 that of the ray to its middle alone (rt_reference_main_src's pc.more.x). 0 when
-// not set.
-uint32_t sun_visibility_mode()
-{
-    const char* v = std::getenv("VELK_SUN_VISIBILITY");
-    if (!v || v[0] != 'r') return 0u;
-    if (v[1] == 0) return 1u;
-    if (v[1] == '0' && v[2] == 0) return 2u;
-    return 0u;
-}
 
 constexpr uint64_t kFnvBasis = 0xcbf29ce484222325ULL;
 constexpr uint64_t kFnvPrime = 0x100000001b3ULL;
@@ -186,7 +173,6 @@ void ReferencePath::build_passes(IViewEntry& entry, const RenderView& render_vie
     pc.env[1] = render_view.env.texture_id;
     std::memcpy(&pc.env[2], &render_view.env.intensity, sizeof(float));
     std::memcpy(&pc.env[3], &render_view.env.rotation_rad, sizeof(float));
-    pc.more[0] = sun_visibility_mode();
 
     bool dirty = true;
     emit_cached_view_pass(vs.pass, dirty, "reference", graph, [&](CachedPassRecording& rec) {

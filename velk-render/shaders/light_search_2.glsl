@@ -311,11 +311,9 @@ void main()
     if (lane == 0u) {
         s_own = false;
         uint draw = light_words.data[entry + VELK_CLUSTER_ENTRY_DRAW];
-        // Seen from both sides, its points take light from either; of a blended draw (its
-        // clusters for rays only), the sun pass does not shade it.
+        // Seen from both sides, its points take light from either.
         uint kind_flags = draw != 0xFFFFFFFFu && (velk_draw_data.data[draw].flags & VELK_DRAW_DOUBLE_SIDED) != 0u
                         ? VELK_LIGHT_TWO_SIDED : 0u;
-        if ((light_words.data[entry + VELK_CLUSTER_ENTRY_FLAGS] & VELK_LOD_RAYS_ONLY) != 0u) kind_flags |= VELK_LIGHT_BLENDED;
         // Its own points, a point a vertex, and with its draw's indices to find its triangles'
         // corners, a root word a triangle, its pieces made as pixels read them. All threads make
         // them untraced and without roots, below.

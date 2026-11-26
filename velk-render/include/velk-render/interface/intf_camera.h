@@ -53,17 +53,6 @@ enum class DebugView : uint8_t
 };
 
 /**
- * @brief How the deferred path finds the sun's shadow. The sun is the first lit directional
- * light; other lights are not affected.
- */
-enum class SunPass : uint8_t
-{
-    Off,   ///< The sun is cached on the light points like every other light.
-    Hard,  ///< A ray a pixel to the sun's middle: hard shadows, the cheaper choice.
-    Soft,  ///< As Hard, softened over the penumbra the sun's size gives.
-};
-
-/**
  * @brief Camera render-trait defining how a scene is observed.
  *
  * Attached to a scene element. The world transform is supplied at
@@ -94,9 +83,6 @@ public:
         /// The GPU time in milliseconds the deferred path's light trace aims for a frame: the
         /// rays it casts follow what it took. 0 for no limit.
         (PROP, float, light_trace_ms, 4.f),
-        /// How the deferred path finds the sun's shadow. See SunPass. VELK_SUN_PASS=off|hard|soft
-        /// overrides it.
-        (PROP, SunPass, sun_pass, SunPass::Off),
         (PROP, ObjectRef, environment, {}), ///< Optional IEnvironment for skybox/background.
         /// What the deferred path shows in place of the lit image. VELK_VISIBILITY_DEBUG overrides it.
         (PROP, DebugView, debug_view, DebugView::None),

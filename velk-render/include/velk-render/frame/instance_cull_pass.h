@@ -1460,11 +1460,10 @@ inline void reserve_instance_cull(InstanceCullPass& state, const vector<IBatch::
                      static_cast<unsigned long long>(ctx.present_counter), counts[0], counts[3], counts[1], counts[2]);
             // One frame's counts (the debug block's LAST_RAYS_CAST on), with the frame they are of
             // (READ_STAMP as the sweep copied it), the view by its state as `light submit` names it.
-            uint32_t last[4] = {};
+            uint32_t last[3] = {};
             arena->read_at(pool.debug.offset() + uint64_t(kLightDebugLastRaysCast) * sizeof(uint32_t), last, sizeof(last));
-            VELK_LOG(I, "light frame %p,%u (now %llu): rays %u of the points, %u of the sun pass; pending %u",
-                     static_cast<const void*>(&state), last[3], static_cast<unsigned long long>(ctx.present_counter), last[0],
-                     last[1], last[2]);
+            VELK_LOG(I, "light frame %p,%u (now %llu): rays %u of the points; pending %u", static_cast<const void*>(&state),
+                     last[2], static_cast<unsigned long long>(ctx.present_counter), last[0], last[1]);
             for (uint32_t k = 0; k < kLightReadPixels; ++k) {
                 const uint32_t packed = r[k];
                 if (packed == kLightNone) continue;

@@ -4,8 +4,7 @@
 // (the nearest blocker code of the points the pixel reads); and for the tile, whether one is kept
 // from some of it and reaches some. The softened word starts as none. The first thread also
 // empties the list of tiles to soften. pc.spare0 is the soft shadows' first word, pc.spare3 the
-// pool, pc.spare4 and pc.spare2 the pixel ids' word and width, pc.spare5 kLightPixels; pc.mode 1
-// while the sun pass shades the sun, which is then not taken.
+// pool, pc.spare4 and pc.spare2 the pixel ids' word and width, pc.spare5 kLightPixels.
 
 // How much light `l` brings a surface at `p` facing `N`, as a luminance: a stand-in (`stand_in`
 // 0 or more) whichever way it faces, a thin sheet passing `transmission` of its light from both.
@@ -69,10 +68,9 @@ void main()
             bool points = velk_light_direct(pc.spare3, velk_pixel_ids(pc.spare4, pc.spare2, coord),
                                             velk_pixel_weights(pc.spare4, pc.spare2, coord), position.xyz, position.w,
                                             uintBitsToFloat(pc.spare5), lights, through, radiance, radiance_dir);
-            uint sun = (pc.mode & 1u) != 0u ? velk_sun_index() : VELK_LIGHT_NONE;
             for (uint k = 0u; k < VELK_LIGHT_SLOTS && points; ++k) {
                 uint i = lights[k];
-                if (i == VELK_LIGHT_NONE || i >= pc.light_count || i == sun || i > 0xFFFEu) continue;
+                if (i == VELK_LIGHT_NONE || i >= pc.light_count || i > 0xFFFEu) continue;
                 Light l = velk_light_at(pc.lights_base + i);
                 if (!velk_shadow_sized(l)) continue;
                 float w = velk_shadow_weight(l, position.xyz, N, stand_in, transmission);

@@ -1054,8 +1054,8 @@ layout(set = 1, binding = 16, std430) buffer VelkLightCellWords { uint data[]; }
 // is velk-render/shaders/light_area.glsl; this defines VELK_LIGHT_AREA_GLSL.
 #include <velk-render/glsl/light_area.inc>
 
-// The softening of shadows, for the sun pass's and the soft shadows' passes, and the soft
-// shadows' words the lighting reads (velk-render/shaders/shadow_soft.glsl, VELK_SHADOW_SOFT_GLSL;
+// The softening of shadows, for the soft shadows' passes, and the soft shadows' words the
+// lighting reads (velk-render/shaders/shadow_soft.glsl, VELK_SHADOW_SOFT_GLSL;
 // shadow_apply.glsl, VELK_SHADOW_APPLY_GLSL; shadow_pack_main.glsl, shadow_tiles_main.glsl and
 // shadow_soften_main.glsl, the soft shadows' passes).
 #include <velk-render/glsl/shadow_soft.inc>
@@ -1183,11 +1183,6 @@ vec3 fresnel_schlick_roughness(float cos_theta, vec3 F0, float F90, float roughn
 // blended surfaces' fragments. Follows VELK_SURFACE_LIGHT_GLSL and velk_area_irradiance, with
 // push constants `pc` with light_count, lights_base and ltc_magnitude_id.
 #define VELK_SURFACE_LIGHTS_GLSL R"(
-// The light the sun pass shades (ICamera::sun_pass), with what of it gets through, in place of what
-// the points keep of it: VELK_LIGHT_NONE (all bits) for none.
-uint velk_sun_light = 0xFFFFFFFFu;
-float velk_sun_through = 1.0;
-
 // Light `i`'s diffuse light and highlight, `through` of it getting through, added to the sums.
 // As velk_surface_lights says.
 void velk_surface_light(uint i, float through, vec3 world_pos, vec3 N, vec3 V, vec3 F0, float F90, float roughness,
@@ -1246,8 +1241,7 @@ void velk_surface_light(uint i, float through, vec3 world_pos, vec3 N, vec3 V, v
 
 // At `world_pos` (from the camera) facing `N`, seen along `V`: through what the points of light
 // keep when `points` (the lights `point_lights` and what of each gets through), else every light
-// unshadowed; the sun pass's light (velk_sun_light) once, through what it says, whether the
-// points keep it or not. Area lights in closed form. A stand-in for what it is too small to draw
+// unshadowed. Area lights in closed form. A stand-in for what it is too small to draw
 // (`stand_in` its flatness, velk_stand_in_flatness; below 0 for a surface as drawn) takes diffuse
 // light as a rough ball would, toward its face's as it is flatter, that face turned to the viewer.
 // A thin sheet passing `transmission` of its diffuse light takes that share from behind it, the
@@ -1265,12 +1259,7 @@ void velk_surface_lights(bool points, uint point_lights[VELK_LIGHT_SLOTS], float
     for (uint k = 0u; k < light_count; ++k) {
         if (points && point_lights[k] == VELK_LIGHT_NONE) continue;
         uint i = points ? point_lights[k] : k;
-        if (i == velk_sun_light) continue;
         velk_surface_light(i, points ? point_through[k] : 1.0, world_pos, N, V, F0, F90, roughness, stand_in, transmission, direct,
-                           highlights, area_irr, area_spec);
-    }
-    if (velk_sun_light != 0xFFFFFFFFu) {
-        velk_surface_light(velk_sun_light, velk_sun_through, world_pos, N, V, F0, F90, roughness, stand_in, transmission, direct,
                            highlights, area_irr, area_spec);
     }
 }
@@ -1662,16 +1651,8 @@ void main()
 
 [[maybe_unused]] constexpr string_view deferred_lighting_main_src = R"(
 #define VELK_LIGHT_WORDS velk_light_cell_words
-)" VELK_LIGHT_POOL_GLSL VELK_LIGHT_SLOTS_GLSL VELK_LIGHT_READ_GLSL VELK_PROBE_GLSL VELK_SURFACE_LIGHTS_GLSL VELK_SUN_VISIBILITY_GLSL
+)" VELK_LIGHT_POOL_GLSL VELK_LIGHT_SLOTS_GLSL VELK_LIGHT_READ_GLSL VELK_PROBE_GLSL VELK_SURFACE_LIGHTS_GLSL
     VELK_SHADOW_SOFT_GLSL VELK_SHADOW_APPLY_GLSL R"(
-// The sun pass's terms in pc.mode: its image plus one in the low bits, 0 for none (sun_rays_main_src,
-// or sun_soften_main_src softened), and in the top four (VELK_SUN_VIEW) what to show in place of
-// the lit image: 0 the lit image, 1 what the lighting takes of the sun, and of the softening 2
-// the penumbra's width over 256 pixels, 3 the blocked pixels its search found over 17, 4 the
-// pixels its filter took over 17; 5 the surface's N.L toward the sun.
-#define VELK_SUN_RAYS_MASK 0x0FFFFFFFu
-#define VELK_SUN_SHOW_SHIFT 28u
-
 // The bounce light at a pixel from the screen probes around it (light_probes_main_src, this
 // frame's store at pc.spare1): the four nearest, each seen from `n` (velk_probe_eval), by how
 // near they are on screen, how much their normal agrees with `n` and how near `pos` is to their
@@ -1739,14 +1720,8 @@ void main()
     vec3 world_pos = position.xyz;
     vec4 mat = velk_texture(pc.material_tex_id, uv);
 
-    // No surface: the environment along the view ray. Showing the sun's visibility: clear.
-    uint sun_show = pc.mode >> VELK_SUN_SHOW_SHIFT;
-    bool show_sun = sun_show != 0u;
+    // No surface: the environment along the view ray.
     if (dot(world_n, world_n) < 1e-6) {
-        if (show_sun) {
-            imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord, vec4(1.0));
-            return;
-        }
         vec2 ndc = uv * 2.0 - 1.0;
         mat4 inv_vp = VELK_GLOBALS.inverse_view_projection;
         vec4 near_h = inv_vp * vec4(ndc, 1.0, 1.0);
@@ -1772,10 +1747,6 @@ void main()
     if (stand_in >= 0.0) roughness = mix(1.0, roughness, stand_in);
 
     vec3 color = albedo.rgb;
-    if (show_sun && lighting_mode == 0u) {
-        imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord, vec4(1.0));
-        return;
-    }
     if (lighting_mode != 0u) {
         vec3 N = normalize(world_n);
         vec3 V = normalize(-world_pos);
@@ -1804,12 +1775,6 @@ void main()
         }
         // Counted, for the log: a lit pixel whose light is not traced yet.
         if (!points && pc.spare3 != VELK_LIGHT_NONE) atomicAdd(velk_light_cell_words.data[pc.spare3 + VELK_POOL_UNTRACED_PIXELS], 1u);
-        // The sun pass: what of the sun gets through at this pixel, in place of what its points keep.
-        uint sun_rays = pc.mode & VELK_SUN_RAYS_MASK;
-        if (sun_rays != 0u) {
-            velk_sun_light = velk_sun_index();
-            velk_sun_through = texelFetch(velk_textures[nonuniformEXT(sun_rays - 1u)], coord, 0).x;
-        }
         // The soft shadows (their first word plus one in pc.cam_pos.w's bits, 0 for none): what of
         // each light their softening spread over its penumbra, in place of what the points keep.
         uint shadow_base = floatBitsToUint(pc.cam_pos.w);
@@ -1823,7 +1788,7 @@ void main()
             if (points) {
                 for (uint k = 0u; k < VELK_LIGHT_SLOTS; ++k) {
                     uint i = point_lights[k];
-                    if (i == VELK_LIGHT_NONE || i >= pc.light_count || i == velk_sun_light) continue;
+                    if (i == VELK_LIGHT_NONE || i >= pc.light_count) continue;
                     if (velk_light_strength(velk_light_at(pc.lights_base + i), world_pos) <= 0.0) continue;
                     uint s = velk_light_codes_slot(i);
                     if (s < VELK_LIGHT_SLOTS && (g_light_pending_slots & (1u << s)) != 0u) ++pending;
@@ -1831,7 +1796,6 @@ void main()
             } else {
                 uint count = min(pc.light_count, 2048u);
                 for (uint i = 0u; i < count; ++i) {
-                    if (i == velk_sun_light) continue;
                     if (velk_light_strength(velk_light_at(pc.lights_base + i), world_pos) > 0.0) ++pending;
                 }
             }
@@ -1839,30 +1803,6 @@ void main()
         }
 #endif
 )" R"(
-        // Showing what the lighting takes of the sun, from the sun pass or its points; magenta where
-        // its points are not traced yet.
-        if (show_sun) {
-            uint sun = velk_sun_index();
-            vec3 shown = vec3(1.0, 0.0, 1.0);
-            if (sun_rays != 0u || sun == VELK_LIGHT_NONE) {
-                shown = vec3(velk_sun_through);
-            } else if (points) {
-                shown = vec3(0.0);
-                for (uint k = 0u; k < VELK_LIGHT_SLOTS; ++k) {
-                    if (point_lights[k] == sun) shown = vec3(point_through[k]);
-                }
-            }
-            // The softening's own terms (sun_soften_main_src's z and w).
-            if (sun_show >= 2u && sun_show <= 4u && sun_rays != 0u) {
-                vec4 terms = texelFetch(velk_textures[nonuniformEXT(sun_rays - 1u)], coord, 0);
-                float found = floor(terms.w / 32.0);
-                shown = vec3(sun_show == 2u ? terms.z / 256.0 : sun_show == 3u ? found / 17.0 : (terms.w - found * 32.0) / 17.0);
-            }
-            // The surface's N.L toward the sun.
-            if (sun_show == 5u && sun != VELK_LIGHT_NONE) shown = vec3(max(dot(normalize(world_n), -velk_light_at(pc.lights_base + sun).direction.xyz), 0.0));
-            imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord, vec4(shown, 1.0));
-            return;
-        }
         vec3 direct;
         vec3 highlights;
         vec3 area_irr;
@@ -1964,181 +1904,6 @@ void main()
 }
 )";
 
-// The sun pass (ICamera::sun_pass): a ray a pixel to the middle of the sun (velk_sun_visibility), from
-// the G-buffer's surface, for the lighting to take in place of what the sun's points keep. Writes
-// to pc.output_image_id the visibility in x and in y how far away what was in the way is: 0 where
-// nothing was, -1 where the surface faces away from the sun. Clear where there is no surface or
-// no sun. Built on the deferred prelude.
-[[maybe_unused]] constexpr string_view sun_rays_main_src = VELK_SUN_VISIBILITY_GLSL R"(
-void main()
-{
-    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
-    if (coord.x >= int(pc.width) || coord.y >= int(pc.height)) return;
-    vec2 uv = (vec2(coord) + 0.5) / vec2(float(pc.width), float(pc.height));
-    vec3 n = velk_texture(pc.normal_tex_id, uv).xyz;
-    uint sun = velk_sun_index();
-    vec4 result = vec4(1.0, 0.0, 0.0, 1.0);
-    if (dot(n, n) >= 1e-6 && sun != 0xFFFFFFFFu) {
-        vec3 pos = velk_texture(pc.worldpos_tex_id, uv).xyz;
-        // A thin sheet passing light through is lit from the side the sun is on.
-        bool two_sided = velk_texture(pc.emissive_tex_id, uv).a > 0.0;
-        bool stand_in = velk_stand_in_unpack(velk_texture(pc.material_tex_id, uv).a) >= 0.0;
-        float blocker_t;
-        bool facing_away;
-        result.x = velk_sun_visibility(pos, normalize(n), two_sided, stand_in, -velk_light_at(pc.lights_base + sun).direction.xyz,
-                                       blocker_t, facing_away);
-        result.y = facing_away ? -1.0 : blocker_t;
-    }
-    imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord, result);
-}
-)";
-
-// The sun pass as sun_rays_main_src, which also adds the rays that walked to the debug block's
-// SUN_RAYS (VELK_POOL_DEBUG of the pool whose word is in pc.spare3, VELK_LIGHT_NONE for none), for the log: used only while
-// VELK_LIGHT_READ is set, so that the sun pass otherwise carries no count. Built on the deferred
-// prelude with the light grid.
-[[maybe_unused]] constexpr string_view sun_rays_count_main_src = R"(
-#define VELK_LIGHT_WORDS velk_light_cell_words
-)" VELK_LIGHT_POOL_HEADER_GLSL VELK_SUN_VISIBILITY_GLSL R"(
-shared uint s_sun_rays;
-
-void main()
-{
-    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
-    if (gl_LocalInvocationIndex == 0u) s_sun_rays = 0u;
-    barrier();
-    if (coord.x < int(pc.width) && coord.y < int(pc.height)) {
-        vec2 uv = (vec2(coord) + 0.5) / vec2(float(pc.width), float(pc.height));
-        vec3 n = velk_texture(pc.normal_tex_id, uv).xyz;
-        uint sun = velk_sun_index();
-        vec4 result = vec4(1.0, 0.0, 0.0, 1.0);
-        if (dot(n, n) >= 1e-6 && sun != 0xFFFFFFFFu) {
-            vec3 pos = velk_texture(pc.worldpos_tex_id, uv).xyz;
-            // A thin sheet passing light through is lit from the side the sun is on.
-            bool two_sided = velk_texture(pc.emissive_tex_id, uv).a > 0.0;
-            bool stand_in = velk_stand_in_unpack(velk_texture(pc.material_tex_id, uv).a) >= 0.0;
-            float blocker_t;
-            bool facing_away;
-            result.x = velk_sun_visibility(pos, normalize(n), two_sided, stand_in,
-                                           -velk_light_at(pc.lights_base + sun).direction.xyz, blocker_t, facing_away);
-            result.y = facing_away ? -1.0 : blocker_t;
-            if (!facing_away) atomicAdd(s_sun_rays, 1u);
-        }
-        imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord, result);
-    }
-    barrier();
-    if (gl_LocalInvocationIndex == 0u && s_sun_rays != 0u && pc.spare3 != 0xFFFFFFFFu) {
-        uint light_debug = velk_light_cell_words.data[pc.spare3 + VELK_POOL_DEBUG];
-        if (light_debug != 0xFFFFFFFFu) atomicAdd(velk_light_cell_words.data[light_debug + VELK_DEBUG_SUN_RAYS], s_sun_rays);
-    }
-}
-)";
-
-// The sun pass's softening (SunPass::Soft): the hard visibility of the sun rays (pc.spare0,
-// sun_rays_main_src) spread over the penumbra the sun's disk would give, as wide as the mean
-// distance to what is in the way says, in the same frame. First that distance, from the blocked
-// pixels around within kSunSearchPixels, the pixel's own too; then the visibility of the pixels
-// within the penumbra. Both take only pixels on a surface like the pixel's (its plane, the way
-// it faces) and never one facing away from the sun, and keep the hard visibility where they find
-// nothing. kSunTaps a disk each, turned by a fixed amount a pixel, so that a still view stays
-// still. The penumbra is capped at kSunPenumbraPixels. Writes the visibility to x of
-// pc.output_image_id, its y as the sun rays', and for VELK_SUN_VIEW the penumbra's width in pixels
-// before the cap in z, 0 where there is none, and in w the blocked pixels the search found times
-// 32 plus the pixels the filter took. Built on the deferred prelude.
-[[maybe_unused]] constexpr string_view sun_soften_main_src = VELK_SUN_VISIBILITY_GLSL VELK_SHADOW_SOFT_GLSL R"(
-void main()
-{
-    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
-    if (coord.x >= int(pc.width) || coord.y >= int(pc.height)) return;
-    vec4 hard = texelFetch(velk_textures[nonuniformEXT(pc.spare0)], coord, 0);
-    vec3 n = texelFetch(velk_textures[nonuniformEXT(pc.normal_tex_id)], coord, 0).xyz;
-    uint sun = velk_sun_index();
-    vec3 p = texelFetch(velk_textures[nonuniformEXT(pc.worldpos_tex_id)], coord, 0).xyz;
-    // Pixels a world unit spans at this depth: from the projection (view_projection works on
-    // positions from the camera, as the G-buffer's are), its w 1 for an orthographic one.
-    mat4 vp = VELK_GLOBALS.view_projection;
-    float clip_w = (vp * vec4(p, 1.0)).w;
-    if (hard.y < 0.0 || dot(n, n) < 1e-6 || sun == 0xFFFFFFFFu || !(clip_w > 1e-6)) {
-        imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord, vec4(hard.xy, 0.0, 0.0));
-        return;
-    }
-    n = normalize(n);
-    float per_unit = length(vec3(vp[0][1], vp[1][1], vp[2][1])) * VELK_GLOBALS.viewport.y * 0.5 / clip_w;
-    float spread = tan(max(velk_light_at(pc.lights_base + sun).params.w, 0.0));
-    uint h = (uint(coord.x) * 0x8da6b343u) ^ (uint(coord.y) * 0xd8163841u);
-    h ^= h >> 16; h *= 0x7feb352du; h ^= h >> 15;
-    float turn = float(h & 0xFFFFu) / 65536.0 * 6.2831853;
-
-    // The mean distance to what is in the way, from the blocked pixels around and this one.
-    float sum = hard.y > 0.0 ? hard.y : 0.0;
-    float count = hard.y > 0.0 ? 1.0 : 0.0;
-    for (uint k = 0u; k < kSunTaps; ++k) {
-        ivec2 q = velk_sun_tap(coord, k, kSunSearchPixels, turn);
-        if (q.x < 0 || q.y < 0 || q.x >= int(pc.width) || q.y >= int(pc.height)) continue;
-        vec4 hq = texelFetch(velk_textures[nonuniformEXT(pc.spare0)], q, 0);
-        if (hq.y <= 0.0) continue;
-        vec3 pq;
-        if (!velk_sun_alike(q, p, n, pq)) continue;
-        sum += hq.y;
-        count += 1.0;
-    }
-    // The penumbra on the receiver: the sun's disc as wide as the mean distance to what is in the
-    // way says, perpendicular to the light, carried along the light onto the pixel's plane (an
-    // ellipse, the longer the more the plane leans from the light) and projected to the screen.
-    // A stand-in has no plane, and a plane nearly along the light would stretch it without end: a
-    // disc in the screen for both. Scaled down as a whole where it reaches past kSunPenumbraPixels.
-    float world_radius = count > 0.0 ? sum / count * spread : 0.0;
-    vec3 L = -velk_light_at(pc.lights_base + sun).direction.xyz;
-    float lean = dot(n, L);
-    bool stand_in = velk_stand_in_unpack(texelFetch(velk_textures[nonuniformEXT(pc.material_tex_id)], coord, 0).a) >= 0.0
-                 || abs(lean) < 0.15;
-    vec3 axis_a = normalize(abs(L.y) < 0.9 ? cross(L, vec3(0.0, 1.0, 0.0)) : cross(L, vec3(1.0, 0.0, 0.0)));
-    vec3 axis_b = cross(L, axis_a);
-    vec2 centre = vec2(coord) + 0.5;
-    // Each tap's offset in the screen, NaN-free: a tap landing behind the camera has none, and is
-    // left out. The widest of them is the penumbra's width; all are scaled down together when it
-    // passes the cap.
-    vec2 offsets[kSunTaps];
-    uint landed = 0u;
-    float wide = 0.0;
-    for (uint k = 0u; k < kSunTaps; ++k) {
-        float a = float(k) * 2.39996323 + turn + 1.3;
-        float r = sqrt((float(k) + 0.5) / float(kSunTaps));
-        offsets[k] = vec2(0.0);
-        if (stand_in) {
-            offsets[k] = vec2(cos(a), sin(a)) * r * world_radius * per_unit;
-        } else {
-            vec2 px;
-            if (!velk_sun_land(p, n, L, lean, (axis_a * cos(a) + axis_b * sin(a)) * r * world_radius, vp, px)) continue;
-            offsets[k] = px - centre;
-        }
-        landed |= 1u << k;
-        wide = max(wide, length(offsets[k]));
-    }
-    float scale = wide > kSunPenumbraPixels ? kSunPenumbraPixels / wide : 1.0;
-    if (count == 0.0 || wide * scale < 0.5) {
-        imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord, vec4(hard.xy, wide, count * 32.0));
-        return;
-    }
-
-    // The visibility over the penumbra, of the pixels on a surface like this one.
-    float seen = hard.x;
-    float weight = 1.0;
-    for (uint k = 0u; k < kSunTaps; ++k) {
-        if ((landed & (1u << k)) == 0u) continue;
-        ivec2 q = ivec2(floor(centre + offsets[k] * scale));
-        if (q.x < 0 || q.y < 0 || q.x >= int(pc.width) || q.y >= int(pc.height)) continue;
-        vec4 hq = texelFetch(velk_textures[nonuniformEXT(pc.spare0)], q, 0);
-        if (hq.y < 0.0) continue;
-        vec3 pq;
-        if (!velk_sun_alike(q, p, n, pq)) continue;
-        seen += hq.x;
-        weight += 1.0;
-    }
-    imageStore(gStorageImagesF16[nonuniformEXT(pc.output_image_id)], coord, vec4(seen / weight, hard.y, wide, count * 32.0 + weight));
-}
-)";
-
 // The soft shadows from the points of light (DeferredPath::emit_shadow_soft_passes), three passes
 // built on the deferred prelude with the light grid: what each pixel's lights with a size are
 // (shadow_pack_main.glsl), the tiles near an edge to soften (shadow_tiles_main.glsl), and the
@@ -2146,8 +1911,7 @@ void main()
 [[maybe_unused]] constexpr string_view shadow_pack_main_src = R"(
 #define VELK_LIGHT_WORDS velk_light_cell_words
 #define VELK_LIGHT_BLOCKERS
-)" VELK_LIGHT_POOL_GLSL VELK_LIGHT_SLOTS_GLSL VELK_LIGHT_READ_GLSL VELK_SUN_VISIBILITY_GLSL VELK_SHADOW_SOFT_GLSL
-    VELK_SHADOW_PACK_MAIN_GLSL;
+)" VELK_LIGHT_POOL_GLSL VELK_LIGHT_SLOTS_GLSL VELK_LIGHT_READ_GLSL VELK_SHADOW_SOFT_GLSL VELK_SHADOW_PACK_MAIN_GLSL;
 [[maybe_unused]] constexpr string_view shadow_tiles_main_src = R"(
 #define VELK_LIGHT_WORDS velk_light_cell_words
 )" VELK_LIGHT_POOL_GLSL VELK_SHADOW_SOFT_GLSL VELK_SHADOW_TILES_MAIN_GLSL;
@@ -2770,47 +2534,7 @@ vec3 reference_path(Ray ray, out vec3 first)
 }
 )"
 
-inline constexpr string_view rt_reference_main_src = VELK_REFERENCE_PATH_GLSL VELK_SUN_VISIBILITY_GLSL R"(
-// VELK_SUN_VISIBILITY's modes, in pc.more.x: 1 for the sun's visibility over its disk at the
-// surface seen through each pixel's middle, 2 for that of the ray to its middle alone. The first
-// surface a pixel sees is the first not mostly clear, as the deferred path draws it.
-float reference_sun_visibility(Ray ray, bool whole_disk)
-{
-    uint sun = velk_sun_index();
-    if (sun == 0xFFFFFFFFu) return 1.0;
-    for (uint layer = 0u; layer < 8u; ++layer) {
-        RayHit hit;
-        if (!trace_closest_hit(ray, 1e30, hit)) return 1.0;
-        uint material;
-        vec3 shading = velk_hit_shading_normal(hit, ray.dir);
-        EvalContext ctx = velk_hit_context(hit, ray.dir, ray.origin + hit.t * ray.dir, shading, material);
-        reference_pick_light(ctx.rel_pos, shading);
-        velk_hit_diffuse = vec3(0.0);
-        velk_hit_transmission = 0.0;
-        BrdfSample bs = velk_resolve_fill(material, ctx);
-        if (bs.emission.a < 0.5) {
-            ray.origin = ctx.rel_pos + ray.dir * 0.01;
-            continue;
-        }
-        // The normal it was shaded with, turned to the side the pixel sees.
-        vec3 side = dot(hit.plane, ray.dir) > 0.0 ? -hit.plane : hit.plane;
-        vec3 n = dot(shading, side) < 0.0 ? -shading : shading;
-        Light light = velk_light_at(pc.lights_base + sun);
-        vec3 dir = -light.direction.xyz;
-        if (whole_disk) {
-            vec3 a = normalize(abs(dir.y) < 0.9 ? cross(dir, vec3(0.0, 1.0, 0.0)) : cross(dir, vec3(1.0, 0.0, 0.0)));
-            vec3 b = cross(dir, a);
-            float spread = tan(max(light.params.w, 0.0)) * sqrt(rng_next_float());
-            float turn = 6.2831853 * rng_next_float();
-            dir = normalize(dir + (a * cos(turn) + b * sin(turn)) * spread);
-        }
-        float blocker_t;
-        bool facing_away;
-        return velk_sun_visibility(ctx.rel_pos, n, velk_hit_transmission > 0.0, hit.stand_in >= 0.0, dir, blocker_t, facing_away);
-    }
-    return 1.0;
-}
-
+inline constexpr string_view rt_reference_main_src = VELK_REFERENCE_PATH_GLSL R"(
 void main()
 {
     ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
@@ -2820,21 +2544,6 @@ void main()
 
     uint frame = VELK_GLOBALS.present_counter;
     vec4 held = pc.shapes_base != 0u ? vec4(0.0) : texelFetch(velk_textures[nonuniformEXT(pc.extras.x)], coord, 0);
-
-    // The sun's visibility, at every pixel every frame, through its middle.
-    if (pc.more.x != 0u) {
-        rng_init(uvec2(coord), frame);
-        vec2 ndc = (vec2(coord) + 0.5) / vec2(float(w), float(h)) * 2.0 - 1.0;
-        vec4 near_h = VELK_GLOBALS.inverse_view_projection * vec4(ndc, 1.0, 1.0);
-        vec4 far_h = VELK_GLOBALS.inverse_view_projection * vec4(ndc, 0.0, 1.0);
-        Ray primary;
-        primary.origin = near_h.xyz / near_h.w;
-        primary.dir = normalize(far_h.xyz / far_h.w - primary.origin);
-        held += vec4(vec3(reference_sun_visibility(primary, pc.more.x == 1u)), 1.0);
-        imageStore(gStorageImagesF32[nonuniformEXT(pc.extras.x)], coord, held);
-        imageStore(gStorageImagesF16[nonuniformEXT(pc.extras.y)], coord, vec4(held.rgb / max(held.a, 1.0), 1.0));
-        return;
-    }
 
     const uint kShare = 8u;
     if ((uint(coord.x) + uint(coord.y) * 3u + frame) % kShare == 0u) {

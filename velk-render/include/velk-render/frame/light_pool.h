@@ -90,7 +90,6 @@ inline bool ensure_light_pool(LightPool& pool, IGpuArena& arena, uint64_t device
     initial[kLightPoolUntracedPointsWord] = base + static_cast<uint32_t>(points_word);
     initial[kLightPoolCoarsePointsWord] = base + static_cast<uint32_t>(points_word + point_list_words);
     initial[kLightPoolFinePointsWord] = base + static_cast<uint32_t>(points_word + 2u * point_list_words);
-    initial[kLightPoolSunSkip] = kLightNone;
     // A development aid: VELK_LIGHT_READ=x,y;x,y;... names up to kLightReadPixels pixels whose
     // lighting terms the lighting writes and the log prints, in a debug block of its own made only
     // then (kLightPoolDebug).

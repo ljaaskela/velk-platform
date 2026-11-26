@@ -85,13 +85,6 @@ inline constexpr string_view light_changes_main_src = VELK_LIGHT_CHANGES_MAIN_1_
 // a cell's words, and finding one.
 #include <velk-render/glsl/probe_cell.inc>
 
-// The sun's visibility from a surface by one ray: the deferred path's sun pass (sun_rays_main_src),
-// the probes' and reflections' hits (light_probes_main_src) and the reference's visibility modes
-// cast it alike. Needs the walk (velk_trace.glsl), velk_light_at and push constants `pc` with
-// light_count and lights_base. Its source is velk-render/shaders/sun_visibility.glsl; this defines
-// VELK_SUN_VISIBILITY_GLSL.
-#include <velk-render/glsl/sun_visibility.inc>
-
 /**
  * The screen probes' gather, in two dispatches. The first, a thread a probe, decides what each
  * probe does with its cell (velk_probes_decide): those that read it are done, those that cast
@@ -119,7 +112,7 @@ inline constexpr string_view light_changes_main_src = VELK_LIGHT_CHANGES_MAIN_1_
 #include <velk-render/glsl/light_probes_main_4.inc>
 #include <velk-render/glsl/light_eval.inc>
 #include <velk-render/glsl/light_area.inc>
-inline constexpr string_view light_probes_main_src = VELK_SUN_VISIBILITY_GLSL VELK_LIGHT_PROBES_MAIN_1_GLSL
+inline constexpr string_view light_probes_main_src = VELK_LIGHT_PROBES_MAIN_1_GLSL
     VELK_LIGHT_POOL_GLSL VELK_LIGHT_PROBES_MAIN_2_GLSL VELK_PROBE_GLSL VELK_PROBE_WRITE_GLSL VELK_PROBE_CELL_GLSL
     VELK_LIGHT_PROBES_MAIN_3_GLSL VELK_LIGHT_SLOTS_GLSL VELK_LIGHT_ADD_GLSL VELK_LIGHT_EVAL_GLSL
     VELK_LIGHT_AREA_GLSL VELK_LIGHT_PROBES_MAIN_4_GLSL;

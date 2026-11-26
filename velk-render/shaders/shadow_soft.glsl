@@ -1,5 +1,5 @@
-// What the softening of shadows shares, for shaders built on the deferred prelude: the sun pass's
-// (sun_soften_main_src) and the soft shadows' from the points of light (shadow_soften_main_src).
+// What the softening of shadows from the points of light (shadow_soften_main_src) uses, for shaders
+// built on the deferred prelude.
 
 // Taps a disk each, its blocker search's reach and the widest a penumbra may be, in pixels.
 const uint kSunTaps = 16u;

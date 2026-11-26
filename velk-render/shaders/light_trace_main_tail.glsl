@@ -181,24 +181,6 @@ void main()
                 if (coarse_first != VELK_LIGHT_NONE) VELK_LIGHT_WORDS.data[coarse_first + VELK_PAGE_SLOTS + s] = chosen[s];
             }
         }
-        // The light the sun pass shades, for a cluster of an opaque draw or its points' coarse light:
-        // its rays cast nothing (velk_points_leave_sun), its choice kept as stored. A quad node or a
-        // whole mesh, whose draw this does not know, traces it.
-        uint sun_kind = VELK_LIGHT_BLENDED;
-        if (coarse_first != VELK_LIGHT_NONE) {
-            sun_kind = VELK_LIGHT_WORDS.data[coarse_first + VELK_PAGE_KIND];
-        } else if (kind == VELK_LIGHT_TRACE_CLUSTER) {
-            uint entry = VELK_LIGHT_WORDS.data[at + VELK_RECORD_ENTRY];
-            if (velk_cut_for_rays(entry)) entry &= ~VELK_CUT_FOR_RAYS;
-            if (entry < VELK_CUT_RAY_QUAD) {
-                sun_kind = (VELK_LIGHT_WORDS.data[entry + VELK_CLUSTER_ENTRY_FLAGS] & VELK_LOD_RAYS_ONLY) != 0u ? VELK_LIGHT_BLENDED : 0u;
-            }
-        }
-        uint traced[VELK_LIGHT_SLOTS];
-        for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) traced[s] = s_slots[s];
-        if (velk_points_leave_sun(pool, sun_kind, traced)) {
-            for (uint s = 0u; s < VELK_LIGHT_SLOTS; ++s) s_slots[s] = traced[s];
-        }
     }
     barrier();
     // Seeded from its record's one value (velk_light_seeded), whose lights these are: traced.

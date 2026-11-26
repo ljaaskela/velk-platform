@@ -7,9 +7,6 @@
 #define VELK_LIGHT_DIRECT_PAGES 15u
 #define VELK_LIGHT_PIECED 0x40000000u
 #define VELK_LIGHT_TWO_SIDED 0x20000000u
-// A page's kind: its record's draw is blended, which the sun pass does not shade
-// (VELK_POOL_SUN_SKIP), so its points trace the sun as every other light.
-#define VELK_LIGHT_BLENDED 0x10000000u
 #define VELK_LIGHT_SLOTS 8u
 #define VELK_LIGHT_ONE_TRACED 0x40000000u
 #define VELK_LIGHT_ONE_ASKED 0x20000000u

@@ -84,9 +84,6 @@ public:
     /// Sets whether the deferred path skips drawing what is hidden behind other geometry. On by default.
     void set_occlusion_culling(bool v) { write_state_value<ICamera>(&ICamera::State::occlusion_culling, v); }
 
-    /// Sets how the deferred path finds the sun's shadow. SunPass::Off by default.
-    void set_sun_pass(SunPass v) { write_state_value<ICamera>(&ICamera::State::sun_pass, v); }
-
     /// Attaches an environment (equirect HDR) to this camera. The deferred
     /// and RT paths sample it as the ambient / IBL term and draw it as the
     /// background sky. Pass a null Ptr to clear the environment.
